@@ -33,7 +33,6 @@
         .ob-titulo { text-align: center; padding: 12px 10px 5px; font-weight: bold; font-size: 15px; background-color: #131722; color: #d1d4dc;}
         .ob-subtitulo { text-align: center; font-size: 11px; color: #848e9c; padding-bottom: 10px; border-bottom: 1px solid #2B2B43; background-color: #131722; display: flex; justify-content: center; align-items: center; gap: 5px;}
         
-        /* Estilos para el nuevo input numérico */
         .input-rango {
             background-color: #2B2B43;
             color: #FFD700;
@@ -89,7 +88,7 @@
         <div id="orderbook-container">
             <div class="ob-titulo">TOP 3 MUROS (INTENCIÓN)</div>
             <div class="ob-subtitulo">
-                Rango: <input type="number" id="input-rango" class="input-rango" value="5" min="1" max="50">% | Agrupado: $50
+                Rango: <input type="number" id="input-rango" class="input-rango" value="2" min="1" max="10">% | Agrupado: $50
             </div>
             
             <div class="seccion-panel">
@@ -111,7 +110,6 @@
     </div>
 
     <script>
-        // --- 1. CONFIGURACIÓN DEL GRÁFICO ---
         const container = document.getElementById('chart-container');
         const chartOptions = { width: container.clientWidth, height: container.clientHeight, layout: { textColor: '#d1d4dc', background: { type: 'solid', color: '#131722' } }, grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } }, crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, rightPriceScale: { borderColor: '#2B2B43' }, timeScale: { borderColor: '#2B2B43', timeVisible: true, secondsVisible: false }, };
         const chart = LightweightCharts.createChart(container, chartOptions);
@@ -138,6 +136,8 @@
 
         function cargarDatos(temporalidad) {
             if (binanceSocket !== null) binanceSocket.close();
+            
+            // PRIMERO: Descargamos la historia
             fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=1000`)
                 .then(r => r.json())
                 .then(datos => {
@@ -149,17 +149,21 @@
                         datosDelta.push({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
                         ultimoTiempoVela = tiempo; 
                     });
+                    
+                    // Inyectamos la historia al gráfico
                     candlestickSeries.setData(velas); deltaSeries.setData(datosDelta); chart.timeScale().fitContent(); 
-                });
 
-            binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
-            binanceSocket.onmessage = function (e) {
-                const k = JSON.parse(e.data).k; let tiempo = Math.floor(k.t / 1000); let apertura = parseFloat(k.o); let cierre = parseFloat(k.c);
-                let comprasMercado = parseFloat(k.V); let ventasMercado = parseFloat(k.v) - comprasMercado; let valorDelta = comprasMercado - ventasMercado;
-                candlestickSeries.update({ time: tiempo, open: apertura, high: parseFloat(k.h), low: parseFloat(k.l), close: cierre });
-                deltaSeries.update({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
-                ultimoTiempoVela = tiempo; 
-            };
+                    // SOLUCIÓN AL ERROR DEL GRÁFICO:
+                    // SEGUNDO: Recién cuando la historia está lista, abrimos la conexión en vivo
+                    binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
+                    binanceSocket.onmessage = function (e) {
+                        const k = JSON.parse(e.data).k; let tiempo = Math.floor(k.t / 1000); let apertura = parseFloat(k.o); let cierre = parseFloat(k.c);
+                        let comprasMercado = parseFloat(k.V); let ventasMercado = parseFloat(k.v) - comprasMercado; let valorDelta = comprasMercado - ventasMercado;
+                        candlestickSeries.update({ time: tiempo, open: apertura, high: parseFloat(k.h), low: parseFloat(k.l), close: cierre });
+                        deltaSeries.update({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
+                        ultimoTiempoVela = tiempo; 
+                    };
+                });
         }
 
         function cambiarTemporalidad(t) {
@@ -182,20 +186,28 @@
         }
 
         function buscarBallenas() {
-            // LECTURA DINÁMICA DEL INPUT: Tomamos el valor de la cajita en el panel
             let porcentajeInput = parseFloat(document.getElementById('input-rango').value);
-            // Si por error alguien lo borra, usamos 5 por defecto
-            if (isNaN(porcentajeInput) || porcentajeInput <= 0) porcentajeInput = 5; 
+            if (isNaN(porcentajeInput) || porcentajeInput <= 0) porcentajeInput = 2; // Por defecto lo dejamos en 2%
             
-            let factorArriba = 1 + (porcentajeInput / 100); // Ej: 1 + (5/100) = 1.05
-            let factorAbajo = 1 - (porcentajeInput / 100);  // Ej: 1 - (5/100) = 0.95
+            let factorArriba = 1 + (porcentajeInput / 100); 
+            let factorAbajo = 1 - (porcentajeInput / 100);  
 
-            fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=5000')
-                .then(respuesta => respuesta.json())
+            // SOLUCIÓN AL ERROR DE BINANCE (Baneo IP):
+            // Cambiamos limit=5000 a limit=1000 para que sea una petición muy liviana.
+            fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000')
+                .then(respuesta => {
+                    // Controlamos si seguimos bloqueados
+                    if (!respuesta.ok) {
+                        console.error("Binance nos sigue bloqueando temporalmente. Hay que esperar unos minutos.");
+                        return null;
+                    }
+                    return respuesta.json();
+                })
                 .then(datos => {
+                    if (!datos) return; // Si no hay datos, cortamos acá
+
                     let precioActual = (parseFloat(datos.asks[0][0]) + parseFloat(datos.bids[0][0])) / 2;
                     
-                    // Aplicamos los factores calculados dinámicamente
                     let ventasEnRango = agruparOrdenes(datos.asks).filter(v => v[0] <= precioActual * factorArriba);
                     let comprasEnRango = agruparOrdenes(datos.bids).filter(c => c[0] >= precioActual * factorAbajo);
                     
@@ -209,13 +221,15 @@
                     lineasDibujadas.forEach(linea => candlestickSeries.removePriceLine(linea)); lineasDibujadas = []; 
                     top3Ventas.forEach(v => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: v[0], color: '#ef5350', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `RES ${v[1].toFixed(0)} BTC` })));
                     top3Compras.forEach(c => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: c[0], color: '#26a69a', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `SOP ${c[1].toFixed(0)} BTC` })));
-                });
+                })
+                .catch(error => console.log("Error de conexión:", error));
         }
         
         buscarBallenas(); 
-        setInterval(buscarBallenas, 5000);
+        // SOLUCIÓN AL ERROR DE BINANCE (Baneo IP):
+        // Cambiamos 5000ms a 10000ms (10 segundos) para no hacer "spam" al servidor de Binance.
+        setInterval(buscarBallenas, 10000);
 
-        // Agregamos un "escuchador" para que si cambias el número a mano, actualice al instante sin esperar los 5 segundos
         document.getElementById('input-rango').addEventListener('change', buscarBallenas);
 
         // --- 3. CINTA DE BALLENAS (aggTrade) ---
