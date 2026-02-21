@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Terminal Institucional BTC/USDT PRO</title>
+    <title>Terminal Institucional BTC/USDT Nivel Dios</title>
     
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     
@@ -34,16 +34,7 @@
         .ob-subtitulo { text-align: center; font-size: 11px; color: #848e9c; padding-bottom: 10px; border-bottom: 1px solid #2B2B43; background-color: #131722; display: flex; justify-content: center; align-items: center; gap: 5px;}
         
         .input-rango {
-            background-color: #2B2B43;
-            color: #FFD700;
-            border: 1px solid #3f3f5a;
-            border-radius: 4px;
-            width: 45px;
-            text-align: center;
-            font-weight: bold;
-            font-size: 11px;
-            padding: 2px;
-            outline: none;
+            background-color: #2B2B43; color: #FFD700; border: 1px solid #3f3f5a; border-radius: 4px; width: 45px; text-align: center; font-weight: bold; font-size: 11px; padding: 2px; outline: none;
         }
         
         .seccion-panel { padding: 10px; border-bottom: 1px solid #2B2B43; }
@@ -51,19 +42,12 @@
         .titulo-verde { color: #26a69a; font-weight: bold; margin-bottom: 8px; text-align: center; }
         
         .muro-item { 
-            display: flex; justify-content: space-between; 
-            background-color: #131722; padding: 6px 10px; 
-            margin-bottom: 4px; border-radius: 4px;
-            font-family: monospace;
-            align-items: center;
+            display: flex; justify-content: space-between; background-color: #131722; padding: 6px 10px; margin-bottom: 4px; border-radius: 4px; font-family: monospace; align-items: center;
         }
         .muro-precio { font-weight: bold; font-size: 13px; }
         .muro-volumen { color: #d1d4dc; font-size: 13px; }
 
-        @keyframes destello {
-            0% { background-color: rgba(255, 215, 0, 0.5); }
-            100% { background-color: #131722; }
-        }
+        @keyframes destello { 0% { background-color: rgba(255, 215, 0, 0.5); } 100% { background-color: #131722; } }
         .flash-trade { animation: destello 1s ease-out; }
         
     </style>
@@ -93,12 +77,12 @@
             
             <div class="seccion-panel">
                 <div class="titulo-rojo">RESISTENCIAS (Ventas)</div>
-                <div id="top-ventas">Cargando...</div>
+                <div id="top-ventas">Cargando radar invisible...</div>
             </div>
             
             <div class="seccion-panel">
                 <div class="titulo-verde">SOPORTES (Compras)</div>
-                <div id="top-compras">Cargando...</div>
+                <div id="top-compras">Cargando radar invisible...</div>
             </div>
 
             <div class="seccion-panel" style="border-bottom: none;">
@@ -110,6 +94,7 @@
     </div>
 
     <script>
+        // --- 1. GRÁFICO (Velas, Delta, Open Interest) ---
         const container = document.getElementById('chart-container');
         const chartOptions = { width: container.clientWidth, height: container.clientHeight, layout: { textColor: '#d1d4dc', background: { type: 'solid', color: '#131722' } }, grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } }, crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, rightPriceScale: { borderColor: '#2B2B43' }, timeScale: { borderColor: '#2B2B43', timeVisible: true, secondsVisible: false }, };
         const chart = LightweightCharts.createChart(container, chartOptions);
@@ -119,14 +104,7 @@
         const deltaSeries = chart.addHistogramSeries({ base: 0, priceScaleId: 'deltaScale' });
         chart.priceScale('deltaScale').applyOptions({ scaleMargins: { top: 0.65, bottom: 0.2 } });
 
-        const oiSeries = chart.addAreaSeries({ 
-            lineColor: '#FFD700', 
-            topColor: 'rgba(255, 215, 0, 0.3)', 
-            bottomColor: 'rgba(255, 215, 0, 0.0)', 
-            lineWidth: 2, 
-            priceScaleId: 'oiScale', 
-            title: 'Open Int.' 
-        });
+        const oiSeries = chart.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, priceScaleId: 'oiScale', title: 'Open Int.' });
         chart.priceScale('oiScale').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 
         window.addEventListener('resize', () => { chart.resize(container.clientWidth, container.clientHeight); });
@@ -137,7 +115,6 @@
         function cargarDatos(temporalidad) {
             if (binanceSocket !== null) binanceSocket.close();
             
-            // PRIMERO: Descargamos la historia
             fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=1000`)
                 .then(r => r.json())
                 .then(datos => {
@@ -149,12 +126,8 @@
                         datosDelta.push({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
                         ultimoTiempoVela = tiempo; 
                     });
-                    
-                    // Inyectamos la historia al gráfico
                     candlestickSeries.setData(velas); deltaSeries.setData(datosDelta); chart.timeScale().fitContent(); 
 
-                    // SOLUCIÓN AL ERROR DEL GRÁFICO:
-                    // SEGUNDO: Recién cuando la historia está lista, abrimos la conexión en vivo
                     binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
                     binanceSocket.onmessage = function (e) {
                         const k = JSON.parse(e.data).k; let tiempo = Math.floor(k.t / 1000); let apertura = parseFloat(k.o); let cierre = parseFloat(k.c);
@@ -172,65 +145,104 @@
         }
         cargarDatos('1m');
 
-        // --- 2. RADAR DE MUROS DINÁMICO ---
-        const TAMAÑO_GRUPO = 50; let lineasDibujadas = []; 
-        function agruparOrdenes(ordenes) {
-            let diccionario = {};
-            ordenes.forEach(orden => {
-                let precio = parseFloat(orden[0]); let cantidad = parseFloat(orden[1]);
-                let precioAgrupado = Math.floor(precio / TAMAÑO_GRUPO) * TAMAÑO_GRUPO;
-                if (!diccionario[precioAgrupado]) diccionario[precioAgrupado] = 0;
-                diccionario[precioAgrupado] += cantidad;
+        // --- 2. SISTEMA PROFESIONAL DE MUROS LOCALES ---
+        // Aquí guardaremos el libro de órdenes internamente
+        let orderBookLocal = { asks: {}, bids: {} };
+        const TAMAÑO_GRUPO = 50; 
+        let lineasDibujadas = []; 
+
+        // 1. Pedimos la foto inicial UNA SOLA VEZ
+        fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000')
+            .then(r => r.json())
+            .then(datos => {
+                datos.asks.forEach(a => orderBookLocal.asks[parseFloat(a[0])] = parseFloat(a[1]));
+                datos.bids.forEach(b => orderBookLocal.bids[parseFloat(b[0])] = parseFloat(b[1]));
+                
+                // 2. Nos conectamos al tubo en vivo para actualizar nuestra foto localmente sin pedirle permiso a Binance
+                iniciarActualizacionMurosEnVivo();
             });
-            return Object.keys(diccionario).map(precio => [parseFloat(precio), diccionario[precio]]);
+
+        function iniciarActualizacionMurosEnVivo() {
+            // Este WebSocket recibe los cambios cada 1 segundo exacto
+            const depthSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@depth@1000ms');
+            
+            depthSocket.onmessage = function(e) {
+                const cambios = JSON.parse(e.data);
+                
+                // Actualizamos las ventas
+                cambios.a.forEach(ask => {
+                    let precio = parseFloat(ask[0]); let cantidad = parseFloat(ask[1]);
+                    // Si la cantidad es 0, significa que el muro se rompió o lo quitaron. Lo borramos de nuestra memoria.
+                    if (cantidad === 0) delete orderBookLocal.asks[precio];
+                    else orderBookLocal.asks[precio] = cantidad;
+                });
+                
+                // Actualizamos las compras
+                cambios.b.forEach(bid => {
+                    let precio = parseFloat(bid[0]); let cantidad = parseFloat(bid[1]);
+                    if (cantidad === 0) delete orderBookLocal.bids[precio];
+                    else orderBookLocal.bids[precio] = cantidad;
+                });
+            };
         }
 
-        function buscarBallenas() {
+        // Esta función convierte nuestro diccionario de memoria en los bloques visuales de a $50
+        function agruparDiccionario(diccionario) {
+            let agrupado = {};
+            for (let precioStr in diccionario) {
+                let precio = parseFloat(precioStr);
+                let cantidad = diccionario[precioStr];
+                let precioAgrupado = Math.floor(precio / TAMAÑO_GRUPO) * TAMAÑO_GRUPO;
+                if (!agrupado[precioAgrupado]) agrupado[precioAgrupado] = 0;
+                agrupado[precioAgrupado] += cantidad;
+            }
+            return Object.keys(agrupado).map(p => [parseFloat(p), agrupado[p]]);
+        }
+
+        // Esta función dibuja los muros en la pantalla. La ejecutaremos cada 2 segundos.
+        function dibujarMuros() {
+            // Obtenemos el precio actual leyendo las mejores órdenes
+            let preciosVentas = Object.keys(orderBookLocal.asks).map(parseFloat).sort((a,b) => a - b);
+            let preciosCompras = Object.keys(orderBookLocal.bids).map(parseFloat).sort((a,b) => b - a);
+            
+            if (preciosVentas.length === 0 || preciosCompras.length === 0) return; // Si aún no cargó, salimos
+
+            let precioActual = (preciosVentas[0] + preciosCompras[0]) / 2;
+
             let porcentajeInput = parseFloat(document.getElementById('input-rango').value);
-            if (isNaN(porcentajeInput) || porcentajeInput <= 0) porcentajeInput = 2; // Por defecto lo dejamos en 2%
+            if (isNaN(porcentajeInput) || porcentajeInput <= 0) porcentajeInput = 2; 
             
             let factorArriba = 1 + (porcentajeInput / 100); 
             let factorAbajo = 1 - (porcentajeInput / 100);  
 
-            // SOLUCIÓN AL ERROR DE BINANCE (Baneo IP):
-            // Cambiamos limit=5000 a limit=1000 para que sea una petición muy liviana.
-            fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000')
-                .then(respuesta => {
-                    // Controlamos si seguimos bloqueados
-                    if (!respuesta.ok) {
-                        console.error("Binance nos sigue bloqueando temporalmente. Hay que esperar unos minutos.");
-                        return null;
-                    }
-                    return respuesta.json();
-                })
-                .then(datos => {
-                    if (!datos) return; // Si no hay datos, cortamos acá
+            // Agrupamos nuestra memoria local
+            let ventasAgrupadas = agruparDiccionario(orderBookLocal.asks);
+            let comprasAgrupadas = agruparDiccionario(orderBookLocal.bids);
 
-                    let precioActual = (parseFloat(datos.asks[0][0]) + parseFloat(datos.bids[0][0])) / 2;
-                    
-                    let ventasEnRango = agruparOrdenes(datos.asks).filter(v => v[0] <= precioActual * factorArriba);
-                    let comprasEnRango = agruparOrdenes(datos.bids).filter(c => c[0] >= precioActual * factorAbajo);
-                    
-                    ventasEnRango.sort((a, b) => b[1] - a[1]); comprasEnRango.sort((a, b) => b[1] - a[1]);
-                    
-                    let top3Ventas = ventasEnRango.slice(0, 3); let top3Compras = comprasEnRango.slice(0, 3);
+            // Filtramos
+            let ventasEnRango = ventasAgrupadas.filter(v => v[0] <= precioActual * factorArriba);
+            let comprasEnRango = comprasAgrupadas.filter(c => c[0] >= precioActual * factorAbajo);
+            
+            // Ordenamos por tamaño del muro
+            ventasEnRango.sort((a, b) => b[1] - a[1]); 
+            comprasEnRango.sort((a, b) => b[1] - a[1]);
+            
+            let top3Ventas = ventasEnRango.slice(0, 3); 
+            let top3Compras = comprasEnRango.slice(0, 3);
 
-                    document.getElementById('top-ventas').innerHTML = top3Ventas.map(v => `<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
-                    document.getElementById('top-compras').innerHTML = top3Compras.map(c => `<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
+            // Actualizamos HTML
+            document.getElementById('top-ventas').innerHTML = top3Ventas.map(v => `<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
+            document.getElementById('top-compras').innerHTML = top3Compras.map(c => `<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
 
-                    lineasDibujadas.forEach(linea => candlestickSeries.removePriceLine(linea)); lineasDibujadas = []; 
-                    top3Ventas.forEach(v => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: v[0], color: '#ef5350', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `RES ${v[1].toFixed(0)} BTC` })));
-                    top3Compras.forEach(c => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: c[0], color: '#26a69a', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `SOP ${c[1].toFixed(0)} BTC` })));
-                })
-                .catch(error => console.log("Error de conexión:", error));
+            // Dibujamos Líneas
+            lineasDibujadas.forEach(linea => candlestickSeries.removePriceLine(linea)); lineasDibujadas = []; 
+            top3Ventas.forEach(v => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: v[0], color: '#ef5350', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `RES ${v[1].toFixed(0)} BTC` })));
+            top3Compras.forEach(c => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: c[0], color: '#26a69a', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `SOP ${c[1].toFixed(0)} BTC` })));
         }
-        
-        buscarBallenas(); 
-        // SOLUCIÓN AL ERROR DE BINANCE (Baneo IP):
-        // Cambiamos 5000ms a 10000ms (10 segundos) para no hacer "spam" al servidor de Binance.
-        setInterval(buscarBallenas, 10000);
 
-        document.getElementById('input-rango').addEventListener('change', buscarBallenas);
+        // Como todo corre en memoria, podemos redibujar la pantalla muy rápido sin que nos baneen.
+        setInterval(dibujarMuros, 2000);
+        document.getElementById('input-rango').addEventListener('change', dibujarMuros);
 
         // --- 3. CINTA DE BALLENAS (aggTrade) ---
         const tapeSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
@@ -257,7 +269,7 @@
             }
         };
 
-        // --- 4. INTERÉS ABIERTO COMO ÁREA EN TIEMPO REAL ---
+        // --- 4. INTERÉS ABIERTO ---
         function actualizarOpenInterest() {
             fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT')
                 .then(respuesta => respuesta.json())
