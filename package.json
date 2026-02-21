@@ -1,0 +1,12 @@
+{
+  "name": "terminal-institucional",
+  "version": "1.0.0",
+  "description": "Terminal Order Flow BTC/USDT",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

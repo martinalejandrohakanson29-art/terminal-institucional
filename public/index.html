@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terminal Institucional BTC/USDT PRO</title>
+    
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    
+    <style>
+        body { margin: 0; padding: 0; background-color: #131722; color: white; font-family: Arial, sans-serif; overflow: hidden; }
+        #header { padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; background-color: #1e222d; border-bottom: 1px solid #2B2B43; height: 40px; }
+        h2 { margin: 0; font-size: 1.2rem; }
+        
+        .botonera { display: flex; gap: 5px; }
+        .btn-tiempo { background-color: #2B2B43; color: #d1d4dc; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+        .btn-tiempo:hover { background-color: #3f3f5a; }
+        .btn-activo { background-color: #2962FF; color: white; }
+
+        #main-content { display: flex; width: 100vw; height: calc(100vh - 60px); }
+        #chart-container { flex-grow: 1; position: relative; } 
+
+        #orderbook-container {
+            width: 300px; 
+            background-color: #1e222d;
+            border-left: 1px solid #2B2B43;
+            display: flex;
+            flex-direction: column;
+            font-size: 13px;
+            overflow-y: auto;
+        }
+        
+        .ob-titulo { text-align: center; padding: 12px 10px 5px; font-weight: bold; font-size: 15px; background-color: #131722; color: #d1d4dc;}
+        .ob-subtitulo { text-align: center; font-size: 11px; color: #848e9c; padding-bottom: 10px; border-bottom: 1px solid #2B2B43; background-color: #131722;}
+        
+        .seccion-panel { padding: 10px; border-bottom: 1px solid #2B2B43; }
+        .titulo-rojo { color: #ef5350; font-weight: bold; margin-bottom: 8px; text-align: center; }
+        .titulo-verde { color: #26a69a; font-weight: bold; margin-bottom: 8px; text-align: center; }
+        
+        .muro-item { 
+            display: flex; justify-content: space-between; 
+            background-color: #131722; padding: 6px 10px; 
+            margin-bottom: 4px; border-radius: 4px;
+            font-family: monospace;
+            align-items: center;
+        }
+        .muro-precio { font-weight: bold; font-size: 13px; }
+        .muro-volumen { color: #d1d4dc; font-size: 13px; }
+
+        @keyframes destello {
+            0% { background-color: rgba(255, 215, 0, 0.5); }
+            100% { background-color: #131722; }
+        }
+        .flash-trade { animation: destello 1s ease-out; }
+        
+    </style>
+</head>
+<body>
+
+    <div id="header">
+        <h2>Terminal Institucional BTC/USDT</h2>
+        <div class="botonera">
+            <button class="btn-tiempo btn-activo" id="btn-1m" onclick="cambiarTemporalidad('1m')">1m</button>
+            <button class="btn-tiempo" id="btn-5m" onclick="cambiarTemporalidad('5m')">5m</button>
+            <button class="btn-tiempo" id="btn-15m" onclick="cambiarTemporalidad('15m')">15m</button>
+            <button class="btn-tiempo" id="btn-1h" onclick="cambiarTemporalidad('1h')">1H</button>
+            <button class="btn-tiempo" id="btn-4h" onclick="cambiarTemporalidad('4h')">4H</button>
+            <button class="btn-tiempo" id="btn-1d" onclick="cambiarTemporalidad('1d')">1D</button>
+        </div>
+    </div>
+    
+    <div id="main-content">
+        <div id="chart-container"></div>
+        
+        <div id="orderbook-container">
+            <div class="ob-titulo">TOP 3 MUROS (INTENCIÓN)</div>
+            <div class="ob-subtitulo">Rango: 5% | Agrupado: $50</div>
+            
+            <div class="seccion-panel">
+                <div class="titulo-rojo">RESISTENCIAS (Ventas)</div>
+                <div id="top-ventas">Cargando...</div>
+            </div>
+            
+            <div class="seccion-panel">
+                <div class="titulo-verde">SOPORTES (Compras)</div>
+                <div id="top-compras">Cargando...</div>
+            </div>
+
+            <div class="seccion-panel" style="border-bottom: none;">
+                <div class="ob-titulo" style="padding-top: 5px;">CINTA EN VIVO (ACCIÓN)</div>
+                <div class="ob-subtitulo">Filtro: > 1.0 BTC (Francotiradores)</div>
+                <div id="whale-tape">Esperando órdenes gigantes...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. CONFIGURACIÓN DEL GRÁFICO ---
+        const container = document.getElementById('chart-container');
+        const chartOptions = { width: container.clientWidth, height: container.clientHeight, layout: { textColor: '#d1d4dc', background: { type: 'solid', color: '#131722' } }, grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } }, crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, rightPriceScale: { borderColor: '#2B2B43' }, timeScale: { borderColor: '#2B2B43', timeVisible: true, secondsVisible: false }, };
+        const chart = LightweightCharts.createChart(container, chartOptions);
+        
+        // Capa 1: Velas
+        const candlestickSeries = chart.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
+        
+        // Capa 2: Delta 
+        const deltaSeries = chart.addHistogramSeries({ base: 0, priceScaleId: 'deltaScale' });
+        chart.priceScale('deltaScale').applyOptions({ scaleMargins: { top: 0.65, bottom: 0.2 } });
+
+        // Capa 3: NUEVO Interés Abierto como ÁREA (Montaña)
+        const oiSeries = chart.addAreaSeries({ 
+            lineColor: '#FFD700', 
+            topColor: 'rgba(255, 215, 0, 0.3)', // Color dorado translúcido arriba
+            bottomColor: 'rgba(255, 215, 0, 0.0)', // Transparente abajo
+            lineWidth: 2, 
+            priceScaleId: 'oiScale', 
+            title: 'Open Int.' 
+        });
+        chart.priceScale('oiScale').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+
+        window.addEventListener('resize', () => { chart.resize(container.clientWidth, container.clientHeight); });
+
+        let binanceSocket = null; 
+        let ultimoTiempoVela = null; 
+
+        function cargarDatos(temporalidad) {
+            if (binanceSocket !== null) binanceSocket.close();
+            fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=1000`)
+                .then(r => r.json())
+                .then(datos => {
+                    let velas = []; let datosDelta = [];
+                    datos.forEach(v => {
+                        let tiempo = Math.floor(v[0] / 1000); let apertura = parseFloat(v[1]); let cierre = parseFloat(v[4]);
+                        let comprasMercado = parseFloat(v[9]); let ventasMercado = parseFloat(v[5]) - comprasMercado; let valorDelta = comprasMercado - ventasMercado;
+                        velas.push({ time: tiempo, open: apertura, high: parseFloat(v[2]), low: parseFloat(v[3]), close: cierre });
+                        datosDelta.push({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
+                        ultimoTiempoVela = tiempo; 
+                    });
+                    candlestickSeries.setData(velas); deltaSeries.setData(datosDelta); chart.timeScale().fitContent(); 
+                });
+
+            binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
+            binanceSocket.onmessage = function (e) {
+                const k = JSON.parse(e.data).k; let tiempo = Math.floor(k.t / 1000); let apertura = parseFloat(k.o); let cierre = parseFloat(k.c);
+                let comprasMercado = parseFloat(k.V); let ventasMercado = parseFloat(k.v) - comprasMercado; let valorDelta = comprasMercado - ventasMercado;
+                candlestickSeries.update({ time: tiempo, open: apertura, high: parseFloat(k.h), low: parseFloat(k.l), close: cierre });
+                deltaSeries.update({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
+                ultimoTiempoVela = tiempo; 
+            };
+        }
+
+        function cambiarTemporalidad(t) {
+            document.querySelectorAll('.btn-tiempo').forEach(btn => btn.classList.remove('btn-activo'));
+            document.getElementById(`btn-${t}`).classList.add('btn-activo'); cargarDatos(t);
+        }
+        cargarDatos('1m');
+
+        // --- 2. RADAR DE MUROS (TOP 3) ---
+        const TAMAÑO_GRUPO = 50; let lineasDibujadas = []; 
+        function agruparOrdenes(ordenes) {
+            let diccionario = {};
+            ordenes.forEach(orden => {
+                let precio = parseFloat(orden[0]); let cantidad = parseFloat(orden[1]);
+                let precioAgrupado = Math.floor(precio / TAMAÑO_GRUPO) * TAMAÑO_GRUPO;
+                if (!diccionario[precioAgrupado]) diccionario[precioAgrupado] = 0;
+                diccionario[precioAgrupado] += cantidad;
+            });
+            return Object.keys(diccionario).map(precio => [parseFloat(precio), diccionario[precio]]);
+        }
+
+        function buscarBallenas() {
+            fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=5000')
+                .then(respuesta => respuesta.json())
+                .then(datos => {
+                    let precioActual = (parseFloat(datos.asks[0][0]) + parseFloat(datos.bids[0][0])) / 2;
+                    let ventasEnRango = agruparOrdenes(datos.asks).filter(v => v[0] <= precioActual * 1.05);
+                    let comprasEnRango = agruparOrdenes(datos.bids).filter(c => c[0] >= precioActual * 0.95);
+                    ventasEnRango.sort((a, b) => b[1] - a[1]); comprasEnRango.sort((a, b) => b[1] - a[1]);
+                    
+                    let top3Ventas = ventasEnRango.slice(0, 3); let top3Compras = comprasEnRango.slice(0, 3);
+
+                    document.getElementById('top-ventas').innerHTML = top3Ventas.map(v => `<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
+                    document.getElementById('top-compras').innerHTML = top3Compras.map(c => `<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
+
+                    lineasDibujadas.forEach(linea => candlestickSeries.removePriceLine(linea)); lineasDibujadas = []; 
+                    top3Ventas.forEach(v => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: v[0], color: '#ef5350', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `RES ${v[1].toFixed(0)} BTC` })));
+                    top3Compras.forEach(c => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: c[0], color: '#26a69a', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `SOP ${c[1].toFixed(0)} BTC` })));
+                });
+        }
+        buscarBallenas(); setInterval(buscarBallenas, 5000);
+
+        // --- 3. CINTA DE BALLENAS (aggTrade) ---
+        const tapeSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
+        const UMBRAL_BTC = 1.0; 
+        let ultimosTrades = []; 
+
+        tapeSocket.onmessage = function(evento) {
+            const data = JSON.parse(evento.data);
+            const cantidad = parseFloat(data.q);
+            const precio = parseFloat(data.p);
+            const agresorFueVendedor = data.m; 
+
+            if (cantidad >= UMBRAL_BTC) {
+                ultimosTrades.unshift({ precio: precio, cantidad: cantidad, esVenta: agresorFueVendedor });
+                if (ultimosTrades.length > 5) ultimosTrades.pop(); 
+
+                let htmlCinta = '';
+                ultimosTrades.forEach((trade, indice) => {
+                    let color = trade.esVenta ? '#ef5350' : '#26a69a';
+                    let claseFlash = indice === 0 ? 'flash-trade' : '';
+                    htmlCinta += `<div class="muro-item ${claseFlash}"><span class="muro-precio" style="color:${color};">$${trade.precio.toFixed(2)}</span><span class="muro-volumen">${trade.cantidad.toFixed(2)} BTC</span></div>`;
+                });
+                document.getElementById('whale-tape').innerHTML = htmlCinta;
+            }
+        };
+
+        // --- 4. INTERÉS ABIERTO COMO ÁREA EN TIEMPO REAL ---
+        function actualizarOpenInterest() {
+            fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT')
+                .then(respuesta => respuesta.json())
+                .then(datos => {
+                    if (ultimoTiempoVela) {
+                        let contratosAbiertos = parseFloat(datos.openInterest);
+                        oiSeries.update({ time: ultimoTiempoVela, value: contratosAbiertos });
+                    }
+                })
+                .catch(error => console.log("Error al traer Open Interest:", error));
+        }
+        
+        actualizarOpenInterest();
+        setInterval(actualizarOpenInterest, 3000);
+
+    </script>
+</body>
+</html>
