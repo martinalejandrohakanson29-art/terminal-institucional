@@ -31,7 +31,21 @@
         }
         
         .ob-titulo { text-align: center; padding: 12px 10px 5px; font-weight: bold; font-size: 15px; background-color: #131722; color: #d1d4dc;}
-        .ob-subtitulo { text-align: center; font-size: 11px; color: #848e9c; padding-bottom: 10px; border-bottom: 1px solid #2B2B43; background-color: #131722;}
+        .ob-subtitulo { text-align: center; font-size: 11px; color: #848e9c; padding-bottom: 10px; border-bottom: 1px solid #2B2B43; background-color: #131722; display: flex; justify-content: center; align-items: center; gap: 5px;}
+        
+        /* Estilos para el nuevo input numérico */
+        .input-rango {
+            background-color: #2B2B43;
+            color: #FFD700;
+            border: 1px solid #3f3f5a;
+            border-radius: 4px;
+            width: 45px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 11px;
+            padding: 2px;
+            outline: none;
+        }
         
         .seccion-panel { padding: 10px; border-bottom: 1px solid #2B2B43; }
         .titulo-rojo { color: #ef5350; font-weight: bold; margin-bottom: 8px; text-align: center; }
@@ -74,7 +88,9 @@
         
         <div id="orderbook-container">
             <div class="ob-titulo">TOP 3 MUROS (INTENCIÓN)</div>
-            <div class="ob-subtitulo">Rango: 5% | Agrupado: $50</div>
+            <div class="ob-subtitulo">
+                Rango: <input type="number" id="input-rango" class="input-rango" value="5" min="1" max="50">% | Agrupado: $50
+            </div>
             
             <div class="seccion-panel">
                 <div class="titulo-rojo">RESISTENCIAS (Ventas)</div>
@@ -100,18 +116,15 @@
         const chartOptions = { width: container.clientWidth, height: container.clientHeight, layout: { textColor: '#d1d4dc', background: { type: 'solid', color: '#131722' } }, grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } }, crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, rightPriceScale: { borderColor: '#2B2B43' }, timeScale: { borderColor: '#2B2B43', timeVisible: true, secondsVisible: false }, };
         const chart = LightweightCharts.createChart(container, chartOptions);
         
-        // Capa 1: Velas
         const candlestickSeries = chart.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
         
-        // Capa 2: Delta 
         const deltaSeries = chart.addHistogramSeries({ base: 0, priceScaleId: 'deltaScale' });
         chart.priceScale('deltaScale').applyOptions({ scaleMargins: { top: 0.65, bottom: 0.2 } });
 
-        // Capa 3: NUEVO Interés Abierto como ÁREA (Montaña)
         const oiSeries = chart.addAreaSeries({ 
             lineColor: '#FFD700', 
-            topColor: 'rgba(255, 215, 0, 0.3)', // Color dorado translúcido arriba
-            bottomColor: 'rgba(255, 215, 0, 0.0)', // Transparente abajo
+            topColor: 'rgba(255, 215, 0, 0.3)', 
+            bottomColor: 'rgba(255, 215, 0, 0.0)', 
             lineWidth: 2, 
             priceScaleId: 'oiScale', 
             title: 'Open Int.' 
@@ -155,7 +168,7 @@
         }
         cargarDatos('1m');
 
-        // --- 2. RADAR DE MUROS (TOP 3) ---
+        // --- 2. RADAR DE MUROS DINÁMICO ---
         const TAMAÑO_GRUPO = 50; let lineasDibujadas = []; 
         function agruparOrdenes(ordenes) {
             let diccionario = {};
@@ -169,12 +182,23 @@
         }
 
         function buscarBallenas() {
+            // LECTURA DINÁMICA DEL INPUT: Tomamos el valor de la cajita en el panel
+            let porcentajeInput = parseFloat(document.getElementById('input-rango').value);
+            // Si por error alguien lo borra, usamos 5 por defecto
+            if (isNaN(porcentajeInput) || porcentajeInput <= 0) porcentajeInput = 5; 
+            
+            let factorArriba = 1 + (porcentajeInput / 100); // Ej: 1 + (5/100) = 1.05
+            let factorAbajo = 1 - (porcentajeInput / 100);  // Ej: 1 - (5/100) = 0.95
+
             fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=5000')
                 .then(respuesta => respuesta.json())
                 .then(datos => {
                     let precioActual = (parseFloat(datos.asks[0][0]) + parseFloat(datos.bids[0][0])) / 2;
-                    let ventasEnRango = agruparOrdenes(datos.asks).filter(v => v[0] <= precioActual * 1.05);
-                    let comprasEnRango = agruparOrdenes(datos.bids).filter(c => c[0] >= precioActual * 0.95);
+                    
+                    // Aplicamos los factores calculados dinámicamente
+                    let ventasEnRango = agruparOrdenes(datos.asks).filter(v => v[0] <= precioActual * factorArriba);
+                    let comprasEnRango = agruparOrdenes(datos.bids).filter(c => c[0] >= precioActual * factorAbajo);
+                    
                     ventasEnRango.sort((a, b) => b[1] - a[1]); comprasEnRango.sort((a, b) => b[1] - a[1]);
                     
                     let top3Ventas = ventasEnRango.slice(0, 3); let top3Compras = comprasEnRango.slice(0, 3);
@@ -187,7 +211,12 @@
                     top3Compras.forEach(c => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: c[0], color: '#26a69a', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `SOP ${c[1].toFixed(0)} BTC` })));
                 });
         }
-        buscarBallenas(); setInterval(buscarBallenas, 5000);
+        
+        buscarBallenas(); 
+        setInterval(buscarBallenas, 5000);
+
+        // Agregamos un "escuchador" para que si cambias el número a mano, actualice al instante sin esperar los 5 segundos
+        document.getElementById('input-rango').addEventListener('change', buscarBallenas);
 
         // --- 3. CINTA DE BALLENAS (aggTrade) ---
         const tapeSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
