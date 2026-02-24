@@ -8,13 +8,8 @@
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     
     <style>
-        /* NUEVO: Obliga a calcular anchos exactos sin sumar bordes extra */
         * { box-sizing: border-box; }
-
-        /* NUEVO: Blindamos la pantalla al 100% de alto y ancho exacto, sin barras de desplazamiento generales */
         body { margin: 0; padding: 0; background-color: #131722; color: white; font-family: Arial, sans-serif; overflow: hidden; width: 100vw; height: 100vh; }
-        
-        /* NUEVO: Altura exacta fijada a 60px para el cálculo del menú inferior */
         #header { padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; background-color: #1e222d; border-bottom: 1px solid #2B2B43; height: 60px; }
         h2 { margin: 0; font-size: 1.2rem; }
         
@@ -24,21 +19,10 @@
         .btn-activo { background-color: #2962FF; color: white; }
 
         #main-content { display: flex; width: 100%; height: calc(100vh - 60px); }
-        
-        /* NUEVO: overflow:hidden evita que el gráfico estire la pantalla y empuje el panel */
         #chart-container { flex-grow: 1; position: relative; overflow: hidden; } 
 
-        /* NUEVO: flex-shrink: 0 y min-width garantizan que el panel jamás sea empujado fuera de la pantalla */
         #orderbook-container {
-            width: 320px; 
-            min-width: 320px;
-            flex-shrink: 0; 
-            background-color: #1e222d;
-            border-left: 1px solid #2B2B43;
-            display: flex;
-            flex-direction: column;
-            font-size: 13px;
-            overflow-y: auto;
+            width: 320px; min-width: 320px; flex-shrink: 0; background-color: #1e222d; border-left: 1px solid #2B2B43; display: flex; flex-direction: column; font-size: 13px; overflow-y: auto;
         }
         
         .ob-titulo { text-align: center; padding: 12px 10px 5px; font-weight: bold; font-size: 15px; background-color: #131722; color: #d1d4dc;}
@@ -108,6 +92,25 @@
     </div>
 
     <script>
+        // --- RECUPERAR MEMORIA DEL NAVEGADOR AL CARGAR ---
+        const inputFiltroGrafico = document.getElementById('filtro-grafico');
+        const inputFiltroCinta = document.getElementById('filtro-cinta');
+
+        // Si hay datos guardados previamente, los ponemos en las cajitas
+        if (localStorage.getItem('memoriaGrafico')) {
+            inputFiltroGrafico.value = localStorage.getItem('memoriaGrafico');
+        }
+        if (localStorage.getItem('memoriaCinta')) {
+            inputFiltroCinta.value = localStorage.getItem('memoriaCinta');
+        }
+
+        // Cada vez que escribes algo nuevo, lo guardamos para siempre
+        inputFiltroCinta.addEventListener('change', function() {
+            localStorage.setItem('memoriaCinta', this.value);
+        });
+        // (El del gráfico lo guardamos más abajo junto con la función de dibujar marcadores)
+
+
         // --- 1. GRÁFICO (Velas, Delta, Open Interest) ---
         const container = document.getElementById('chart-container');
         const chartOptions = { width: container.clientWidth, height: container.clientHeight, layout: { textColor: '#d1d4dc', background: { type: 'solid', color: '#131722' } }, grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } }, crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, rightPriceScale: { borderColor: '#2B2B43' }, timeScale: { borderColor: '#2B2B43', timeVisible: true, secondsVisible: false }, };
@@ -119,7 +122,6 @@
         const oiSeries = chart.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, priceScaleId: 'oiScale', title: 'Open Int.' });
         chart.priceScale('oiScale').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 
-        // Esta línea es vital: reajusta el gráfico al tamaño exacto de la ventana si cambias las dimensiones
         window.addEventListener('resize', () => { chart.resize(container.clientWidth, container.clientHeight); });
 
         let binanceSocket = null; 
@@ -172,7 +174,7 @@
         }
 
         function dibujarMarcadores() {
-            const limiteBtc = parseFloat(document.getElementById('filtro-grafico').value) || 5;
+            const limiteBtc = parseFloat(inputFiltroGrafico.value) || 5;
             let marcadores = [];
             let tiempoAntiChoque = {}; 
 
@@ -198,7 +200,11 @@
             candlestickSeries.setMarkers(marcadores);
         }
 
-        document.getElementById('filtro-grafico').addEventListener('change', dibujarMarcadores);
+        inputFiltroGrafico.addEventListener('change', function() {
+            localStorage.setItem('memoriaGrafico', this.value); // Lo guardamos en el navegador
+            dibujarMarcadores(); // Redibujamos las flechas al instante
+        });
+
         setTimeout(pedirHistorialBallenas, 2000);
         setInterval(pedirHistorialBallenas, 30000);
 
@@ -304,7 +310,7 @@
             const precio = parseFloat(data.p); 
             const agresorFueVendedor = data.m; 
             
-            const limiteCintaVisual = parseFloat(document.getElementById('filtro-cinta').value) || 1.0;
+            const limiteCintaVisual = parseFloat(inputFiltroCinta.value) || 1.0;
 
             if (cantidad >= limiteCintaVisual) {
                 ultimosTrades.unshift({ precio: precio, cantidad: cantidad, esVenta: agresorFueVendedor });
