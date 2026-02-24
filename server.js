@@ -4,7 +4,6 @@ const { Pool } = require('pg');
 const WebSocket = require('ws'); 
 
 const app = express();
-// NUEVO: Le enseñamos al servidor a entender datos enviados desde la web en formato JSON
 app.use(express.json()); 
 
 const pool = new Pool({
@@ -12,7 +11,6 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// NUEVO: Esta variable será la memoria del servidor para saber el límite de guardado
 let limiteGuardadoBD = 1.0; 
 
 async function inicializarBaseDeDatos() {
@@ -25,8 +23,29 @@ async function inicializarBaseDeDatos() {
             es_venta BOOLEAN NOT NULL
         );
     `;
+    
+    // NUEVO: Creamos una tabla para guardar la configuración del servidor
+    const queryTablaConfig = `
+        CREATE TABLE IF NOT EXISTS configuracion (
+            clave VARCHAR(50) PRIMARY KEY,
+            valor NUMERIC NOT NULL
+        );
+    `;
+
     try {
         await pool.query(queryTablaBallenas);
+        await pool.query(queryTablaConfig);
+        
+        // Insertamos el valor por defecto solo si la tabla está vacía
+        await pool.query(`INSERT INTO configuracion (clave, valor) VALUES ('limite_bd', 1.0) ON CONFLICT (clave) DO NOTHING`);
+        
+        // Leemos la configuración guardada y se la asignamos a la memoria del servidor
+        const configRes = await pool.query(`SELECT valor FROM configuracion WHERE clave = 'limite_bd'`);
+        if (configRes.rows.length > 0) {
+            limiteGuardadoBD = parseFloat(configRes.rows[0].valor);
+            console.log(`🔧 Memoria del servidor cargada. Límite de guardado: > ${limiteGuardadoBD} BTC`);
+        }
+
         console.log('✅ Base de datos lista y conectada.');
     } catch (error) {
         console.error('❌ Error al crear las tablas:', error);
@@ -46,7 +65,6 @@ function iniciarRastreadorBallenas() {
             const precio = parseFloat(evento.p);
             const es_venta = evento.m; 
 
-            // AQUÍ USAMOS LA VARIABLE DINÁMICA en lugar del número fijo
             if (cantidad >= limiteGuardadoBD) {
                 const queryInsertar = `INSERT INTO ballenas (precio, cantidad, es_venta) VALUES ($1, $2, $3)`;
                 await pool.query(queryInsertar, [precio, cantidad, es_venta]);
@@ -79,20 +97,26 @@ app.get('/api/ballenas', async (req, res) => {
     }
 });
 
-// --- NUEVAS RUTAS PARA EL CONTROL DE LA BASE DE DATOS ---
-
-// Cuando la web carga, le pregunta al servidor qué límite está usando
+// RUTAS PARA EL CONTROL DE LA BASE DE DATOS
 app.get('/api/filtro-bd', (req, res) => {
     res.json({ umbral: limiteGuardadoBD });
 });
 
-// Cuando cambias el número en la web, se envía aquí para actualizar el servidor
-app.post('/api/filtro-bd', (req, res) => {
+app.post('/api/filtro-bd', async (req, res) => {
     const nuevoUmbral = parseFloat(req.body.umbral);
     if (!isNaN(nuevoUmbral) && nuevoUmbral > 0) {
         limiteGuardadoBD = nuevoUmbral;
-        console.log(`🔧 Filtro de BD actualizado. Ahora solo guardamos > ${limiteGuardadoBD} BTC`);
-        res.json({ status: 'ok', umbral: limiteGuardadoBD });
+        
+        // NUEVO: Guardamos el cambio en la tabla de configuración para que no se borre si se reinicia el servidor
+        try {
+            await pool.query(`UPDATE configuracion SET valor = $1 WHERE clave = 'limite_bd'`, [limiteGuardadoBD]);
+            console.log(`🔧 Filtro de BD actualizado y guardado. Ahora solo guardamos > ${limiteGuardadoBD} BTC`);
+            res.json({ status: 'ok', umbral: limiteGuardadoBD });
+        } catch (error) {
+            console.error('Error guardando configuración:', error);
+            res.status(500).json({ error: 'No se pudo guardar la configuración en BD' });
+        }
+        
     } else {
         res.status(400).json({ error: 'Número inválido' });
     }
