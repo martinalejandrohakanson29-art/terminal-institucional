@@ -148,11 +148,14 @@
                         tiemposVelasActivas.push(tiempo); // Registramos esta vela como 100% real
                         ultimoTiempoVela = tiempo; 
                     });
+                    
                     candlestickSeries.setData(velas); 
                     deltaSeries.setData(datosDelta); 
                     chart.timeScale().fitContent(); 
                     
-                    dibujarMarcadores(); // Forzamos redibujar por si ya habían cargado
+                    // Al cargar una nueva temporalidad, forzamos redibujar marcadores y OI para que se adapten
+                    dibujarMarcadores(); 
+                    dibujarOI(); 
 
                     binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
                     binanceSocket.onmessage = function (e) {
@@ -184,6 +187,19 @@
         }
         cambiarTemporalidad('1m');
 
+        // --- SISTEMA DE "EFECTO IMÁN" COMPARTIDO ---
+        // Función imán: Encuentra la vela real más cercana hacia atrás para que no existan datos "huérfanos" en el tiempo
+        function obtenerVelaExacta(tiempoBuscado) {
+            if (tiemposVelasActivas.length === 0) return null;
+            // Buscamos de la vela más actual hacia la más antigua
+            for (let i = tiemposVelasActivas.length - 1; i >= 0; i--) {
+                if (tiemposVelasActivas[i] <= tiempoBuscado) {
+                    return tiemposVelasActivas[i];
+                }
+            }
+            return tiemposVelasActivas[0]; // Si es más vieja que nuestro historial, va a la primera
+        }
+
         // --- DIBUJADO DE BALLENAS EN EL GRÁFICO ---
         let memoriaBallenasBD = []; 
 
@@ -195,18 +211,6 @@
                     dibujarMarcadores(); 
                 })
                 .catch(err => console.error("Error al pedir historial:", err));
-        }
-
-        // Función imán: Encuentra la vela real más cercana hacia atrás
-        function obtenerVelaExacta(tiempoBallena) {
-            if (tiemposVelasActivas.length === 0) return null;
-            // Buscamos de la vela más actual hacia la más antigua
-            for (let i = tiemposVelasActivas.length - 1; i >= 0; i--) {
-                if (tiemposVelasActivas[i] <= tiempoBallena) {
-                    return tiemposVelasActivas[i];
-                }
-            }
-            return tiemposVelasActivas[0]; // Si es más vieja que nuestro historial, va a la primera
         }
 
         function dibujarMarcadores() {
@@ -243,25 +247,11 @@
                 let datos = marcadoresAgrupados[tiempo];
 
                 if (datos.compras > 0) {
-                    marcadores.push({
-                        time: tiempo,
-                        position: 'belowBar',
-                        color: '#26a69a',
-                        shape: 'arrowUp',
-                        text: `${datos.compras.toFixed(1)} BTC`,
-                        size: datos.compras > 15 ? 2 : 1
-                    });
+                    marcadores.push({ time: tiempo, position: 'belowBar', color: '#26a69a', shape: 'arrowUp', text: `${datos.compras.toFixed(1)} BTC`, size: datos.compras > 15 ? 2 : 1 });
                 }
                 
                 if (datos.ventas > 0) {
-                    marcadores.push({
-                        time: tiempo,
-                        position: 'aboveBar',
-                        color: '#ef5350',
-                        shape: 'arrowDown',
-                        text: `${datos.ventas.toFixed(1)} BTC`,
-                        size: datos.ventas > 15 ? 2 : 1
-                    });
+                    marcadores.push({ time: tiempo, position: 'aboveBar', color: '#ef5350', shape: 'arrowDown', text: `${datos.ventas.toFixed(1)} BTC`, size: datos.ventas > 15 ? 2 : 1 });
                 }
             });
 
@@ -282,6 +272,72 @@
 
         setTimeout(pedirHistorialBallenas, 2000);
         setInterval(pedirHistorialBallenas, 30000);
+
+        // --- 4. INTERÉS ABIERTO (HISTÓRICO + EN VIVO) ---
+        let memoriaOIBD = []; // Guardamos el historial bruto del servidor aquí
+
+        function pedirHistorialOI() {
+            fetch('/api/open-interest')
+                .then(respuesta => respuesta.json())
+                .then(datos => {
+                    memoriaOIBD = datos;
+                    dibujarOI(); // Dibujamos con el filtro de imán
+                })
+                .catch(error => console.error("Error al cargar historial OI:", error));
+        }
+
+        function dibujarOI() {
+            // Si no hay datos de OI o aún no cargaron las velas, salimos
+            if (memoriaOIBD.length === 0 || tiemposVelasActivas.length === 0) return;
+
+            let oiAgrupado = {};
+
+            memoriaOIBD.forEach(d => {
+                let tiempoOI = parseInt(d.tiempo);
+                
+                // Aplicamos el "Efecto Imán" para alinear el OI a las velas de la temporalidad actual (ej. 15m)
+                let tiempoVela = obtenerVelaExacta(tiempoOI);
+                
+                if (tiempoVela !== null) {
+                    // Al agrupar, si hay varios minutos dentro de una vela de 15m, 
+                    // siempre nos quedaremos con el último que se procese, lo cual es ideal.
+                    oiAgrupado[tiempoVela] = parseFloat(d.valor);
+                }
+            });
+
+            // Convertimos al formato final de lightweight charts
+            let oiDataHistorial = Object.keys(oiAgrupado).map(t => ({
+                time: parseInt(t),
+                value: oiAgrupado[t]
+            }));
+            
+            // Ordenamos estrictamente por tiempo para no romper la librería
+            oiDataHistorial.sort((a, b) => a.time - b.time);
+            
+            try {
+                oiSeries.setData(oiDataHistorial);
+            } catch (error) {
+                console.log("Error al dibujar Open Interest:", error);
+            }
+        }
+
+        function actualizarOpenInterestEnVivo() {
+            fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT')
+                .then(respuesta => respuesta.json())
+                .then(datos => {
+                    if (ultimoTiempoVela) {
+                        let contratosAbiertos = parseFloat(datos.openInterest);
+                        // Como `ultimoTiempoVela` es el tiempo validado de la vela en curso, no genera huecos.
+                        oiSeries.update({ time: ultimoTiempoVela, value: contratosAbiertos });
+                    }
+                })
+                .catch(error => console.log("Error al traer Open Interest en vivo:", error));
+        }
+        
+        // Arrancamos los ciclos de OI
+        setTimeout(pedirHistorialOI, 1000);
+        setInterval(actualizarOpenInterestEnVivo, 3000);
+        setInterval(pedirHistorialOI, 60000); // Refrescamos el historial cada 1 minuto
 
         // --- 2. SISTEMA PROFESIONAL DE MUROS LOCALES ---
         let orderBookLocal = { asks: {}, bids: {} };
@@ -396,46 +452,6 @@
                 document.getElementById('whale-tape').innerHTML = htmlCinta;
             }
         };
-
-        // --- 4. INTERÉS ABIERTO (HISTÓRICO + EN VIVO) ---
-        function cargarHistorialOI() {
-            fetch('/api/open-interest')
-                .then(respuesta => respuesta.json())
-                .then(datos => {
-                    let oiDataHistorial = [];
-                    datos.forEach(d => {
-                        oiDataHistorial.push({ time: parseInt(d.tiempo), value: parseFloat(d.valor) });
-                    });
-                    
-                    oiDataHistorial.sort((a, b) => a.time - b.time);
-                    
-                    if(oiDataHistorial.length > 0) {
-                        oiSeries.setData(oiDataHistorial);
-                    }
-                    
-                    actualizarOpenInterestEnVivo();
-                    setInterval(actualizarOpenInterestEnVivo, 3000);
-                })
-                .catch(error => {
-                    console.error("Error al cargar historial OI:", error);
-                    actualizarOpenInterestEnVivo();
-                    setInterval(actualizarOpenInterestEnVivo, 3000);
-                });
-        }
-
-        function actualizarOpenInterestEnVivo() {
-            fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT')
-                .then(respuesta => respuesta.json())
-                .then(datos => {
-                    if (ultimoTiempoVela) {
-                        let contratosAbiertos = parseFloat(datos.openInterest);
-                        oiSeries.update({ time: ultimoTiempoVela, value: contratosAbiertos });
-                    }
-                })
-                .catch(error => console.log("Error al traer Open Interest en vivo:", error));
-        }
-        
-        setTimeout(cargarHistorialOI, 1000);
 
     </script>
 </body>
