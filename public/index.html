@@ -122,8 +122,6 @@
 
         let binanceSocket = null; 
         let ultimoTiempoVela = null; 
-        
-        // ¡NUEVA MEJORA! Aquí guardaremos exactamente los tiempos de las velas reales de Binance
         let tiemposVelasActivas = [];
 
         function cargarDatos(temporalidad) {
@@ -132,7 +130,7 @@
                 .then(r => r.json())
                 .then(datos => {
                     let velas = []; let datosDelta = [];
-                    tiemposVelasActivas = []; // Limpiamos la memoria al cambiar de temporalidad
+                    tiemposVelasActivas = []; 
 
                     datos.forEach(v => {
                         let tiempo = Math.floor(v[0] / 1000); 
@@ -145,7 +143,7 @@
                         velas.push({ time: tiempo, open: apertura, high: parseFloat(v[2]), low: parseFloat(v[3]), close: cierre });
                         datosDelta.push({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
                         
-                        tiemposVelasActivas.push(tiempo); // Registramos esta vela como 100% real
+                        tiemposVelasActivas.push(tiempo); 
                         ultimoTiempoVela = tiempo; 
                     });
                     
@@ -153,7 +151,6 @@
                     deltaSeries.setData(datosDelta); 
                     chart.timeScale().fitContent(); 
                     
-                    // Al cargar una nueva temporalidad, forzamos redibujar marcadores y OI para que se adapten
                     dibujarMarcadores(); 
                     dibujarOI(); 
 
@@ -170,7 +167,6 @@
                         candlestickSeries.update({ time: tiempo, open: apertura, high: parseFloat(k.h), low: parseFloat(k.l), close: cierre });
                         deltaSeries.update({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
                         
-                        // Si nace una vela nueva en vivo, la agregamos a nuestra lista segura
                         if (tiemposVelasActivas.length === 0 || tiemposVelasActivas[tiemposVelasActivas.length - 1] !== tiempo) {
                             tiemposVelasActivas.push(tiempo);
                         }
@@ -188,16 +184,14 @@
         cambiarTemporalidad('1m');
 
         // --- SISTEMA DE "EFECTO IMÁN" COMPARTIDO ---
-        // Función imán: Encuentra la vela real más cercana hacia atrás para que no existan datos "huérfanos" en el tiempo
         function obtenerVelaExacta(tiempoBuscado) {
             if (tiemposVelasActivas.length === 0) return null;
-            // Buscamos de la vela más actual hacia la más antigua
             for (let i = tiemposVelasActivas.length - 1; i >= 0; i--) {
                 if (tiemposVelasActivas[i] <= tiempoBuscado) {
                     return tiemposVelasActivas[i];
                 }
             }
-            return tiemposVelasActivas[0]; // Si es más vieja que nuestro historial, va a la primera
+            return tiemposVelasActivas[0]; 
         }
 
         // --- DIBUJADO DE BALLENAS EN EL GRÁFICO ---
@@ -221,15 +215,12 @@
                 const cantidadBtc = parseFloat(trade.cantidad);
                 if (cantidadBtc >= limiteBtc) {
                     let tiempoSegundos = Math.floor(trade.tiempo_segundos);
-                    
-                    // Anclamos al tiempo real y seguro de la vela en el gráfico (EFECTO IMÁN)
                     let tiempoVela = obtenerVelaExacta(tiempoSegundos);
 
                     if (tiempoVela !== null) {
                         if (!marcadoresAgrupados[tiempoVela]) {
                             marcadoresAgrupados[tiempoVela] = { compras: 0, ventas: 0 };
                         }
-
                         if (trade.es_venta) {
                             marcadoresAgrupados[tiempoVela].ventas += cantidadBtc;
                         } else {
@@ -240,8 +231,6 @@
             });
 
             let marcadores = [];
-
-            // Transformamos los grupos en flechas visuales
             Object.keys(marcadoresAgrupados).forEach(t => {
                 let tiempo = parseInt(t);
                 let datos = marcadoresAgrupados[tiempo];
@@ -249,13 +238,11 @@
                 if (datos.compras > 0) {
                     marcadores.push({ time: tiempo, position: 'belowBar', color: '#26a69a', shape: 'arrowUp', text: `${datos.compras.toFixed(1)} BTC`, size: datos.compras > 15 ? 2 : 1 });
                 }
-                
                 if (datos.ventas > 0) {
                     marcadores.push({ time: tiempo, position: 'aboveBar', color: '#ef5350', shape: 'arrowDown', text: `${datos.ventas.toFixed(1)} BTC`, size: datos.ventas > 15 ? 2 : 1 });
                 }
             });
 
-            // Orden estricto que pide la librería
             marcadores.sort((a, b) => a.time - b.time);
             
             try {
@@ -273,51 +260,58 @@
         setTimeout(pedirHistorialBallenas, 2000);
         setInterval(pedirHistorialBallenas, 30000);
 
-        // --- 4. INTERÉS ABIERTO (HISTÓRICO + EN VIVO) ---
-        let memoriaOIBD = []; // Guardamos el historial bruto del servidor aquí
+        // --- 4. INTERÉS ABIERTO (HISTÓRICO + EN VIVO BLINDADO) ---
+        let memoriaOIBD = []; 
 
-        function pedirHistorialOI() {
+        function cargarHistorialOI() {
             fetch('/api/open-interest')
                 .then(respuesta => respuesta.json())
                 .then(datos => {
                     memoriaOIBD = datos;
-                    dibujarOI(); // Dibujamos con el filtro de imán
+                    dibujarOI(); 
                 })
                 .catch(error => console.error("Error al cargar historial OI:", error));
         }
 
         function dibujarOI() {
-            // Si no hay datos de OI o aún no cargaron las velas, salimos
+            // Si la base de datos no trajo nada o no hay velas, abortamos
             if (memoriaOIBD.length === 0 || tiemposVelasActivas.length === 0) return;
 
             let oiAgrupado = {};
 
             memoriaOIBD.forEach(d => {
                 let tiempoOI = parseInt(d.tiempo);
-                
-                // Aplicamos el "Efecto Imán" para alinear el OI a las velas de la temporalidad actual (ej. 15m)
+                // Filtro antibasura por si la BD manda algo raro
+                if (isNaN(tiempoOI)) return; 
+
                 let tiempoVela = obtenerVelaExacta(tiempoOI);
                 
                 if (tiempoVela !== null) {
-                    // Al agrupar, si hay varios minutos dentro de una vela de 15m, 
-                    // siempre nos quedaremos con el último que se procese, lo cual es ideal.
                     oiAgrupado[tiempoVela] = parseFloat(d.valor);
                 }
             });
 
-            // Convertimos al formato final de lightweight charts
-            let oiDataHistorial = Object.keys(oiAgrupado).map(t => ({
-                time: parseInt(t),
-                value: oiAgrupado[t]
-            }));
+            let oiDataHistorial = [];
+            Object.keys(oiAgrupado).forEach(t => {
+                let valorFinal = oiAgrupado[t];
+                // Segundo filtro antibasura: Nos aseguramos de que el valor sea numérico
+                if (!isNaN(valorFinal)) {
+                    oiDataHistorial.push({
+                        time: parseInt(t),
+                        value: valorFinal
+                    });
+                }
+            });
             
-            // Ordenamos estrictamente por tiempo para no romper la librería
+            // Requisito estricto de Lightweight Charts
             oiDataHistorial.sort((a, b) => a.time - b.time);
             
-            try {
-                oiSeries.setData(oiDataHistorial);
-            } catch (error) {
-                console.log("Error al dibujar Open Interest:", error);
+            if (oiDataHistorial.length > 0) {
+                try {
+                    oiSeries.setData(oiDataHistorial);
+                } catch (error) {
+                    console.log("Error interno al dibujar Open Interest:", error);
+                }
             }
         }
 
@@ -327,17 +321,23 @@
                 .then(datos => {
                     if (ultimoTiempoVela) {
                         let contratosAbiertos = parseFloat(datos.openInterest);
-                        // Como `ultimoTiempoVela` es el tiempo validado de la vela en curso, no genera huecos.
                         oiSeries.update({ time: ultimoTiempoVela, value: contratosAbiertos });
                     }
                 })
                 .catch(error => console.log("Error al traer Open Interest en vivo:", error));
         }
         
-        // Arrancamos los ciclos de OI
-        setTimeout(pedirHistorialOI, 1000);
-        setInterval(actualizarOpenInterestEnVivo, 3000);
-        setInterval(pedirHistorialOI, 60000); // Refrescamos el historial cada 1 minuto
+        // Secuencia lógica de encendido: Primero las velas (arriba), luego el Historial, y por ÚLTIMO el vivo
+        setTimeout(() => {
+            cargarHistorialOI();
+            
+            // Retrasamos el "En Vivo" 3 segundos para asegurar que el motor gráfico haya pintado el pasado
+            setTimeout(() => {
+                actualizarOpenInterestEnVivo();
+                setInterval(actualizarOpenInterestEnVivo, 3000);
+            }, 3000);
+            
+        }, 1000);
 
         // --- 2. SISTEMA PROFESIONAL DE MUROS LOCALES ---
         let orderBookLocal = { asks: {}, bids: {} };
