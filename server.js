@@ -1,19 +1,17 @@
 const express = require('express');
 const path = require('path');
 const { Pool } = require('pg'); 
-const WebSocket = require('ws'); // Traemos la nueva herramienta para escuchar a Binance
+const WebSocket = require('ws'); 
 
 const app = express();
 
 // 1. CONFIGURACIÓN DE LA BASE DE DATOS
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false 
-    }
+    ssl: { rejectUnauthorized: false }
 });
 
-// 2. FUNCIÓN PARA CREAR LAS TABLAS
+// 2. CREAR TABLAS
 async function inicializarBaseDeDatos() {
     const queryTablaBallenas = `
         CREATE TABLE IF NOT EXISTS ballenas (
@@ -24,7 +22,6 @@ async function inicializarBaseDeDatos() {
             es_venta BOOLEAN NOT NULL
         );
     `;
-
     try {
         await pool.query(queryTablaBallenas);
         console.log('✅ Base de datos lista y conectada.');
@@ -32,62 +29,62 @@ async function inicializarBaseDeDatos() {
         console.error('❌ Error al crear las tablas:', error);
     }
 }
-
 inicializarBaseDeDatos();
 
-// 3. EL CAZADOR DE BALLENAS (NUEVO)
+// 3. EL CAZADOR DE BALLENAS
 function iniciarRastreadorBallenas() {
-    // Nos conectamos al mismo tubo de datos que usa tu frontend
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
-    const UMBRAL_BTC = 1.0; // Solo guardamos si es 1 BTC o más
+    const UMBRAL_BTC = 1.0; 
 
-    ws.on('open', () => {
-        console.log('✅ Servidor conectado a la Cinta de Ballenas de Binance.');
-    });
+    ws.on('open', () => console.log('✅ Conectado a la Cinta de Binance.'));
 
     ws.on('message', async (data) => {
         try {
             const evento = JSON.parse(data);
             const cantidad = parseFloat(evento.q);
             const precio = parseFloat(evento.p);
-            const es_venta = evento.m; // true si el agresor vendió, false si compró
+            const es_venta = evento.m; 
 
-            // Si el trade es gigante, lo guardamos en la base de datos
             if (cantidad >= UMBRAL_BTC) {
-                const queryInsertar = `
-                    INSERT INTO ballenas (precio, cantidad, es_venta) 
-                    VALUES ($1, $2, $3)
-                `;
-                const valores = [precio, cantidad, es_venta];
-                
-                await pool.query(queryInsertar, valores);
-                console.log(`🐳 Guardado en BD: ${es_venta ? 'VENTA' : 'COMPRA'} de ${cantidad} BTC a $${precio}`);
+                const queryInsertar = `INSERT INTO ballenas (precio, cantidad, es_venta) VALUES ($1, $2, $3)`;
+                await pool.query(queryInsertar, [precio, cantidad, es_venta]);
             }
         } catch (error) {
-            console.error('❌ Error al procesar o guardar el trade:', error);
+            console.error('Error al guardar trade:', error);
         }
     });
 
-    // Si Binance nos desconecta, intentamos reconectar a los 5 segundos
     ws.on('close', () => {
-        console.log('⚠️ Binance cerró la conexión. Reconectando en 5 segundos...');
+        console.log('⚠️ Reconectando en 5 segundos...');
         setTimeout(iniciarRastreadorBallenas, 5000);
     });
 }
-
-// Encendemos el cazador de ballenas
 iniciarRastreadorBallenas();
 
+// 4. NUEVA RUTA: LA PUERTA DE DATOS (API) PARA EL GRÁFICO
+// Cuando la web pida datos aquí, el servidor busca en la base de datos
+app.get('/api/ballenas', async (req, res) => {
+    try {
+        // Traemos las últimas 2000 órdenes guardadas. 
+        // Convertimos la fecha a "segundos" (EPOCH) porque así lo requiere el gráfico visual
+        const query = `
+            SELECT precio, cantidad, es_venta, EXTRACT(EPOCH FROM fecha) as tiempo_segundos 
+            FROM ballenas 
+            ORDER BY fecha ASC
+            LIMIT 2000
+        `;
+        const resultado = await pool.query(query);
+        res.json(resultado.rows); // Se lo enviamos a la página web
+    } catch (error) {
+        console.error('Error al obtener el historial:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
 
-// 4. CONFIGURACIÓN DE TU PÁGINA WEB
+
+// 5. CONFIGURACIÓN WEB
 app.use(express.static(path.join(__dirname, 'public')));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// 5. ENCENDER EL SERVIDOR
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`¡Terminal Institucional encendida en el puerto ${PORT}!`);
-});
+app.listen(PORT, () => console.log(`¡Terminal Institucional encendida en puerto ${PORT}!`));
