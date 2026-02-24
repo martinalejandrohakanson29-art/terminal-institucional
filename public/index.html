@@ -9,36 +9,37 @@
     
     <style>
         * { box-sizing: border-box; }
-        body { margin: 0; padding: 0; background-color: #131722; color: white; font-family: Arial, sans-serif; overflow: hidden; width: 100vw; height: 100vh; }
-        #header { padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; background-color: #1e222d; border-bottom: 1px solid #2B2B43; height: 60px; }
+        /* Cambiamos a un fondo gris muy suave y texto oscuro para descansar la vista */
+        body { margin: 0; padding: 0; background-color: #f0f2f5; color: #1e1e1e; font-family: Arial, sans-serif; overflow: hidden; width: 100vw; height: 100vh; }
+        #header { padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; background-color: #ffffff; border-bottom: 1px solid #d1d4dc; height: 60px; }
         h2 { margin: 0; font-size: 1.2rem; }
         
         .botonera { display: flex; gap: 5px; align-items: center; }
-        .btn-tiempo { background-color: #2B2B43; color: #d1d4dc; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
-        .btn-tiempo:hover { background-color: #3f3f5a; }
-        .btn-activo { background-color: #2962FF; color: white; }
+        .btn-tiempo { background-color: #f0f2f5; color: #1e1e1e; border: 1px solid #d1d4dc; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+        .btn-tiempo:hover { background-color: #e2e8f0; }
+        .btn-activo { background-color: #2962FF; color: white; border-color: #2962FF; }
 
         #main-content { display: flex; width: 100%; height: calc(100vh - 60px); }
         #chart-container { flex-grow: 1; position: relative; overflow: hidden; } 
 
         #orderbook-container {
-            width: 320px; min-width: 320px; flex-shrink: 0; background-color: #1e222d; border-left: 1px solid #2B2B43; display: flex; flex-direction: column; font-size: 13px; overflow-y: auto;
+            width: 320px; min-width: 320px; flex-shrink: 0; background-color: #ffffff; border-left: 1px solid #d1d4dc; display: flex; flex-direction: column; font-size: 13px; overflow-y: auto;
         }
         
-        .ob-titulo { text-align: center; padding: 12px 10px 5px; font-weight: bold; font-size: 15px; background-color: #131722; color: #d1d4dc;}
-        .ob-subtitulo { text-align: center; font-size: 11px; color: #848e9c; padding-bottom: 10px; border-bottom: 1px solid #2B2B43; background-color: #131722; display: flex; justify-content: center; align-items: center; gap: 5px;}
+        .ob-titulo { text-align: center; padding: 12px 10px 5px; font-weight: bold; font-size: 15px; background-color: #ffffff; color: #1e1e1e;}
+        .ob-subtitulo { text-align: center; font-size: 11px; color: #64748b; padding-bottom: 10px; border-bottom: 1px solid #d1d4dc; background-color: #ffffff; display: flex; justify-content: center; align-items: center; gap: 5px;}
         
-        .input-rango { background-color: #2B2B43; color: #FFD700; border: 1px solid #3f3f5a; border-radius: 4px; width: 45px; text-align: center; font-weight: bold; font-size: 11px; padding: 2px; outline: none; }
+        .input-rango { background-color: #ffffff; color: #1e1e1e; border: 1px solid #d1d4dc; border-radius: 4px; width: 45px; text-align: center; font-weight: bold; font-size: 11px; padding: 2px; outline: none; }
         
-        .seccion-panel { padding: 10px; border-bottom: 1px solid #2B2B43; }
+        .seccion-panel { padding: 10px; border-bottom: 1px solid #d1d4dc; }
         .titulo-rojo { color: #ef5350; font-weight: bold; margin-bottom: 8px; text-align: center; }
         .titulo-verde { color: #26a69a; font-weight: bold; margin-bottom: 8px; text-align: center; }
         
-        .muro-item { display: flex; justify-content: space-between; background-color: #131722; padding: 6px 10px; margin-bottom: 4px; border-radius: 4px; font-family: monospace; align-items: center; }
+        .muro-item { display: flex; justify-content: space-between; background-color: #f8f9fa; border: 1px solid #e2e8f0; padding: 6px 10px; margin-bottom: 4px; border-radius: 4px; font-family: monospace; align-items: center; }
         .muro-precio { font-weight: bold; font-size: 13px; }
-        .muro-volumen { color: #d1d4dc; font-size: 13px; }
+        .muro-volumen { color: #64748b; font-size: 13px; }
 
-        @keyframes destello { 0% { background-color: rgba(255, 215, 0, 0.5); } 100% { background-color: #131722; } }
+        @keyframes destello { 0% { background-color: rgba(41, 98, 255, 0.2); } 100% { background-color: #f8f9fa; } }
         .flash-trade { animation: destello 1s ease-out; }
     </style>
 </head>
@@ -48,7 +49,7 @@
         <h2>Terminal Institucional BTC/USDT</h2>
         
         <div class="botonera" style="margin-right: auto; margin-left: 20px;">
-            <span style="font-size: 12px; color: #848e9c; margin-right: 5px;">Filtrar marcadores Gráfico (BTC): ></span>
+            <span style="font-size: 12px; color: #64748b; margin-right: 5px;">Filtrar marcadores Gráfico (BTC): ></span>
             <input type="number" id="filtro-grafico" class="input-rango" value="5" min="1" step="1">
         </div>
 
@@ -109,10 +110,33 @@
 
         // --- 1. GRÁFICO (Velas, Delta, Open Interest) ---
         const container = document.getElementById('chart-container');
-        const chartOptions = { width: container.clientWidth, height: container.clientHeight, layout: { textColor: '#d1d4dc', background: { type: 'solid', color: '#131722' } }, grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } }, crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, rightPriceScale: { borderColor: '#2B2B43' }, timeScale: { borderColor: '#2B2B43', timeVisible: true, secondsVisible: false }, };
+        const chartOptions = { 
+            width: container.clientWidth, 
+            height: container.clientHeight, 
+            layout: { 
+                textColor: '#1e1e1e', 
+                background: { type: 'solid', color: '#f0f2f5' } // Fondo Liso Gris/Blanco
+            }, 
+            grid: { 
+                vertLines: { visible: false }, // Apagamos coordenadas verticales
+                horzLines: { visible: false }  // Apagamos coordenadas horizontales
+            }, 
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, 
+            rightPriceScale: { borderColor: '#d1d4dc' }, 
+            timeScale: { borderColor: '#d1d4dc', timeVisible: true, secondsVisible: false }, 
+        };
         const chart = LightweightCharts.createChart(container, chartOptions);
         
-        const candlestickSeries = chart.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
+        const candlestickSeries = chart.addCandlestickSeries({ 
+            upColor: '#26a69a', 
+            downColor: '#ef5350', 
+            borderVisible: false, 
+            wickUpColor: '#26a69a', 
+            wickDownColor: '#ef5350',
+            priceLineColor: '#000000', // Línea del precio actual en NEGRO
+            priceLineWidth: 2
+        });
+        
         const deltaSeries = chart.addHistogramSeries({ base: 0, priceScaleId: 'deltaScale' });
         chart.priceScale('deltaScale').applyOptions({ scaleMargins: { top: 0.65, bottom: 0.2 } });
         const oiSeries = chart.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, priceScaleId: 'oiScale', title: 'Open Int.' });
@@ -123,6 +147,7 @@
         let binanceSocket = null; 
         let ultimoTiempoVela = null; 
         let tiemposVelasActivas = [];
+        let multiplicadorTemporalidad = 60; // Nos servirá para calcular el largo de las líneas de los muros
 
         function cargarDatos(temporalidad) {
             if (binanceSocket !== null) binanceSocket.close();
@@ -179,6 +204,15 @@
         function cambiarTemporalidad(t) {
             document.querySelectorAll('.btn-tiempo').forEach(btn => btn.classList.remove('btn-activo'));
             document.getElementById(`btn-${t}`).classList.add('btn-activo'); 
+            
+            // Ajustamos el multiplicador para saber cuánto "hacia el futuro" estiraremos los muros
+            if(t === '1m') multiplicadorTemporalidad = 60;
+            else if(t === '5m') multiplicadorTemporalidad = 300;
+            else if(t === '15m') multiplicadorTemporalidad = 900;
+            else if(t === '1h') multiplicadorTemporalidad = 3600;
+            else if(t === '4h') multiplicadorTemporalidad = 14400;
+            else if(t === '1d') multiplicadorTemporalidad = 86400;
+
             cargarDatos(t);
         }
         cambiarTemporalidad('1m');
@@ -274,14 +308,12 @@
         }
 
         function dibujarOI() {
-            // Si la base de datos no trajo nada o no hay velas, abortamos
             if (memoriaOIBD.length === 0 || tiemposVelasActivas.length === 0) return;
 
             let oiAgrupado = {};
 
             memoriaOIBD.forEach(d => {
                 let tiempoOI = parseInt(d.tiempo);
-                // Filtro antibasura por si la BD manda algo raro
                 if (isNaN(tiempoOI)) return; 
 
                 let tiempoVela = obtenerVelaExacta(tiempoOI);
@@ -294,24 +326,16 @@
             let oiDataHistorial = [];
             Object.keys(oiAgrupado).forEach(t => {
                 let valorFinal = oiAgrupado[t];
-                // Segundo filtro antibasura: Nos aseguramos de que el valor sea numérico
                 if (!isNaN(valorFinal)) {
-                    oiDataHistorial.push({
-                        time: parseInt(t),
-                        value: valorFinal
-                    });
+                    oiDataHistorial.push({ time: parseInt(t), value: valorFinal });
                 }
             });
             
-            // Requisito estricto de Lightweight Charts
             oiDataHistorial.sort((a, b) => a.time - b.time);
             
             if (oiDataHistorial.length > 0) {
-                try {
-                    oiSeries.setData(oiDataHistorial);
-                } catch (error) {
-                    console.log("Error interno al dibujar Open Interest:", error);
-                }
+                try { oiSeries.setData(oiDataHistorial); } 
+                catch (error) { console.log("Error interno al dibujar Open Interest:", error); }
             }
         }
 
@@ -327,22 +351,20 @@
                 .catch(error => console.log("Error al traer Open Interest en vivo:", error));
         }
         
-        // Secuencia lógica de encendido: Primero las velas (arriba), luego el Historial, y por ÚLTIMO el vivo
         setTimeout(() => {
             cargarHistorialOI();
-            
-            // Retrasamos el "En Vivo" 3 segundos para asegurar que el motor gráfico haya pintado el pasado
             setTimeout(() => {
                 actualizarOpenInterestEnVivo();
                 setInterval(actualizarOpenInterestEnVivo, 3000);
             }, 3000);
-            
         }, 1000);
 
         // --- 2. SISTEMA PROFESIONAL DE MUROS LOCALES ---
         let orderBookLocal = { asks: {}, bids: {} };
         const TAMAÑO_GRUPO = 50; 
-        let lineasDibujadas = []; 
+        
+        // Variable Experta: En vez de priceLines, usaremos mini-series de líneas para que no crucen todo el gráfico.
+        let seriesDeMuros = []; 
 
         fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000')
             .then(r => r.json())
@@ -399,12 +421,54 @@
             
             let top3Ventas = ventasEnRango.slice(0, 3); let top3Compras = comprasEnRango.slice(0, 3);
 
+            // Actualizamos la interfaz HTML lateral
             document.getElementById('top-ventas').innerHTML = top3Ventas.map(v => `<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
             document.getElementById('top-compras').innerHTML = top3Compras.map(c => `<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
 
-            lineasDibujadas.forEach(linea => candlestickSeries.removePriceLine(linea)); lineasDibujadas = []; 
-            top3Ventas.forEach(v => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: v[0], color: '#ef5350', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `RES ${v[1].toFixed(0)} BTC` })));
-            top3Compras.forEach(c => lineasDibujadas.push(candlestickSeries.createPriceLine({ price: c[0], color: '#26a69a', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: `SOP ${c[1].toFixed(0)} BTC` })));
+            // Borramos de pantalla las series viejas de muros
+            seriesDeMuros.forEach(serie => chart.removeSeries(serie)); 
+            seriesDeMuros = []; 
+
+            if (!ultimoTiempoVela) return; // Validación de seguridad
+
+            // Calculamos hacia dónde queremos que termine la línea en el futuro (ej: 50 velas adelante)
+            let tiempoFuturo = ultimoTiempoVela + (multiplicadorTemporalidad * 50);
+
+            // Creamos las Resistencias desde la vela actual a la derecha
+            top3Ventas.forEach(v => {
+                let serieMuro = chart.addLineSeries({
+                    color: '#ef5350', 
+                    lineWidth: 2, 
+                    lineStyle: LightweightCharts.LineStyle.Dashed, 
+                    lastValueVisible: true, 
+                    priceLineVisible: false, // Apagamos la línea lateral completa
+                    crosshairMarkerVisible: false,
+                    title: `RES ${v[1].toFixed(0)} BTC`
+                });
+                serieMuro.setData([
+                    { time: ultimoTiempoVela, value: v[0] }, // Punto 1: Vela Actual
+                    { time: tiempoFuturo, value: v[0] }      // Punto 2: Futuro
+                ]);
+                seriesDeMuros.push(serieMuro);
+            });
+
+            // Creamos los Soportes desde la vela actual a la derecha
+            top3Compras.forEach(c => {
+                let serieMuro = chart.addLineSeries({
+                    color: '#26a69a', 
+                    lineWidth: 2, 
+                    lineStyle: LightweightCharts.LineStyle.Dashed, 
+                    lastValueVisible: true, 
+                    priceLineVisible: false, // Apagamos la línea lateral completa
+                    crosshairMarkerVisible: false,
+                    title: `SOP ${c[1].toFixed(0)} BTC`
+                });
+                serieMuro.setData([
+                    { time: ultimoTiempoVela, value: c[0] }, // Punto 1: Vela Actual
+                    { time: tiempoFuturo, value: c[0] }      // Punto 2: Futuro
+                ]);
+                seriesDeMuros.push(serieMuro);
+            });
         }
 
         setInterval(dibujarMuros, 2000);
