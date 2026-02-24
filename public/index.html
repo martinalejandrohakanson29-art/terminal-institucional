@@ -123,8 +123,8 @@
         let binanceSocket = null; 
         let ultimoTiempoVela = null; 
         
-        // Variable mágica para alinear el tiempo de las ballenas
-        let intervaloGlobalSegundos = 60;
+        // ¡NUEVA MEJORA! Aquí guardaremos exactamente los tiempos de las velas reales de Binance
+        let tiemposVelasActivas = [];
 
         function cargarDatos(temporalidad) {
             if (binanceSocket !== null) binanceSocket.close();
@@ -132,21 +132,46 @@
                 .then(r => r.json())
                 .then(datos => {
                     let velas = []; let datosDelta = [];
+                    tiemposVelasActivas = []; // Limpiamos la memoria al cambiar de temporalidad
+
                     datos.forEach(v => {
-                        let tiempo = Math.floor(v[0] / 1000); let apertura = parseFloat(v[1]); let cierre = parseFloat(v[4]);
-                        let comprasMercado = parseFloat(v[9]); let ventasMercado = parseFloat(v[5]) - comprasMercado; let valorDelta = comprasMercado - ventasMercado;
+                        let tiempo = Math.floor(v[0] / 1000); 
+                        let apertura = parseFloat(v[1]); 
+                        let cierre = parseFloat(v[4]);
+                        let comprasMercado = parseFloat(v[9]); 
+                        let ventasMercado = parseFloat(v[5]) - comprasMercado; 
+                        let valorDelta = comprasMercado - ventasMercado;
+                        
                         velas.push({ time: tiempo, open: apertura, high: parseFloat(v[2]), low: parseFloat(v[3]), close: cierre });
                         datosDelta.push({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
+                        
+                        tiemposVelasActivas.push(tiempo); // Registramos esta vela como 100% real
                         ultimoTiempoVela = tiempo; 
                     });
-                    candlestickSeries.setData(velas); deltaSeries.setData(datosDelta); chart.timeScale().fitContent(); 
+                    candlestickSeries.setData(velas); 
+                    deltaSeries.setData(datosDelta); 
+                    chart.timeScale().fitContent(); 
+                    
+                    dibujarMarcadores(); // Forzamos redibujar por si ya habían cargado
 
                     binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
                     binanceSocket.onmessage = function (e) {
-                        const k = JSON.parse(e.data).k; let tiempo = Math.floor(k.t / 1000); let apertura = parseFloat(k.o); let cierre = parseFloat(k.c);
-                        let comprasMercado = parseFloat(k.V); let ventasMercado = parseFloat(k.v) - comprasMercado; let valorDelta = comprasMercado - ventasMercado;
+                        const k = JSON.parse(e.data).k; 
+                        let tiempo = Math.floor(k.t / 1000); 
+                        let apertura = parseFloat(k.o); 
+                        let cierre = parseFloat(k.c);
+                        let comprasMercado = parseFloat(k.V); 
+                        let ventasMercado = parseFloat(k.v) - comprasMercado; 
+                        let valorDelta = comprasMercado - ventasMercado;
+                        
                         candlestickSeries.update({ time: tiempo, open: apertura, high: parseFloat(k.h), low: parseFloat(k.l), close: cierre });
                         deltaSeries.update({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
+                        
+                        // Si nace una vela nueva en vivo, la agregamos a nuestra lista segura
+                        if (tiemposVelasActivas.length === 0 || tiemposVelasActivas[tiemposVelasActivas.length - 1] !== tiempo) {
+                            tiemposVelasActivas.push(tiempo);
+                        }
+                        
                         ultimoTiempoVela = tiempo; 
                     };
                 });
@@ -155,15 +180,6 @@
         function cambiarTemporalidad(t) {
             document.querySelectorAll('.btn-tiempo').forEach(btn => btn.classList.remove('btn-activo'));
             document.getElementById(`btn-${t}`).classList.add('btn-activo'); 
-            
-            // Calculamos cuántos segundos tiene la temporalidad actual
-            if (t === '1m') intervaloGlobalSegundos = 60;
-            else if (t === '5m') intervaloGlobalSegundos = 300;
-            else if (t === '15m') intervaloGlobalSegundos = 900;
-            else if (t === '1h') intervaloGlobalSegundos = 3600;
-            else if (t === '4h') intervaloGlobalSegundos = 14400;
-            else if (t === '1d') intervaloGlobalSegundos = 86400;
-
             cargarDatos(t);
         }
         cambiarTemporalidad('1m');
@@ -181,34 +197,47 @@
                 .catch(err => console.error("Error al pedir historial:", err));
         }
 
+        // Función imán: Encuentra la vela real más cercana hacia atrás
+        function obtenerVelaExacta(tiempoBallena) {
+            if (tiemposVelasActivas.length === 0) return null;
+            // Buscamos de la vela más actual hacia la más antigua
+            for (let i = tiemposVelasActivas.length - 1; i >= 0; i--) {
+                if (tiemposVelasActivas[i] <= tiempoBallena) {
+                    return tiemposVelasActivas[i];
+                }
+            }
+            return tiemposVelasActivas[0]; // Si es más vieja que nuestro historial, va a la primera
+        }
+
         function dibujarMarcadores() {
             const limiteBtc = parseFloat(inputFiltroGrafico.value) || 5;
             let marcadoresAgrupados = {};
 
-            // Agrupamos y sumamos las ballenas por vela
             memoriaBallenasBD.forEach(trade => {
                 const cantidadBtc = parseFloat(trade.cantidad);
                 if (cantidadBtc >= limiteBtc) {
                     let tiempoSegundos = Math.floor(trade.tiempo_segundos);
                     
-                    // Alineación perfecta: forzamos que el tiempo coincida con la apertura de la vela
-                    let tiempoVela = Math.floor(tiempoSegundos / intervaloGlobalSegundos) * intervaloGlobalSegundos;
+                    // Anclamos al tiempo real y seguro de la vela en el gráfico (EFECTO IMÁN)
+                    let tiempoVela = obtenerVelaExacta(tiempoSegundos);
 
-                    if (!marcadoresAgrupados[tiempoVela]) {
-                        marcadoresAgrupados[tiempoVela] = { compras: 0, ventas: 0 };
-                    }
+                    if (tiempoVela !== null) {
+                        if (!marcadoresAgrupados[tiempoVela]) {
+                            marcadoresAgrupados[tiempoVela] = { compras: 0, ventas: 0 };
+                        }
 
-                    if (trade.es_venta) {
-                        marcadoresAgrupados[tiempoVela].ventas += cantidadBtc;
-                    } else {
-                        marcadoresAgrupados[tiempoVela].compras += cantidadBtc;
+                        if (trade.es_venta) {
+                            marcadoresAgrupados[tiempoVela].ventas += cantidadBtc;
+                        } else {
+                            marcadoresAgrupados[tiempoVela].compras += cantidadBtc;
+                        }
                     }
                 }
             });
 
             let marcadores = [];
 
-            // Convertimos los grupos al formato que necesita la librería
+            // Transformamos los grupos en flechas visuales
             Object.keys(marcadoresAgrupados).forEach(t => {
                 let tiempo = parseInt(t);
                 let datos = marcadoresAgrupados[tiempo];
@@ -236,7 +265,7 @@
                 }
             });
 
-            // Requisito estricto de la librería: ordenar por tiempo de viejo a nuevo
+            // Orden estricto que pide la librería
             marcadores.sort((a, b) => a.time - b.time);
             
             try {
