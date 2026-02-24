@@ -8,8 +8,14 @@
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     
     <style>
-        body { margin: 0; padding: 0; background-color: #131722; color: white; font-family: Arial, sans-serif; overflow: hidden; }
-        #header { padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; background-color: #1e222d; border-bottom: 1px solid #2B2B43; height: 40px; }
+        /* NUEVO: Obliga a calcular anchos exactos sin sumar bordes extra */
+        * { box-sizing: border-box; }
+
+        /* NUEVO: Blindamos la pantalla al 100% de alto y ancho exacto, sin barras de desplazamiento generales */
+        body { margin: 0; padding: 0; background-color: #131722; color: white; font-family: Arial, sans-serif; overflow: hidden; width: 100vw; height: 100vh; }
+        
+        /* NUEVO: Altura exacta fijada a 60px para el cálculo del menú inferior */
+        #header { padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; background-color: #1e222d; border-bottom: 1px solid #2B2B43; height: 60px; }
         h2 { margin: 0; font-size: 1.2rem; }
         
         .botonera { display: flex; gap: 5px; align-items: center; }
@@ -17,11 +23,16 @@
         .btn-tiempo:hover { background-color: #3f3f5a; }
         .btn-activo { background-color: #2962FF; color: white; }
 
-        #main-content { display: flex; width: 100vw; height: calc(100vh - 60px); }
-        #chart-container { flex-grow: 1; position: relative; } 
+        #main-content { display: flex; width: 100%; height: calc(100vh - 60px); }
+        
+        /* NUEVO: overflow:hidden evita que el gráfico estire la pantalla y empuje el panel */
+        #chart-container { flex-grow: 1; position: relative; overflow: hidden; } 
 
+        /* NUEVO: flex-shrink: 0 y min-width garantizan que el panel jamás sea empujado fuera de la pantalla */
         #orderbook-container {
-            width: 300px; 
+            width: 320px; 
+            min-width: 320px;
+            flex-shrink: 0; 
             background-color: #1e222d;
             border-left: 1px solid #2B2B43;
             display: flex;
@@ -33,9 +44,7 @@
         .ob-titulo { text-align: center; padding: 12px 10px 5px; font-weight: bold; font-size: 15px; background-color: #131722; color: #d1d4dc;}
         .ob-subtitulo { text-align: center; font-size: 11px; color: #848e9c; padding-bottom: 10px; border-bottom: 1px solid #2B2B43; background-color: #131722; display: flex; justify-content: center; align-items: center; gap: 5px;}
         
-        .input-rango {
-            background-color: #2B2B43; color: #FFD700; border: 1px solid #3f3f5a; border-radius: 4px; width: 45px; text-align: center; font-weight: bold; font-size: 11px; padding: 2px; outline: none;
-        }
+        .input-rango { background-color: #2B2B43; color: #FFD700; border: 1px solid #3f3f5a; border-radius: 4px; width: 45px; text-align: center; font-weight: bold; font-size: 11px; padding: 2px; outline: none; }
         
         .seccion-panel { padding: 10px; border-bottom: 1px solid #2B2B43; }
         .titulo-rojo { color: #ef5350; font-weight: bold; margin-bottom: 8px; text-align: center; }
@@ -110,6 +119,7 @@
         const oiSeries = chart.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, priceScaleId: 'oiScale', title: 'Open Int.' });
         chart.priceScale('oiScale').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 
+        // Esta línea es vital: reajusta el gráfico al tamaño exacto de la ventana si cambias las dimensiones
         window.addEventListener('resize', () => { chart.resize(container.clientWidth, container.clientHeight); });
 
         let binanceSocket = null; 
@@ -266,7 +276,6 @@
 
         // --- 3. CINTA DE BALLENAS (aggTrade) y SINCRONIZACIÓN CON BD ---
         
-        // A) Sincronizar el input de Base de Datos con el servidor al cargar la página
         fetch('/api/filtro-bd')
             .then(res => res.json())
             .then(data => {
@@ -274,7 +283,6 @@
             })
             .catch(err => console.log('Error al leer filtro de BD:', err));
 
-        // B) Cuando modificas el límite de BD, le avisamos al servidor por detrás
         document.getElementById('filtro-bd').addEventListener('change', function() {
             const nuevoUmbral = parseFloat(this.value);
             fetch('/api/filtro-bd', {
@@ -287,7 +295,6 @@
             .catch(err => console.log('Error al actualizar filtro en servidor:', err));
         });
 
-        // C) El Websocket de la Cinta
         const tapeSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
         let ultimosTrades = []; 
 
@@ -297,7 +304,6 @@
             const precio = parseFloat(data.p); 
             const agresorFueVendedor = data.m; 
             
-            // Leemos el valor del cajoncito "Cinta" en tiempo real
             const limiteCintaVisual = parseFloat(document.getElementById('filtro-cinta').value) || 1.0;
 
             if (cantidad >= limiteCintaVisual) {
