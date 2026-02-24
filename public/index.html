@@ -9,7 +9,7 @@
     
     <style>
         * { box-sizing: border-box; }
-        /* Cambiamos a un fondo gris muy suave y texto oscuro para descansar la vista */
+        /* Fondo liso, blanco/grisáceo para descansar la vista */
         body { margin: 0; padding: 0; background-color: #f0f2f5; color: #1e1e1e; font-family: Arial, sans-serif; overflow: hidden; width: 100vw; height: 100vh; }
         #header { padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; background-color: #ffffff; border-bottom: 1px solid #d1d4dc; height: 60px; }
         h2 { margin: 0; font-size: 1.2rem; }
@@ -115,11 +115,11 @@
             height: container.clientHeight, 
             layout: { 
                 textColor: '#1e1e1e', 
-                background: { type: 'solid', color: '#f0f2f5' } // Fondo Liso Gris/Blanco
+                background: { type: 'solid', color: '#f0f2f5' } 
             }, 
             grid: { 
-                vertLines: { visible: false }, // Apagamos coordenadas verticales
-                horzLines: { visible: false }  // Apagamos coordenadas horizontales
+                vertLines: { visible: false }, 
+                horzLines: { visible: false }  
             }, 
             crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, 
             rightPriceScale: { borderColor: '#d1d4dc' }, 
@@ -130,11 +130,13 @@
         const candlestickSeries = chart.addCandlestickSeries({ 
             upColor: '#26a69a', 
             downColor: '#ef5350', 
-            borderVisible: false, 
-            wickUpColor: '#26a69a', 
-            wickDownColor: '#ef5350',
-            priceLineColor: '#000000', // Línea del precio actual en NEGRO
-            priceLineWidth: 2
+            borderVisible: true, // Activamos bordes
+            borderUpColor: '#000000', // Bordes negros
+            borderDownColor: '#000000', 
+            wickUpColor: '#000000', // Mechas negras
+            wickDownColor: '#000000',
+            priceLineColor: '#000000', // Línea de precio actual negra
+            priceLineWidth: 1 // Línea muy fina
         });
         
         const deltaSeries = chart.addHistogramSeries({ base: 0, priceScaleId: 'deltaScale' });
@@ -147,7 +149,7 @@
         let binanceSocket = null; 
         let ultimoTiempoVela = null; 
         let tiemposVelasActivas = [];
-        let multiplicadorTemporalidad = 60; // Nos servirá para calcular el largo de las líneas de los muros
+        let multiplicadorTemporalidad = 60; 
 
         function cargarDatos(temporalidad) {
             if (binanceSocket !== null) binanceSocket.close();
@@ -205,7 +207,6 @@
             document.querySelectorAll('.btn-tiempo').forEach(btn => btn.classList.remove('btn-activo'));
             document.getElementById(`btn-${t}`).classList.add('btn-activo'); 
             
-            // Ajustamos el multiplicador para saber cuánto "hacia el futuro" estiraremos los muros
             if(t === '1m') multiplicadorTemporalidad = 60;
             else if(t === '5m') multiplicadorTemporalidad = 300;
             else if(t === '15m') multiplicadorTemporalidad = 900;
@@ -217,7 +218,6 @@
         }
         cambiarTemporalidad('1m');
 
-        // --- SISTEMA DE "EFECTO IMÁN" COMPARTIDO ---
         function obtenerVelaExacta(tiempoBuscado) {
             if (tiemposVelasActivas.length === 0) return null;
             for (let i = tiemposVelasActivas.length - 1; i >= 0; i--) {
@@ -228,7 +228,6 @@
             return tiemposVelasActivas[0]; 
         }
 
-        // --- DIBUJADO DE BALLENAS EN EL GRÁFICO ---
         let memoriaBallenasBD = []; 
 
         function pedirHistorialBallenas() {
@@ -294,7 +293,6 @@
         setTimeout(pedirHistorialBallenas, 2000);
         setInterval(pedirHistorialBallenas, 30000);
 
-        // --- 4. INTERÉS ABIERTO (HISTÓRICO + EN VIVO BLINDADO) ---
         let memoriaOIBD = []; 
 
         function cargarHistorialOI() {
@@ -359,11 +357,8 @@
             }, 3000);
         }, 1000);
 
-        // --- 2. SISTEMA PROFESIONAL DE MUROS LOCALES ---
         let orderBookLocal = { asks: {}, bids: {} };
         const TAMAÑO_GRUPO = 50; 
-        
-        // Variable Experta: En vez de priceLines, usaremos mini-series de líneas para que no crucen todo el gráfico.
         let seriesDeMuros = []; 
 
         fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000')
@@ -421,51 +416,48 @@
             
             let top3Ventas = ventasEnRango.slice(0, 3); let top3Compras = comprasEnRango.slice(0, 3);
 
-            // Actualizamos la interfaz HTML lateral
             document.getElementById('top-ventas').innerHTML = top3Ventas.map(v => `<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
             document.getElementById('top-compras').innerHTML = top3Compras.map(c => `<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
 
-            // Borramos de pantalla las series viejas de muros
             seriesDeMuros.forEach(serie => chart.removeSeries(serie)); 
             seriesDeMuros = []; 
 
-            if (!ultimoTiempoVela) return; // Validación de seguridad
+            if (!ultimoTiempoVela) return;
 
-            // Calculamos hacia dónde queremos que termine la línea en el futuro (ej: 50 velas adelante)
-            let tiempoFuturo = ultimoTiempoVela + (multiplicadorTemporalidad * 50);
+            // TRUCO EXPERTO: Empujamos el punto final 500 velas hacia el futuro.
+            // Al hacer esto, garantizamos que la línea cruce hasta estrellarse directamente con la escala numérica.
+            let tiempoFuturo = ultimoTiempoVela + (multiplicadorTemporalidad * 500);
 
-            // Creamos las Resistencias desde la vela actual a la derecha
             top3Ventas.forEach(v => {
                 let serieMuro = chart.addLineSeries({
                     color: '#ef5350', 
                     lineWidth: 2, 
                     lineStyle: LightweightCharts.LineStyle.Dashed, 
                     lastValueVisible: true, 
-                    priceLineVisible: false, // Apagamos la línea lateral completa
+                    priceLineVisible: false, 
                     crosshairMarkerVisible: false,
                     title: `RES ${v[1].toFixed(0)} BTC`
                 });
                 serieMuro.setData([
-                    { time: ultimoTiempoVela, value: v[0] }, // Punto 1: Vela Actual
-                    { time: tiempoFuturo, value: v[0] }      // Punto 2: Futuro
+                    { time: ultimoTiempoVela, value: v[0] }, 
+                    { time: tiempoFuturo, value: v[0] }      
                 ]);
                 seriesDeMuros.push(serieMuro);
             });
 
-            // Creamos los Soportes desde la vela actual a la derecha
             top3Compras.forEach(c => {
                 let serieMuro = chart.addLineSeries({
                     color: '#26a69a', 
                     lineWidth: 2, 
                     lineStyle: LightweightCharts.LineStyle.Dashed, 
                     lastValueVisible: true, 
-                    priceLineVisible: false, // Apagamos la línea lateral completa
+                    priceLineVisible: false, 
                     crosshairMarkerVisible: false,
                     title: `SOP ${c[1].toFixed(0)} BTC`
                 });
                 serieMuro.setData([
-                    { time: ultimoTiempoVela, value: c[0] }, // Punto 1: Vela Actual
-                    { time: tiempoFuturo, value: c[0] }      // Punto 2: Futuro
+                    { time: ultimoTiempoVela, value: c[0] }, 
+                    { time: tiempoFuturo, value: c[0] }      
                 ]);
                 seriesDeMuros.push(serieMuro);
             });
