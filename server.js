@@ -1,21 +1,20 @@
 const express = require('express');
 const path = require('path');
-const { Pool } = require('pg'); // Traemos la herramienta de PostgreSQL
+const { Pool } = require('pg'); 
+const WebSocket = require('ws'); // Traemos la nueva herramienta para escuchar a Binance
 
 const app = express();
 
 // 1. CONFIGURACIÓN DE LA BASE DE DATOS
-// Usamos la URL que Railway nos da automáticamente en process.env.DATABASE_URL
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
-        rejectUnauthorized: false // Esto es obligatorio en Railway para conexiones seguras
+        rejectUnauthorized: false 
     }
 });
 
-// 2. FUNCIÓN PARA CREAR LAS TABLAS (Si no existen)
+// 2. FUNCIÓN PARA CREAR LAS TABLAS
 async function inicializarBaseDeDatos() {
-    // Vamos a crear una tabla especial para guardar las operaciones de ballenas
     const queryTablaBallenas = `
         CREATE TABLE IF NOT EXISTS ballenas (
             id SERIAL PRIMARY KEY,
@@ -34,20 +33,60 @@ async function inicializarBaseDeDatos() {
     }
 }
 
-// Ejecutamos la función al encender el servidor
 inicializarBaseDeDatos();
 
+// 3. EL CAZADOR DE BALLENAS (NUEVO)
+function iniciarRastreadorBallenas() {
+    // Nos conectamos al mismo tubo de datos que usa tu frontend
+    const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
+    const UMBRAL_BTC = 1.0; // Solo guardamos si es 1 BTC o más
 
-// 3. CONFIGURACIÓN DE TU PÁGINA WEB
-// Le decimos al servidor que la carpeta "public" tiene nuestros archivos visibles
+    ws.on('open', () => {
+        console.log('✅ Servidor conectado a la Cinta de Ballenas de Binance.');
+    });
+
+    ws.on('message', async (data) => {
+        try {
+            const evento = JSON.parse(data);
+            const cantidad = parseFloat(evento.q);
+            const precio = parseFloat(evento.p);
+            const es_venta = evento.m; // true si el agresor vendió, false si compró
+
+            // Si el trade es gigante, lo guardamos en la base de datos
+            if (cantidad >= UMBRAL_BTC) {
+                const queryInsertar = `
+                    INSERT INTO ballenas (precio, cantidad, es_venta) 
+                    VALUES ($1, $2, $3)
+                `;
+                const valores = [precio, cantidad, es_venta];
+                
+                await pool.query(queryInsertar, valores);
+                console.log(`🐳 Guardado en BD: ${es_venta ? 'VENTA' : 'COMPRA'} de ${cantidad} BTC a $${precio}`);
+            }
+        } catch (error) {
+            console.error('❌ Error al procesar o guardar el trade:', error);
+        }
+    });
+
+    // Si Binance nos desconecta, intentamos reconectar a los 5 segundos
+    ws.on('close', () => {
+        console.log('⚠️ Binance cerró la conexión. Reconectando en 5 segundos...');
+        setTimeout(iniciarRastreadorBallenas, 5000);
+    });
+}
+
+// Encendemos el cazador de ballenas
+iniciarRastreadorBallenas();
+
+
+// 4. CONFIGURACIÓN DE TU PÁGINA WEB
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Cuando alguien entre a la web, le mandamos el index.html
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// 4. ENCENDER EL SERVIDOR
+// 5. ENCENDER EL SERVIDOR
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`¡Terminal Institucional encendida en el puerto ${PORT}!`);
