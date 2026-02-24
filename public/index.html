@@ -55,7 +55,7 @@
         <h2>Terminal Institucional BTC/USDT</h2>
         
         <div class="botonera" style="margin-right: auto; margin-left: 20px;">
-            <span style="font-size: 12px; color: #848e9c; margin-right: 5px;">Filtrar marcadores (BTC): ></span>
+            <span style="font-size: 12px; color: #848e9c; margin-right: 5px;">Filtrar marcadores Gráfico (BTC): ></span>
             <input type="number" id="filtro-grafico" class="input-rango" value="5" min="1" step="1">
         </div>
 
@@ -87,7 +87,12 @@
 
             <div class="seccion-panel" style="border-bottom: none;">
                 <div class="ob-titulo" style="padding-top: 5px;">CINTA EN VIVO (ACCIÓN)</div>
-                <div class="ob-subtitulo">Filtro: > 1.0 BTC (Francotiradores)</div>
+                
+                <div class="ob-subtitulo" style="flex-direction: column; gap: 8px;">
+                    <div>Ver en Cinta: > <input type="number" id="filtro-cinta" class="input-rango" value="1" min="0.1" step="0.5"> BTC</div>
+                    <div>Guardar BD: > <input type="number" id="filtro-bd" class="input-rango" value="1" min="0.1" step="0.5" title="Actualiza el servidor"> BTC</div>
+                </div>
+
                 <div id="whale-tape">Esperando órdenes gigantes...</div>
             </div>
         </div>
@@ -143,65 +148,48 @@
         cargarDatos('1m');
 
 
-        // --- NUEVO: SISTEMA DE DIBUJADO DE BALLENAS (MARCADORES) ---
-        let memoriaBallenasBD = []; // Guardamos aquí lo que responde el servidor
+        // --- DIBUJADO DE BALLENAS EN EL GRÁFICO ---
+        let memoriaBallenasBD = []; 
 
         function pedirHistorialBallenas() {
-            // Le pedimos a nuestro propio servidor (Railway) los datos
             fetch('/api/ballenas')
                 .then(respuesta => respuesta.json())
                 .then(datos => {
                     memoriaBallenasBD = datos;
-                    dibujarMarcadores(); // Los dibujamos apenas llegan
+                    dibujarMarcadores(); 
                 })
                 .catch(err => console.error("Error al pedir historial:", err));
         }
 
         function dibujarMarcadores() {
-            // Leemos el valor que pusiste en el input de arriba
             const limiteBtc = parseFloat(document.getElementById('filtro-grafico').value) || 5;
-            
             let marcadores = [];
-            let tiempoAntiChoque = {}; // Sistema de seguridad por si hay dos compras en el mismo milisegundo
+            let tiempoAntiChoque = {}; 
 
             memoriaBallenasBD.forEach(trade => {
                 const cantidadBtc = parseFloat(trade.cantidad);
-                
-                // SOLO procesamos si la cantidad es mayor o igual a tu filtro
                 if (cantidadBtc >= limiteBtc) {
                     let tiempoSegundos = Math.floor(trade.tiempo_segundos);
-                    
-                    // Si ya existe un marcador en ese segundo exacto, lo movemos 1 segundo adelante
-                    while(tiempoAntiChoque[tiempoSegundos]) {
-                        tiempoSegundos += 1;
-                    }
+                    while(tiempoAntiChoque[tiempoSegundos]) { tiempoSegundos += 1; }
                     tiempoAntiChoque[tiempoSegundos] = true;
 
-                    // Si vendió, la flecha va arriba (roja). Si compró, abajo (verde).
                     marcadores.push({
                         time: tiempoSegundos,
                         position: trade.es_venta ? 'aboveBar' : 'belowBar',
                         color: trade.es_venta ? '#ef5350' : '#26a69a',
                         shape: trade.es_venta ? 'arrowDown' : 'arrowUp',
                         text: `${cantidadBtc.toFixed(1)} BTC`,
-                        size: cantidadBtc > 15 ? 2 : 1 // Las órdenes de más de 15 BTC se dibujan extra grandes
+                        size: cantidadBtc > 15 ? 2 : 1 
                     });
                 }
             });
 
-            // Requisito técnico obligatorio de la librería gráfica: los marcadores deben ordenarse de más viejo a más nuevo
             marcadores.sort((a, b) => a.time - b.time);
-            
-            // Los plasmamos sobre las velas
             candlestickSeries.setMarkers(marcadores);
         }
 
-        // Cada vez que cambies el número en el input, redibujamos al instante
         document.getElementById('filtro-grafico').addEventListener('change', dibujarMarcadores);
-
-        // Pedimos los datos 2 segundos después de abrir la página para dejar que el gráfico cargue primero
         setTimeout(pedirHistorialBallenas, 2000);
-        // Actualizamos las flechas nuevas pidiéndole al servidor cada 30 segundos
         setInterval(pedirHistorialBallenas, 30000);
 
 
@@ -276,13 +264,43 @@
         setInterval(dibujarMuros, 2000);
         document.getElementById('input-rango').addEventListener('change', dibujarMuros);
 
-        // --- 3. CINTA DE BALLENAS (aggTrade) ---
+        // --- 3. CINTA DE BALLENAS (aggTrade) y SINCRONIZACIÓN CON BD ---
+        
+        // A) Sincronizar el input de Base de Datos con el servidor al cargar la página
+        fetch('/api/filtro-bd')
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('filtro-bd').value = data.umbral;
+            })
+            .catch(err => console.log('Error al leer filtro de BD:', err));
+
+        // B) Cuando modificas el límite de BD, le avisamos al servidor por detrás
+        document.getElementById('filtro-bd').addEventListener('change', function() {
+            const nuevoUmbral = parseFloat(this.value);
+            fetch('/api/filtro-bd', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ umbral: nuevoUmbral })
+            })
+            .then(res => res.json())
+            .then(data => console.log('El servidor confirmó el nuevo límite de BD:', data.umbral))
+            .catch(err => console.log('Error al actualizar filtro en servidor:', err));
+        });
+
+        // C) El Websocket de la Cinta
         const tapeSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
-        const UMBRAL_BTC = 1.0; let ultimosTrades = []; 
+        let ultimosTrades = []; 
 
         tapeSocket.onmessage = function(evento) {
-            const data = JSON.parse(evento.data); const cantidad = parseFloat(data.q); const precio = parseFloat(data.p); const agresorFueVendedor = data.m; 
-            if (cantidad >= UMBRAL_BTC) {
+            const data = JSON.parse(evento.data); 
+            const cantidad = parseFloat(data.q); 
+            const precio = parseFloat(data.p); 
+            const agresorFueVendedor = data.m; 
+            
+            // Leemos el valor del cajoncito "Cinta" en tiempo real
+            const limiteCintaVisual = parseFloat(document.getElementById('filtro-cinta').value) || 1.0;
+
+            if (cantidad >= limiteCintaVisual) {
                 ultimosTrades.unshift({ precio: precio, cantidad: cantidad, esVenta: agresorFueVendedor });
                 if (ultimosTrades.length > 5) ultimosTrades.pop(); 
                 let htmlCinta = '';
