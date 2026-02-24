@@ -24,7 +24,6 @@ async function inicializarBaseDeDatos() {
         );
     `;
     
-    // NUEVO: Creamos una tabla para guardar la configuración del servidor
     const queryTablaConfig = `
         CREATE TABLE IF NOT EXISTS configuracion (
             clave VARCHAR(50) PRIMARY KEY,
@@ -32,14 +31,22 @@ async function inicializarBaseDeDatos() {
         );
     `;
 
+    // NUEVO: Tabla para guardar el Interés Abierto. 
+    // Usamos el "tiempo" como llave primaria para asegurar que haya exactamente 1 solo registro por minuto.
+    const queryTablaOI = `
+        CREATE TABLE IF NOT EXISTS open_interest (
+            tiempo INTEGER PRIMARY KEY,
+            valor NUMERIC NOT NULL
+        );
+    `;
+
     try {
         await pool.query(queryTablaBallenas);
         await pool.query(queryTablaConfig);
+        await pool.query(queryTablaOI);
         
-        // Insertamos el valor por defecto solo si la tabla está vacía
         await pool.query(`INSERT INTO configuracion (clave, valor) VALUES ('limite_bd', 1.0) ON CONFLICT (clave) DO NOTHING`);
         
-        // Leemos la configuración guardada y se la asignamos a la memoria del servidor
         const configRes = await pool.query(`SELECT valor FROM configuracion WHERE clave = 'limite_bd'`);
         if (configRes.rows.length > 0) {
             limiteGuardadoBD = parseFloat(configRes.rows[0].valor);
@@ -53,6 +60,37 @@ async function inicializarBaseDeDatos() {
 }
 inicializarBaseDeDatos();
 
+// --- NUEVO: RECOLECTOR DE OPEN INTEREST ---
+async function guardarOpenInterest() {
+    try {
+        // Node.js v18+ tiene fetch incorporado, igual que el navegador
+        const respuesta = await fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT');
+        const datos = await respuesta.json();
+        
+        if (datos && datos.openInterest) {
+            const valor = parseFloat(datos.openInterest);
+            // Calculamos el inicio del minuto actual (ej: 14:05:00) en formato Epoch (segundos)
+            const tiempoVelaActual = Math.floor(Date.now() / 60000) * 60; 
+            
+            // Lo guardamos o lo actualizamos si ya existe ese minuto
+            const query = `
+                INSERT INTO open_interest (tiempo, valor) 
+                VALUES ($1, $2)
+                ON CONFLICT (tiempo) DO UPDATE SET valor = EXCLUDED.valor
+            `;
+            await pool.query(query, [tiempoVelaActual, valor]);
+        }
+    } catch (error) {
+        console.error('Error al guardar Open Interest en BD:', error);
+    }
+}
+
+// Lo ejecutamos cada 1 minuto (60000 milisegundos) exacto
+setInterval(guardarOpenInterest, 60000);
+guardarOpenInterest(); // Y lo ejecutamos 1 vez apenas arranca el servidor
+
+
+// --- CAZADOR DE BALLENAS ---
 function iniciarRastreadorBallenas() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
 
@@ -81,6 +119,8 @@ function iniciarRastreadorBallenas() {
 }
 iniciarRastreadorBallenas();
 
+
+// --- RUTAS DE LA API ---
 app.get('/api/ballenas', async (req, res) => {
     try {
         const query = `
@@ -92,12 +132,27 @@ app.get('/api/ballenas', async (req, res) => {
         const resultado = await pool.query(query);
         res.json(resultado.rows); 
     } catch (error) {
-        console.error('Error al obtener el historial:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
-// RUTAS PARA EL CONTROL DE LA BASE DE DATOS
+// NUEVA RUTA: Entregar el historial de Open Interest
+app.get('/api/open-interest', async (req, res) => {
+    try {
+        // Pedimos los últimos 1440 minutos (equivalente a 24 horas)
+        const query = `
+            SELECT tiempo, valor 
+            FROM open_interest 
+            ORDER BY tiempo ASC
+            LIMIT 1440
+        `;
+        const resultado = await pool.query(query);
+        res.json(resultado.rows); 
+    } catch (error) {
+        res.status(500).json({ error: 'Error interno obteniendo OI' });
+    }
+});
+
 app.get('/api/filtro-bd', (req, res) => {
     res.json({ umbral: limiteGuardadoBD });
 });
@@ -106,8 +161,6 @@ app.post('/api/filtro-bd', async (req, res) => {
     const nuevoUmbral = parseFloat(req.body.umbral);
     if (!isNaN(nuevoUmbral) && nuevoUmbral > 0) {
         limiteGuardadoBD = nuevoUmbral;
-        
-        // NUEVO: Guardamos el cambio en la tabla de configuración para que no se borre si se reinicia el servidor
         try {
             await pool.query(`UPDATE configuracion SET valor = $1 WHERE clave = 'limite_bd'`, [limiteGuardadoBD]);
             console.log(`🔧 Filtro de BD actualizado y guardado. Ahora solo guardamos > ${limiteGuardadoBD} BTC`);
@@ -116,7 +169,6 @@ app.post('/api/filtro-bd', async (req, res) => {
             console.error('Error guardando configuración:', error);
             res.status(500).json({ error: 'No se pudo guardar la configuración en BD' });
         }
-        
     } else {
         res.status(400).json({ error: 'Número inválido' });
     }
