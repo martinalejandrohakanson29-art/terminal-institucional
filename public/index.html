@@ -20,11 +20,10 @@
 
         #main-content { display: flex; width: 100%; height: calc(100vh - 60px); }
         
-        /* NUEVO: Columna para alojar los 3 gráficos separados */
         #charts-column { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; background-color: #f0f2f5; }
-        #chart-main { flex: 3; position: relative; border-bottom: 2px solid #d1d4dc; } /* Gráfico principal, más grande */
-        #chart-delta { flex: 1; position: relative; border-bottom: 2px solid #d1d4dc; } /* Panel Delta */
-        #chart-oi { flex: 1; position: relative; } /* Panel Open Interest */
+        #chart-main { flex: 3; position: relative; border-bottom: 2px solid #d1d4dc; } 
+        #chart-delta { flex: 1; position: relative; border-bottom: 2px solid #d1d4dc; } 
+        #chart-oi { flex: 1; position: relative; } 
 
         #orderbook-container {
             width: 320px; min-width: 320px; flex-shrink: 0; background-color: #ffffff; border-left: 1px solid #d1d4dc; display: flex; flex-direction: column; font-size: 13px; overflow-y: auto;
@@ -102,7 +101,6 @@
     </div>
 
     <script>
-        // --- RECUPERAR MEMORIA DEL NAVEGADOR AL CARGAR ---
         const inputFiltroGrafico = document.getElementById('filtro-grafico');
         const inputFiltroCinta = document.getElementById('filtro-cinta');
 
@@ -117,7 +115,6 @@
             localStorage.setItem('memoriaCinta', this.value);
         });
 
-        // --- 1. GRÁFICOS (Velas, Delta, Open Interest) ---
         const chartOptionsBase = { 
             layout: { textColor: '#1e1e1e', background: { type: 'solid', color: '#f0f2f5' } }, 
             grid: { vertLines: { visible: false }, horzLines: { visible: false } }, 
@@ -126,32 +123,42 @@
             timeScale: { borderColor: '#d1d4dc', timeVisible: true, secondsVisible: false }, 
         };
 
-        // Creamos tres instancias de gráficos independientes
         const chartMain = LightweightCharts.createChart(document.getElementById('chart-main'), chartOptionsBase);
         const chartDelta = LightweightCharts.createChart(document.getElementById('chart-delta'), chartOptionsBase);
         const chartOI = LightweightCharts.createChart(document.getElementById('chart-oi'), chartOptionsBase);
 
-        // Asignamos las series a su respectivo gráfico
         const candlestickSeries = chartMain.addCandlestickSeries({ 
             upColor: '#26a69a', downColor: '#ef5350', borderVisible: true, borderUpColor: '#000000', borderDownColor: '#000000', wickUpColor: '#000000', wickDownColor: '#000000', priceLineColor: '#000000', priceLineWidth: 1 
         });
         
-        const deltaSeries = chartDelta.addHistogramSeries({ base: 0 }); // Ya no necesita priceScaleId trucado
-        const oiSeries = chartOI.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, title: 'Open Int.' }); // Ya no necesita priceScaleId trucado
+        const deltaSeries = chartDelta.addHistogramSeries({ base: 0 }); 
+        const oiSeries = chartOI.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, title: 'Open Int.' }); 
 
-        // FUNCIÓN MÁGICA: Sincronizar el zoom y desplazamiento en los 3 gráficos
+        // --- SOLUCIÓN 1: Sincronizar por Tiempo Exacto en lugar de Índices ---
+        let graficoGuia = null;
+
         function syncTimeScale(sourceChart, targetCharts) {
-            sourceChart.timeScale().subscribeVisibleLogicalRangeChange(timeRange => {
+            sourceChart.timeScale().subscribeVisibleTimeRangeChange(timeRange => {
+                // Evitamos bucles infinitos permitiendo que solo el gráfico que movemos guíe a los demás
+                if (graficoGuia !== null && graficoGuia !== sourceChart) return;
+                
+                graficoGuia = sourceChart;
+                
                 if (timeRange) {
-                    targetCharts.forEach(chart => chart.timeScale().setVisibleLogicalRange(timeRange));
+                    targetCharts.forEach(chart => {
+                        chart.timeScale().setVisibleRange(timeRange);
+                    });
                 }
+                
+                // Liberamos el candado un instante después
+                setTimeout(() => { graficoGuia = null; }, 50);
             });
         }
+
         syncTimeScale(chartMain, [chartDelta, chartOI]);
         syncTimeScale(chartDelta, [chartMain, chartOI]);
         syncTimeScale(chartOI, [chartMain, chartDelta]);
 
-        // Ajustar el tamaño de los 3 gráficos si cambia el tamaño de la ventana
         window.addEventListener('resize', () => { 
             const mainRect = document.getElementById('chart-main').getBoundingClientRect();
             chartMain.resize(mainRect.width, mainRect.height);
@@ -162,17 +169,54 @@
             const oiRect = document.getElementById('chart-oi').getBoundingClientRect();
             chartOI.resize(oiRect.width, oiRect.height);
         });
-
-        // Forzamos un ajuste de tamaño inicial
         setTimeout(() => window.dispatchEvent(new Event('resize')), 100);
 
         let binanceSocket = null; 
         let ultimoTiempoVela = null; 
         let tiemposVelasActivas = [];
         let multiplicadorTemporalidad = 60; 
+        let temporalidadActual = '1m';
+
+        // --- SOLUCIÓN 2: Auto-reconectar el WebSocket de las velas si Binance lo cierra ---
+        function iniciarWebSocketVelas() {
+            if (binanceSocket !== null) {
+                binanceSocket.close();
+            }
+
+            binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidadActual}`);
+            
+            binanceSocket.onmessage = function (e) {
+                const k = JSON.parse(e.data).k; 
+                let tiempo = Math.floor(k.t / 1000); 
+                let apertura = parseFloat(k.o); 
+                let cierre = parseFloat(k.c);
+                let comprasMercado = parseFloat(k.V); 
+                let ventasMercado = parseFloat(k.v) - comprasMercado; 
+                let valorDelta = comprasMercado - ventasMercado;
+                
+                candlestickSeries.update({ time: tiempo, open: apertura, high: parseFloat(k.h), low: parseFloat(k.l), close: cierre });
+                deltaSeries.update({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
+                
+                if (tiemposVelasActivas.length === 0 || tiemposVelasActivas[tiemposVelasActivas.length - 1] !== tiempo) {
+                    tiemposVelasActivas.push(tiempo);
+                }
+                
+                ultimoTiempoVela = tiempo; 
+            };
+
+            binanceSocket.onclose = () => {
+                console.log('⚠️ Binance desconectó el gráfico. Reconectando en 3 segundos...');
+                setTimeout(iniciarWebSocketVelas, 3000);
+            };
+
+            binanceSocket.onerror = (error) => {
+                console.error('❌ Error en el gráfico de Binance:', error);
+            };
+        }
 
         function cargarDatos(temporalidad) {
-            if (binanceSocket !== null) binanceSocket.close();
+            temporalidadActual = temporalidad; 
+
             fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=1000`)
                 .then(r => r.json())
                 .then(datos => {
@@ -197,7 +241,6 @@
                     candlestickSeries.setData(velas); 
                     deltaSeries.setData(datosDelta); 
                     
-                    // Ajustamos el contenido a la pantalla para los 3 gráficos
                     chartMain.timeScale().fitContent(); 
                     chartDelta.timeScale().fitContent();
                     chartOI.timeScale().fitContent();
@@ -205,25 +248,7 @@
                     dibujarMarcadores(); 
                     dibujarOI(); 
 
-                    binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
-                    binanceSocket.onmessage = function (e) {
-                        const k = JSON.parse(e.data).k; 
-                        let tiempo = Math.floor(k.t / 1000); 
-                        let apertura = parseFloat(k.o); 
-                        let cierre = parseFloat(k.c);
-                        let comprasMercado = parseFloat(k.V); 
-                        let ventasMercado = parseFloat(k.v) - comprasMercado; 
-                        let valorDelta = comprasMercado - ventasMercado;
-                        
-                        candlestickSeries.update({ time: tiempo, open: apertura, high: parseFloat(k.h), low: parseFloat(k.l), close: cierre });
-                        deltaSeries.update({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
-                        
-                        if (tiemposVelasActivas.length === 0 || tiemposVelasActivas[tiemposVelasActivas.length - 1] !== tiempo) {
-                            tiemposVelasActivas.push(tiempo);
-                        }
-                        
-                        ultimoTiempoVela = tiempo; 
-                    };
+                    iniciarWebSocketVelas(); 
                 });
         }
 
@@ -443,7 +468,6 @@
             document.getElementById('top-ventas').innerHTML = top3Ventas.map(v => `<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
             document.getElementById('top-compras').innerHTML = top3Compras.map(c => `<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
 
-            // ATENCIÓN: Ahora removemos los muros del chart principal
             seriesDeMuros.forEach(serie => chartMain.removeSeries(serie)); 
             seriesDeMuros = []; 
 
@@ -452,7 +476,6 @@
             let tiempoFuturo = ultimoTiempoVela + (multiplicadorTemporalidad * 500);
 
             top3Ventas.forEach(v => {
-                // ATENCIÓN: Añadimos las líneas de resistencia al chart principal
                 let serieMuro = chartMain.addLineSeries({
                     color: '#ef5350', 
                     lineWidth: 2, 
@@ -470,7 +493,6 @@
             });
 
             top3Compras.forEach(c => {
-                // ATENCIÓN: Añadimos las líneas de soporte al chart principal
                 let serieMuro = chartMain.addLineSeries({
                     color: '#26a69a', 
                     lineWidth: 2, 
@@ -491,7 +513,6 @@
         setInterval(dibujarMuros, 2000);
         document.getElementById('input-rango').addEventListener('change', dibujarMuros);
 
-        // --- 3. CINTA DE BALLENAS (aggTrade) y SINCRONIZACIÓN CON BD ---
         fetch('/api/filtro-bd')
             .then(res => res.json())
             .then(data => {
