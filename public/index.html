@@ -9,7 +9,6 @@
     
     <style>
         * { box-sizing: border-box; }
-        /* Fondo liso, blanco/grisáceo para descansar la vista */
         body { margin: 0; padding: 0; background-color: #f0f2f5; color: #1e1e1e; font-family: Arial, sans-serif; overflow: hidden; width: 100vw; height: 100vh; }
         #header { padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; background-color: #ffffff; border-bottom: 1px solid #d1d4dc; height: 60px; }
         h2 { margin: 0; font-size: 1.2rem; }
@@ -20,7 +19,12 @@
         .btn-activo { background-color: #2962FF; color: white; border-color: #2962FF; }
 
         #main-content { display: flex; width: 100%; height: calc(100vh - 60px); }
-        #chart-container { flex-grow: 1; position: relative; overflow: hidden; } 
+        
+        /* NUEVO: Columna para alojar los 3 gráficos separados */
+        #charts-column { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; background-color: #f0f2f5; }
+        #chart-main { flex: 3; position: relative; border-bottom: 2px solid #d1d4dc; } /* Gráfico principal, más grande */
+        #chart-delta { flex: 1; position: relative; border-bottom: 2px solid #d1d4dc; } /* Panel Delta */
+        #chart-oi { flex: 1; position: relative; } /* Panel Open Interest */
 
         #orderbook-container {
             width: 320px; min-width: 320px; flex-shrink: 0; background-color: #ffffff; border-left: 1px solid #d1d4dc; display: flex; flex-direction: column; font-size: 13px; overflow-y: auto;
@@ -64,7 +68,12 @@
     </div>
     
     <div id="main-content">
-        <div id="chart-container"></div>
+        <div id="charts-column">
+            <div id="chart-main"></div>
+            <div id="chart-delta"></div>
+            <div id="chart-oi"></div>
+        </div>
+
         <div id="orderbook-container">
             <div class="ob-titulo">TOP 3 MUROS (INTENCIÓN)</div>
             <div class="ob-subtitulo">Rango: <input type="number" id="input-rango" class="input-rango" value="2" min="1" max="10">% | Agrupado: $50</div>
@@ -108,43 +117,54 @@
             localStorage.setItem('memoriaCinta', this.value);
         });
 
-        // --- 1. GRÁFICO (Velas, Delta, Open Interest) ---
-        const container = document.getElementById('chart-container');
-        const chartOptions = { 
-            width: container.clientWidth, 
-            height: container.clientHeight, 
-            layout: { 
-                textColor: '#1e1e1e', 
-                background: { type: 'solid', color: '#f0f2f5' } 
-            }, 
-            grid: { 
-                vertLines: { visible: false }, 
-                horzLines: { visible: false }  
-            }, 
+        // --- 1. GRÁFICOS (Velas, Delta, Open Interest) ---
+        const chartOptionsBase = { 
+            layout: { textColor: '#1e1e1e', background: { type: 'solid', color: '#f0f2f5' } }, 
+            grid: { vertLines: { visible: false }, horzLines: { visible: false } }, 
             crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, 
             rightPriceScale: { borderColor: '#d1d4dc' }, 
             timeScale: { borderColor: '#d1d4dc', timeVisible: true, secondsVisible: false }, 
         };
-        const chart = LightweightCharts.createChart(container, chartOptions);
-        
-        const candlestickSeries = chart.addCandlestickSeries({ 
-            upColor: '#26a69a', 
-            downColor: '#ef5350', 
-            borderVisible: true, // Activamos bordes
-            borderUpColor: '#000000', // Bordes negros
-            borderDownColor: '#000000', 
-            wickUpColor: '#000000', // Mechas negras
-            wickDownColor: '#000000',
-            priceLineColor: '#000000', // Línea de precio actual negra
-            priceLineWidth: 1 // Línea muy fina
+
+        // Creamos tres instancias de gráficos independientes
+        const chartMain = LightweightCharts.createChart(document.getElementById('chart-main'), chartOptionsBase);
+        const chartDelta = LightweightCharts.createChart(document.getElementById('chart-delta'), chartOptionsBase);
+        const chartOI = LightweightCharts.createChart(document.getElementById('chart-oi'), chartOptionsBase);
+
+        // Asignamos las series a su respectivo gráfico
+        const candlestickSeries = chartMain.addCandlestickSeries({ 
+            upColor: '#26a69a', downColor: '#ef5350', borderVisible: true, borderUpColor: '#000000', borderDownColor: '#000000', wickUpColor: '#000000', wickDownColor: '#000000', priceLineColor: '#000000', priceLineWidth: 1 
         });
         
-        const deltaSeries = chart.addHistogramSeries({ base: 0, priceScaleId: 'deltaScale' });
-        chart.priceScale('deltaScale').applyOptions({ scaleMargins: { top: 0.65, bottom: 0.2 } });
-        const oiSeries = chart.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, priceScaleId: 'oiScale', title: 'Open Int.' });
-        chart.priceScale('oiScale').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+        const deltaSeries = chartDelta.addHistogramSeries({ base: 0 }); // Ya no necesita priceScaleId trucado
+        const oiSeries = chartOI.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, title: 'Open Int.' }); // Ya no necesita priceScaleId trucado
 
-        window.addEventListener('resize', () => { chart.resize(container.clientWidth, container.clientHeight); });
+        // FUNCIÓN MÁGICA: Sincronizar el zoom y desplazamiento en los 3 gráficos
+        function syncTimeScale(sourceChart, targetCharts) {
+            sourceChart.timeScale().subscribeVisibleLogicalRangeChange(timeRange => {
+                if (timeRange) {
+                    targetCharts.forEach(chart => chart.timeScale().setVisibleLogicalRange(timeRange));
+                }
+            });
+        }
+        syncTimeScale(chartMain, [chartDelta, chartOI]);
+        syncTimeScale(chartDelta, [chartMain, chartOI]);
+        syncTimeScale(chartOI, [chartMain, chartDelta]);
+
+        // Ajustar el tamaño de los 3 gráficos si cambia el tamaño de la ventana
+        window.addEventListener('resize', () => { 
+            const mainRect = document.getElementById('chart-main').getBoundingClientRect();
+            chartMain.resize(mainRect.width, mainRect.height);
+            
+            const deltaRect = document.getElementById('chart-delta').getBoundingClientRect();
+            chartDelta.resize(deltaRect.width, deltaRect.height);
+            
+            const oiRect = document.getElementById('chart-oi').getBoundingClientRect();
+            chartOI.resize(oiRect.width, oiRect.height);
+        });
+
+        // Forzamos un ajuste de tamaño inicial
+        setTimeout(() => window.dispatchEvent(new Event('resize')), 100);
 
         let binanceSocket = null; 
         let ultimoTiempoVela = null; 
@@ -176,7 +196,11 @@
                     
                     candlestickSeries.setData(velas); 
                     deltaSeries.setData(datosDelta); 
-                    chart.timeScale().fitContent(); 
+                    
+                    // Ajustamos el contenido a la pantalla para los 3 gráficos
+                    chartMain.timeScale().fitContent(); 
+                    chartDelta.timeScale().fitContent();
+                    chartOI.timeScale().fitContent();
                     
                     dibujarMarcadores(); 
                     dibujarOI(); 
@@ -419,17 +443,17 @@
             document.getElementById('top-ventas').innerHTML = top3Ventas.map(v => `<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
             document.getElementById('top-compras').innerHTML = top3Compras.map(c => `<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
 
-            seriesDeMuros.forEach(serie => chart.removeSeries(serie)); 
+            // ATENCIÓN: Ahora removemos los muros del chart principal
+            seriesDeMuros.forEach(serie => chartMain.removeSeries(serie)); 
             seriesDeMuros = []; 
 
             if (!ultimoTiempoVela) return;
 
-            // TRUCO EXPERTO: Empujamos el punto final 500 velas hacia el futuro.
-            // Al hacer esto, garantizamos que la línea cruce hasta estrellarse directamente con la escala numérica.
             let tiempoFuturo = ultimoTiempoVela + (multiplicadorTemporalidad * 500);
 
             top3Ventas.forEach(v => {
-                let serieMuro = chart.addLineSeries({
+                // ATENCIÓN: Añadimos las líneas de resistencia al chart principal
+                let serieMuro = chartMain.addLineSeries({
                     color: '#ef5350', 
                     lineWidth: 2, 
                     lineStyle: LightweightCharts.LineStyle.Dashed, 
@@ -446,7 +470,8 @@
             });
 
             top3Compras.forEach(c => {
-                let serieMuro = chart.addLineSeries({
+                // ATENCIÓN: Añadimos las líneas de soporte al chart principal
+                let serieMuro = chartMain.addLineSeries({
                     color: '#26a69a', 
                     lineWidth: 2, 
                     lineStyle: LightweightCharts.LineStyle.Dashed, 
