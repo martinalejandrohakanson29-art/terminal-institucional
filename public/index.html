@@ -9,6 +9,7 @@
     
     <style>
         * { box-sizing: border-box; }
+        /* Fondo liso, blanco/grisáceo para descansar la vista */
         body { margin: 0; padding: 0; background-color: #f0f2f5; color: #1e1e1e; font-family: Arial, sans-serif; overflow: hidden; width: 100vw; height: 100vh; }
         #header { padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; background-color: #ffffff; border-bottom: 1px solid #d1d4dc; height: 60px; }
         h2 { margin: 0; font-size: 1.2rem; }
@@ -19,11 +20,7 @@
         .btn-activo { background-color: #2962FF; color: white; border-color: #2962FF; }
 
         #main-content { display: flex; width: 100%; height: calc(100vh - 60px); }
-        
-        #charts-column { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; background-color: #f0f2f5; }
-        #chart-main { flex: 3; position: relative; border-bottom: 2px solid #d1d4dc; } 
-        #chart-delta { flex: 1; position: relative; border-bottom: 2px solid #d1d4dc; } 
-        #chart-oi { flex: 1; position: relative; } 
+        #chart-container { flex-grow: 1; position: relative; overflow: hidden; } 
 
         #orderbook-container {
             width: 320px; min-width: 320px; flex-shrink: 0; background-color: #ffffff; border-left: 1px solid #d1d4dc; display: flex; flex-direction: column; font-size: 13px; overflow-y: auto;
@@ -67,12 +64,7 @@
     </div>
     
     <div id="main-content">
-        <div id="charts-column">
-            <div id="chart-main"></div>
-            <div id="chart-delta"></div>
-            <div id="chart-oi"></div>
-        </div>
-
+        <div id="chart-container"></div>
         <div id="orderbook-container">
             <div class="ob-titulo">TOP 3 MUROS (INTENCIÓN)</div>
             <div class="ob-subtitulo">Rango: <input type="number" id="input-rango" class="input-rango" value="2" min="1" max="10">% | Agrupado: $50</div>
@@ -101,106 +93,66 @@
     </div>
 
     <script>
+        // --- RECUPERAR MEMORIA DEL NAVEGADOR AL CARGAR ---
         const inputFiltroGrafico = document.getElementById('filtro-grafico');
         const inputFiltroCinta = document.getElementById('filtro-cinta');
 
-        if (localStorage.getItem('memoriaGrafico')) { inputFiltroGrafico.value = localStorage.getItem('memoriaGrafico'); }
-        if (localStorage.getItem('memoriaCinta')) { inputFiltroCinta.value = localStorage.getItem('memoriaCinta'); }
+        if (localStorage.getItem('memoriaGrafico')) {
+            inputFiltroGrafico.value = localStorage.getItem('memoriaGrafico');
+        }
+        if (localStorage.getItem('memoriaCinta')) {
+            inputFiltroCinta.value = localStorage.getItem('memoriaCinta');
+        }
 
-        inputFiltroCinta.addEventListener('change', function() { localStorage.setItem('memoriaCinta', this.value); });
+        inputFiltroCinta.addEventListener('change', function() {
+            localStorage.setItem('memoriaCinta', this.value);
+        });
 
-        const chartOptionsBase = { 
-            layout: { textColor: '#1e1e1e', background: { type: 'solid', color: '#f0f2f5' } }, 
-            grid: { vertLines: { visible: false }, horzLines: { visible: false } }, 
+        // --- 1. GRÁFICO (Velas, Delta, Open Interest) ---
+        const container = document.getElementById('chart-container');
+        const chartOptions = { 
+            width: container.clientWidth, 
+            height: container.clientHeight, 
+            layout: { 
+                textColor: '#1e1e1e', 
+                background: { type: 'solid', color: '#f0f2f5' } 
+            }, 
+            grid: { 
+                vertLines: { visible: false }, 
+                horzLines: { visible: false }  
+            }, 
             crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, 
             rightPriceScale: { borderColor: '#d1d4dc' }, 
             timeScale: { borderColor: '#d1d4dc', timeVisible: true, secondsVisible: false }, 
         };
-
-        const chartMain = LightweightCharts.createChart(document.getElementById('chart-main'), chartOptionsBase);
-        const chartDelta = LightweightCharts.createChart(document.getElementById('chart-delta'), chartOptionsBase);
-        const chartOI = LightweightCharts.createChart(document.getElementById('chart-oi'), chartOptionsBase);
-
-        const candlestickSeries = chartMain.addCandlestickSeries({ 
-            upColor: '#26a69a', downColor: '#ef5350', borderVisible: true, borderUpColor: '#000000', borderDownColor: '#000000', wickUpColor: '#000000', wickDownColor: '#000000', priceLineColor: '#000000', priceLineWidth: 1 
+        const chart = LightweightCharts.createChart(container, chartOptions);
+        
+        const candlestickSeries = chart.addCandlestickSeries({ 
+            upColor: '#26a69a', 
+            downColor: '#ef5350', 
+            borderVisible: true, // Activamos bordes
+            borderUpColor: '#000000', // Bordes negros
+            borderDownColor: '#000000', 
+            wickUpColor: '#000000', // Mechas negras
+            wickDownColor: '#000000',
+            priceLineColor: '#000000', // Línea de precio actual negra
+            priceLineWidth: 1 // Línea muy fina
         });
         
-        const deltaSeries = chartDelta.addHistogramSeries({ base: 0 }); 
-        const oiSeries = chartOI.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, title: 'Open Int.' }); 
+        const deltaSeries = chart.addHistogramSeries({ base: 0, priceScaleId: 'deltaScale' });
+        chart.priceScale('deltaScale').applyOptions({ scaleMargins: { top: 0.65, bottom: 0.2 } });
+        const oiSeries = chart.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, priceScaleId: 'oiScale', title: 'Open Int.' });
+        chart.priceScale('oiScale').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 
-        // --- SOLUCIÓN 1: Sincronización PERFECTA para evitar el "desfase" ---
-        const todosLosGraficos = [chartMain, chartDelta, chartOI];
-        let sincronizandoTiempo = false;
-
-        todosLosGraficos.forEach(graficoOrigen => {
-            graficoOrigen.timeScale().subscribeVisibleTimeRangeChange(rangoDeTiempo => {
-                // Verificamos que el rango sea válido para evitar el error "Value is null"
-                if (sincronizandoTiempo || !rangoDeTiempo || rangoDeTiempo.from === null || rangoDeTiempo.to === null) return;
-                
-                sincronizandoTiempo = true;
-                
-                todosLosGraficos.forEach(graficoDestino => {
-                    if (graficoDestino !== graficoOrigen) {
-                        graficoDestino.timeScale().setVisibleRange(rangoDeTiempo);
-                    }
-                });
-                
-                sincronizandoTiempo = false;
-            });
-        });
-
-        // --- SOLUCIÓN 2: Vigilante de Tamaño (ResizeObserver) para asegurar que el Delta se dibuje ---
-        const resizeObserver = new ResizeObserver(entradas => {
-            for (let entrada of entradas) {
-                const { width, height } = entrada.contentRect;
-                if (entrada.target.id === 'chart-main') chartMain.resize(width, height);
-                if (entrada.target.id === 'chart-delta') chartDelta.resize(width, height);
-                if (entrada.target.id === 'chart-oi') chartOI.resize(width, height);
-            }
-        });
-        resizeObserver.observe(document.getElementById('chart-main'));
-        resizeObserver.observe(document.getElementById('chart-delta'));
-        resizeObserver.observe(document.getElementById('chart-oi'));
+        window.addEventListener('resize', () => { chart.resize(container.clientWidth, container.clientHeight); });
 
         let binanceSocket = null; 
         let ultimoTiempoVela = null; 
         let tiemposVelasActivas = [];
         let multiplicadorTemporalidad = 60; 
-        let temporalidadActual = '1m';
-
-        function iniciarWebSocketVelas() {
-            if (binanceSocket !== null) { binanceSocket.close(); }
-
-            binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidadActual}`);
-            
-            binanceSocket.onmessage = function (e) {
-                const k = JSON.parse(e.data).k; 
-                let tiempo = Math.floor(k.t / 1000); 
-                let apertura = parseFloat(k.o); 
-                let cierre = parseFloat(k.c);
-                let comprasMercado = parseFloat(k.V) || 0; 
-                let ventasMercado = (parseFloat(k.v) || 0) - comprasMercado; 
-                
-                // Aseguramos que el valor sea un número limpio
-                let valorDelta = comprasMercado - ventasMercado;
-                if (isNaN(valorDelta)) valorDelta = 0;
-
-                candlestickSeries.update({ time: tiempo, open: apertura, high: parseFloat(k.h), low: parseFloat(k.l), close: cierre });
-                deltaSeries.update({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? '#26a69a' : '#ef5350' });
-                
-                if (tiemposVelasActivas.length === 0 || tiemposVelasActivas[tiemposVelasActivas.length - 1] !== tiempo) {
-                    tiemposVelasActivas.push(tiempo);
-                }
-                
-                ultimoTiempoVela = tiempo; 
-            };
-
-            binanceSocket.onclose = () => { setTimeout(iniciarWebSocketVelas, 3000); };
-        }
 
         function cargarDatos(temporalidad) {
-            temporalidadActual = temporalidad; 
-
+            if (binanceSocket !== null) binanceSocket.close();
             fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=1000`)
                 .then(r => r.json())
                 .then(datos => {
@@ -211,14 +163,12 @@
                         let tiempo = Math.floor(v[0] / 1000); 
                         let apertura = parseFloat(v[1]); 
                         let cierre = parseFloat(v[4]);
-                        let comprasMercado = parseFloat(v[9]) || 0; 
-                        let ventasMercado = (parseFloat(v[5]) || 0) - comprasMercado; 
-                        
+                        let comprasMercado = parseFloat(v[9]); 
+                        let ventasMercado = parseFloat(v[5]) - comprasMercado; 
                         let valorDelta = comprasMercado - ventasMercado;
-                        if (isNaN(valorDelta)) valorDelta = 0;
                         
                         velas.push({ time: tiempo, open: apertura, high: parseFloat(v[2]), low: parseFloat(v[3]), close: cierre });
-                        datosDelta.push({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? '#26a69a' : '#ef5350' });
+                        datosDelta.push({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
                         
                         tiemposVelasActivas.push(tiempo); 
                         ultimoTiempoVela = tiempo; 
@@ -226,15 +176,30 @@
                     
                     candlestickSeries.setData(velas); 
                     deltaSeries.setData(datosDelta); 
-                    
-                    chartMain.timeScale().fitContent(); 
-                    chartDelta.timeScale().fitContent();
-                    chartOI.timeScale().fitContent();
+                    chart.timeScale().fitContent(); 
                     
                     dibujarMarcadores(); 
                     dibujarOI(); 
 
-                    iniciarWebSocketVelas(); 
+                    binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
+                    binanceSocket.onmessage = function (e) {
+                        const k = JSON.parse(e.data).k; 
+                        let tiempo = Math.floor(k.t / 1000); 
+                        let apertura = parseFloat(k.o); 
+                        let cierre = parseFloat(k.c);
+                        let comprasMercado = parseFloat(k.V); 
+                        let ventasMercado = parseFloat(k.v) - comprasMercado; 
+                        let valorDelta = comprasMercado - ventasMercado;
+                        
+                        candlestickSeries.update({ time: tiempo, open: apertura, high: parseFloat(k.h), low: parseFloat(k.l), close: cierre });
+                        deltaSeries.update({ time: tiempo, value: valorDelta, color: valorDelta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' });
+                        
+                        if (tiemposVelasActivas.length === 0 || tiemposVelasActivas[tiemposVelasActivas.length - 1] !== tiempo) {
+                            tiemposVelasActivas.push(tiempo);
+                        }
+                        
+                        ultimoTiempoVela = tiempo; 
+                    };
                 });
         }
 
@@ -286,9 +251,14 @@
                     let tiempoVela = obtenerVelaExacta(tiempoSegundos);
 
                     if (tiempoVela !== null) {
-                        if (!marcadoresAgrupados[tiempoVela]) { marcadoresAgrupados[tiempoVela] = { compras: 0, ventas: 0 }; }
-                        if (trade.es_venta) { marcadoresAgrupados[tiempoVela].ventas += cantidadBtc; } 
-                        else { marcadoresAgrupados[tiempoVela].compras += cantidadBtc; }
+                        if (!marcadoresAgrupados[tiempoVela]) {
+                            marcadoresAgrupados[tiempoVela] = { compras: 0, ventas: 0 };
+                        }
+                        if (trade.es_venta) {
+                            marcadoresAgrupados[tiempoVela].ventas += cantidadBtc;
+                        } else {
+                            marcadoresAgrupados[tiempoVela].compras += cantidadBtc;
+                        }
                     }
                 }
             });
@@ -298,12 +268,21 @@
                 let tiempo = parseInt(t);
                 let datos = marcadoresAgrupados[tiempo];
 
-                if (datos.compras > 0) { marcadores.push({ time: tiempo, position: 'belowBar', color: '#26a69a', shape: 'arrowUp', text: `${datos.compras.toFixed(1)} BTC`, size: datos.compras > 15 ? 2 : 1 }); }
-                if (datos.ventas > 0) { marcadores.push({ time: tiempo, position: 'aboveBar', color: '#ef5350', shape: 'arrowDown', text: `${datos.ventas.toFixed(1)} BTC`, size: datos.ventas > 15 ? 2 : 1 }); }
+                if (datos.compras > 0) {
+                    marcadores.push({ time: tiempo, position: 'belowBar', color: '#26a69a', shape: 'arrowUp', text: `${datos.compras.toFixed(1)} BTC`, size: datos.compras > 15 ? 2 : 1 });
+                }
+                if (datos.ventas > 0) {
+                    marcadores.push({ time: tiempo, position: 'aboveBar', color: '#ef5350', shape: 'arrowDown', text: `${datos.ventas.toFixed(1)} BTC`, size: datos.ventas > 15 ? 2 : 1 });
+                }
             });
 
             marcadores.sort((a, b) => a.time - b.time);
-            try { candlestickSeries.setMarkers(marcadores); } catch (e) { }
+            
+            try {
+                candlestickSeries.setMarkers(marcadores);
+            } catch (e) {
+                console.log("Error al renderizar marcadores:", e);
+            }
         }
 
         inputFiltroGrafico.addEventListener('change', function() {
@@ -314,9 +293,7 @@
         setTimeout(pedirHistorialBallenas, 2000);
         setInterval(pedirHistorialBallenas, 30000);
 
-        // --- SOLUCIÓN 3: El candado de tiempo para el Open Interest ---
         let memoriaOIBD = []; 
-        let ultimoTiempoOI = 0; // Guardará la última fecha válida
 
         function cargarHistorialOI() {
             fetch('/api/open-interest')
@@ -332,24 +309,31 @@
             if (memoriaOIBD.length === 0 || tiemposVelasActivas.length === 0) return;
 
             let oiAgrupado = {};
+
             memoriaOIBD.forEach(d => {
                 let tiempoOI = parseInt(d.tiempo);
                 if (isNaN(tiempoOI)) return; 
+
                 let tiempoVela = obtenerVelaExacta(tiempoOI);
-                if (tiempoVela !== null) { oiAgrupado[tiempoVela] = parseFloat(d.valor); }
+                
+                if (tiempoVela !== null) {
+                    oiAgrupado[tiempoVela] = parseFloat(d.valor);
+                }
             });
 
             let oiDataHistorial = [];
             Object.keys(oiAgrupado).forEach(t => {
                 let valorFinal = oiAgrupado[t];
-                if (!isNaN(valorFinal)) { oiDataHistorial.push({ time: parseInt(t), value: valorFinal }); }
+                if (!isNaN(valorFinal)) {
+                    oiDataHistorial.push({ time: parseInt(t), value: valorFinal });
+                }
             });
             
             oiDataHistorial.sort((a, b) => a.time - b.time);
             
             if (oiDataHistorial.length > 0) {
-                ultimoTiempoOI = oiDataHistorial[oiDataHistorial.length - 1].time; // Ponemos el candado en el último dato
-                try { oiSeries.setData(oiDataHistorial); } catch (error) { }
+                try { oiSeries.setData(oiDataHistorial); } 
+                catch (error) { console.log("Error interno al dibujar Open Interest:", error); }
             }
         }
 
@@ -357,16 +341,12 @@
             fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT')
                 .then(respuesta => respuesta.json())
                 .then(datos => {
-                    // Validamos que el tiempo nuevo sea MAYOR o IGUAL al candado para que no de error
-                    if (ultimoTiempoVela && ultimoTiempoVela >= ultimoTiempoOI) {
+                    if (ultimoTiempoVela) {
                         let contratosAbiertos = parseFloat(datos.openInterest);
-                        try {
-                            oiSeries.update({ time: ultimoTiempoVela, value: contratosAbiertos });
-                            ultimoTiempoOI = ultimoTiempoVela; // Actualizamos el candado
-                        } catch(e) { /* Evitamos que el error corte la ejecución si hay microdesfases */ }
+                        oiSeries.update({ time: ultimoTiempoVela, value: contratosAbiertos });
                     }
                 })
-                .catch(error => console.log("Error al traer Open Interest:", error));
+                .catch(error => console.log("Error al traer Open Interest en vivo:", error));
         }
         
         setTimeout(() => {
@@ -395,11 +375,13 @@
                 const cambios = JSON.parse(e.data);
                 cambios.a.forEach(ask => {
                     let precio = parseFloat(ask[0]); let cantidad = parseFloat(ask[1]);
-                    if (cantidad === 0) delete orderBookLocal.asks[precio]; else orderBookLocal.asks[precio] = cantidad;
+                    if (cantidad === 0) delete orderBookLocal.asks[precio];
+                    else orderBookLocal.asks[precio] = cantidad;
                 });
                 cambios.b.forEach(bid => {
                     let precio = parseFloat(bid[0]); let cantidad = parseFloat(bid[1]);
-                    if (cantidad === 0) delete orderBookLocal.bids[precio]; else orderBookLocal.bids[precio] = cantidad;
+                    if (cantidad === 0) delete orderBookLocal.bids[precio];
+                    else orderBookLocal.bids[precio] = cantidad;
                 });
             };
         }
@@ -437,21 +419,46 @@
             document.getElementById('top-ventas').innerHTML = top3Ventas.map(v => `<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
             document.getElementById('top-compras').innerHTML = top3Compras.map(c => `<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
 
-            seriesDeMuros.forEach(serie => chartMain.removeSeries(serie)); 
+            seriesDeMuros.forEach(serie => chart.removeSeries(serie)); 
             seriesDeMuros = []; 
 
             if (!ultimoTiempoVela) return;
+
+            // TRUCO EXPERTO: Empujamos el punto final 500 velas hacia el futuro.
+            // Al hacer esto, garantizamos que la línea cruce hasta estrellarse directamente con la escala numérica.
             let tiempoFuturo = ultimoTiempoVela + (multiplicadorTemporalidad * 500);
 
             top3Ventas.forEach(v => {
-                let serieMuro = chartMain.addLineSeries({ color: '#ef5350', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, lastValueVisible: true, priceLineVisible: false, crosshairMarkerVisible: false, title: `RES ${v[1].toFixed(0)} BTC` });
-                serieMuro.setData([{ time: ultimoTiempoVela, value: v[0] }, { time: tiempoFuturo, value: v[0] }]);
+                let serieMuro = chart.addLineSeries({
+                    color: '#ef5350', 
+                    lineWidth: 2, 
+                    lineStyle: LightweightCharts.LineStyle.Dashed, 
+                    lastValueVisible: true, 
+                    priceLineVisible: false, 
+                    crosshairMarkerVisible: false,
+                    title: `RES ${v[1].toFixed(0)} BTC`
+                });
+                serieMuro.setData([
+                    { time: ultimoTiempoVela, value: v[0] }, 
+                    { time: tiempoFuturo, value: v[0] }      
+                ]);
                 seriesDeMuros.push(serieMuro);
             });
 
             top3Compras.forEach(c => {
-                let serieMuro = chartMain.addLineSeries({ color: '#26a69a', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, lastValueVisible: true, priceLineVisible: false, crosshairMarkerVisible: false, title: `SOP ${c[1].toFixed(0)} BTC` });
-                serieMuro.setData([{ time: ultimoTiempoVela, value: c[0] }, { time: tiempoFuturo, value: c[0] }]);
+                let serieMuro = chart.addLineSeries({
+                    color: '#26a69a', 
+                    lineWidth: 2, 
+                    lineStyle: LightweightCharts.LineStyle.Dashed, 
+                    lastValueVisible: true, 
+                    priceLineVisible: false, 
+                    crosshairMarkerVisible: false,
+                    title: `SOP ${c[1].toFixed(0)} BTC`
+                });
+                serieMuro.setData([
+                    { time: ultimoTiempoVela, value: c[0] }, 
+                    { time: tiempoFuturo, value: c[0] }      
+                ]);
                 seriesDeMuros.push(serieMuro);
             });
         }
@@ -459,14 +466,21 @@
         setInterval(dibujarMuros, 2000);
         document.getElementById('input-rango').addEventListener('change', dibujarMuros);
 
+        // --- 3. CINTA DE BALLENAS (aggTrade) y SINCRONIZACIÓN CON BD ---
         fetch('/api/filtro-bd')
             .then(res => res.json())
-            .then(data => { document.getElementById('filtro-bd').value = data.umbral; })
+            .then(data => {
+                document.getElementById('filtro-bd').value = data.umbral;
+            })
             .catch(err => console.log('Error al leer filtro de BD:', err));
 
         document.getElementById('filtro-bd').addEventListener('change', function() {
             const nuevoUmbral = parseFloat(this.value);
-            fetch('/api/filtro-bd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ umbral: nuevoUmbral }) })
+            fetch('/api/filtro-bd', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ umbral: nuevoUmbral })
+            })
             .then(res => res.json())
             .then(data => console.log('El servidor confirmó el nuevo límite de BD:', data.umbral))
             .catch(err => console.log('Error al actualizar filtro en servidor:', err));
@@ -480,6 +494,7 @@
             const cantidad = parseFloat(data.q); 
             const precio = parseFloat(data.p); 
             const agresorFueVendedor = data.m; 
+            
             const limiteCintaVisual = parseFloat(inputFiltroCinta.value) || 1.0;
 
             if (cantidad >= limiteCintaVisual) {
