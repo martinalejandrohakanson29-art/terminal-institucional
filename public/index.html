@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Terminal Institucional BTC/USDT Nivel Dios</title>
     
+    <link rel="icon" href="data:,">
+    
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     
     <style>
@@ -110,6 +112,8 @@
 
         // --- 1. GRÁFICO (Velas, Delta, Open Interest) ---
         const container = document.getElementById('chart-container');
+        
+        // --- SOLUCIÓN ZONA HORARIA ARGENTINA ---
         const chartOptions = { 
             width: container.clientWidth, 
             height: container.clientHeight, 
@@ -123,25 +127,57 @@
             }, 
             crosshair: { mode: LightweightCharts.CrosshairMode.Normal }, 
             rightPriceScale: { borderColor: '#d1d4dc' }, 
-            timeScale: { borderColor: '#d1d4dc', timeVisible: true, secondsVisible: false }, 
+            timeScale: { 
+                borderColor: '#d1d4dc', 
+                timeVisible: true, 
+                secondsVisible: false,
+                // Formateamos la regla de tiempo inferior
+                tickMarkFormatter: (time) => {
+                    return new Intl.DateTimeFormat('es-AR', {
+                        timeZone: 'America/Argentina/Cordoba',
+                        hour: '2-digit', 
+                        minute: '2-digit'
+                    }).format(new Date(time * 1000));
+                }
+            },
+            localization: {
+                // Formateamos el cartelito (tooltip) que aparece al mover el mouse
+                timeFormatter: (time) => {
+                    return new Intl.DateTimeFormat('es-AR', {
+                        timeZone: 'America/Argentina/Cordoba',
+                        day: '2-digit', 
+                        month: '2-digit', 
+                        year: 'numeric',
+                        hour: '2-digit', 
+                        minute: '2-digit'
+                    }).format(new Date(time * 1000));
+                }
+            }
         };
         const chart = LightweightCharts.createChart(container, chartOptions);
         
         const candlestickSeries = chart.addCandlestickSeries({ 
             upColor: '#26a69a', 
             downColor: '#ef5350', 
-            borderVisible: true, // Activamos bordes
-            borderUpColor: '#000000', // Bordes negros
+            borderVisible: true, 
+            borderUpColor: '#000000', 
             borderDownColor: '#000000', 
-            wickUpColor: '#000000', // Mechas negras
+            wickUpColor: '#000000', 
             wickDownColor: '#000000',
-            priceLineColor: '#000000', // Línea de precio actual negra
-            priceLineWidth: 1 // Línea muy fina
+            priceLineColor: '#000000', 
+            priceLineWidth: 1 
         });
         
         const deltaSeries = chart.addHistogramSeries({ base: 0, priceScaleId: 'deltaScale' });
         chart.priceScale('deltaScale').applyOptions({ scaleMargins: { top: 0.65, bottom: 0.2 } });
-        const oiSeries = chart.addAreaSeries({ lineColor: '#FFD700', topColor: 'rgba(255, 215, 0, 0.3)', bottomColor: 'rgba(255, 215, 0, 0.0)', lineWidth: 2, priceScaleId: 'oiScale', title: 'Open Int.' });
+        
+        // --- SOLUCIÓN OPEN INTEREST: Cambiado de AreaSeries a LineSeries ---
+        const oiSeries = chart.addLineSeries({ 
+            color: '#FFD700', 
+            lineWidth: 2, 
+            priceScaleId: 'oiScale', 
+            title: 'Open Int.' 
+        });
         chart.priceScale('oiScale').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 
         window.addEventListener('resize', () => { chart.resize(container.clientWidth, container.clientHeight); });
@@ -152,7 +188,16 @@
         let multiplicadorTemporalidad = 60; 
 
         function cargarDatos(temporalidad) {
-            if (binanceSocket !== null) binanceSocket.close();
+            // --- SOLUCIÓN ERROR WEBSOCKET AL CAMBIAR RÁPIDO ---
+            if (binanceSocket !== null) {
+                // Si está en estado 0 significa que se está conectando. No podemos cerrarlo de golpe.
+                if (binanceSocket.readyState === 0) {
+                    binanceSocket.onopen = function() { binanceSocket.close(); };
+                } else {
+                    binanceSocket.close();
+                }
+            }
+
             fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=1000`)
                 .then(r => r.json())
                 .then(datos => {
