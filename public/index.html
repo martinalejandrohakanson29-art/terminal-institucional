@@ -11,7 +11,6 @@
     
     <style>
         * { box-sizing: border-box; }
-        /* Fondo liso, blanco/grisáceo para descansar la vista */
         body { margin: 0; padding: 0; background-color: #f0f2f5; color: #1e1e1e; font-family: Arial, sans-serif; overflow: hidden; width: 100vw; height: 100vh; }
         #header { padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; background-color: #ffffff; border-bottom: 1px solid #d1d4dc; height: 60px; }
         h2 { margin: 0; font-size: 1.2rem; }
@@ -95,7 +94,6 @@
     </div>
 
     <script>
-        // --- RECUPERAR MEMORIA DEL NAVEGADOR AL CARGAR ---
         const inputFiltroGrafico = document.getElementById('filtro-grafico');
         const inputFiltroCinta = document.getElementById('filtro-cinta');
 
@@ -110,10 +108,8 @@
             localStorage.setItem('memoriaCinta', this.value);
         });
 
-        // --- 1. GRÁFICO (Velas, Delta, Open Interest) ---
         const container = document.getElementById('chart-container');
         
-        // --- SOLUCIÓN ZONA HORARIA ARGENTINA ---
         const chartOptions = { 
             width: container.clientWidth, 
             height: container.clientHeight, 
@@ -131,26 +127,21 @@
                 borderColor: '#d1d4dc', 
                 timeVisible: true, 
                 secondsVisible: false,
-                // Formateamos la regla de tiempo inferior
                 tickMarkFormatter: (time) => {
-                    return new Intl.DateTimeFormat('es-AR', {
-                        timeZone: 'America/Argentina/Cordoba',
-                        hour: '2-digit', 
-                        minute: '2-digit'
-                    }).format(new Date(time * 1000));
+                    // Si es un objeto (ej. velas de 1D), mostramos día y mes
+                    if (typeof time === 'object' && time.year) {
+                        return new Intl.DateTimeFormat('es-AR', { timeZone: 'America/Argentina/Cordoba', month: 'short', day: 'numeric' }).format(new Date(time.year, time.month - 1, time.day));
+                    }
+                    // Si es intradía (número en segundos), mostramos hora y minutos
+                    return new Intl.DateTimeFormat('es-AR', { timeZone: 'America/Argentina/Cordoba', hour: '2-digit', minute: '2-digit' }).format(new Date(time * 1000));
                 }
             },
             localization: {
-                // Formateamos el cartelito (tooltip) que aparece al mover el mouse
                 timeFormatter: (time) => {
-                    return new Intl.DateTimeFormat('es-AR', {
-                        timeZone: 'America/Argentina/Cordoba',
-                        day: '2-digit', 
-                        month: '2-digit', 
-                        year: 'numeric',
-                        hour: '2-digit', 
-                        minute: '2-digit'
-                    }).format(new Date(time * 1000));
+                    if (typeof time === 'object' && time.year) {
+                        return new Intl.DateTimeFormat('es-AR', { timeZone: 'America/Argentina/Cordoba', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(time.year, time.month - 1, time.day));
+                    }
+                    return new Intl.DateTimeFormat('es-AR', { timeZone: 'America/Argentina/Cordoba', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(time * 1000));
                 }
             }
         };
@@ -171,7 +162,6 @@
         const deltaSeries = chart.addHistogramSeries({ base: 0, priceScaleId: 'deltaScale' });
         chart.priceScale('deltaScale').applyOptions({ scaleMargins: { top: 0.65, bottom: 0.2 } });
         
-        // --- SOLUCIÓN OPEN INTEREST: Cambiado de AreaSeries a LineSeries ---
         const oiSeries = chart.addLineSeries({ 
             color: '#FFD700', 
             lineWidth: 2, 
@@ -185,12 +175,9 @@
         let binanceSocket = null; 
         let ultimoTiempoVela = null; 
         let tiemposVelasActivas = [];
-        let multiplicadorTemporalidad = 60; 
 
         function cargarDatos(temporalidad) {
-            // --- SOLUCIÓN ERROR WEBSOCKET AL CAMBIAR RÁPIDO ---
             if (binanceSocket !== null) {
-                // Si está en estado 0 significa que se está conectando. No podemos cerrarlo de golpe.
                 if (binanceSocket.readyState === 0) {
                     binanceSocket.onopen = function() { binanceSocket.close(); };
                 } else {
@@ -251,14 +238,6 @@
         function cambiarTemporalidad(t) {
             document.querySelectorAll('.btn-tiempo').forEach(btn => btn.classList.remove('btn-activo'));
             document.getElementById(`btn-${t}`).classList.add('btn-activo'); 
-            
-            if(t === '1m') multiplicadorTemporalidad = 60;
-            else if(t === '5m') multiplicadorTemporalidad = 300;
-            else if(t === '15m') multiplicadorTemporalidad = 900;
-            else if(t === '1h') multiplicadorTemporalidad = 3600;
-            else if(t === '4h') multiplicadorTemporalidad = 14400;
-            else if(t === '1d') multiplicadorTemporalidad = 86400;
-
             cargarDatos(t);
         }
         cambiarTemporalidad('1m');
@@ -404,7 +383,9 @@
 
         let orderBookLocal = { asks: {}, bids: {} };
         const TAMAÑO_GRUPO = 50; 
-        let seriesDeMuros = []; 
+        
+        // --- AQUÍ ESTÁ EL CAMBIO CLAVE NATIVO ---
+        let lineasDeMuros = []; 
 
         fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000')
             .then(r => r.json())
@@ -464,54 +445,41 @@
             document.getElementById('top-ventas').innerHTML = top3Ventas.map(v => `<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
             document.getElementById('top-compras').innerHTML = top3Compras.map(c => `<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
 
-            seriesDeMuros.forEach(serie => chart.removeSeries(serie)); 
-            seriesDeMuros = []; 
+            // Limpiamos las PriceLines anteriores
+            lineasDeMuros.forEach(linea => candlestickSeries.removePriceLine(linea));
+            lineasDeMuros = []; 
 
             if (!ultimoTiempoVela) return;
 
-            // TRUCO EXPERTO: Empujamos el punto final 500 velas hacia el futuro.
-            // Al hacer esto, garantizamos que la línea cruce hasta estrellarse directamente con la escala numérica.
-            let tiempoFuturo = ultimoTiempoVela + (multiplicadorTemporalidad * 500);
-
+            // Dibujamos las nuevas usando createPriceLine (sin deformar el tiempo)
             top3Ventas.forEach(v => {
-                let serieMuro = chart.addLineSeries({
-                    color: '#ef5350', 
-                    lineWidth: 2, 
-                    lineStyle: LightweightCharts.LineStyle.Dashed, 
-                    lastValueVisible: true, 
-                    priceLineVisible: false, 
-                    crosshairMarkerVisible: false,
-                    title: `RES ${v[1].toFixed(0)} BTC`
+                let lineaMuro = candlestickSeries.createPriceLine({
+                    price: v[0],
+                    color: '#ef5350',
+                    lineWidth: 2,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true,
+                    title: `RES ${v[1].toFixed(0)}`
                 });
-                serieMuro.setData([
-                    { time: ultimoTiempoVela, value: v[0] }, 
-                    { time: tiempoFuturo, value: v[0] }      
-                ]);
-                seriesDeMuros.push(serieMuro);
+                lineasDeMuros.push(lineaMuro);
             });
 
             top3Compras.forEach(c => {
-                let serieMuro = chart.addLineSeries({
-                    color: '#26a69a', 
-                    lineWidth: 2, 
-                    lineStyle: LightweightCharts.LineStyle.Dashed, 
-                    lastValueVisible: true, 
-                    priceLineVisible: false, 
-                    crosshairMarkerVisible: false,
-                    title: `SOP ${c[1].toFixed(0)} BTC`
+                let lineaMuro = candlestickSeries.createPriceLine({
+                    price: c[0],
+                    color: '#26a69a',
+                    lineWidth: 2,
+                    lineStyle: LightweightCharts.LineStyle.Dashed,
+                    axisLabelVisible: true,
+                    title: `SOP ${c[1].toFixed(0)}`
                 });
-                serieMuro.setData([
-                    { time: ultimoTiempoVela, value: c[0] }, 
-                    { time: tiempoFuturo, value: c[0] }      
-                ]);
-                seriesDeMuros.push(serieMuro);
+                lineasDeMuros.push(lineaMuro);
             });
         }
 
         setInterval(dibujarMuros, 2000);
         document.getElementById('input-rango').addEventListener('change', dibujarMuros);
 
-        // --- 3. CINTA DE BALLENAS (aggTrade) y SINCRONIZACIÓN CON BD ---
         fetch('/api/filtro-bd')
             .then(res => res.json())
             .then(data => {
