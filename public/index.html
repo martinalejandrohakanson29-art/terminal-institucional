@@ -118,7 +118,7 @@
         });
         inputFiltroCinta.addEventListener('change', function() { localStorage.setItem('memoriaCinta', this.value); });
 
-        // --- 1. REGISTRO DE INDICADORES PERSONALIZADOS (ERROR SOLUCIONADO) ---
+        // --- 1. REGISTRO DE INDICADORES PERSONALIZADOS ---
         klinecharts.registerIndicator({
             name: 'VOL_DELTA',
             shortName: 'Delta',
@@ -126,7 +126,6 @@
             figures: [
                 {
                     key: 'delta', title: 'Delta: ', type: 'bar', baseValue: 0,
-                    // Aquí agregamos el escudo protector: nos aseguramos de que "indicatorData" y su "delta" existan antes de leerlo
                     styles: ({ indicatorData }) => ({ 
                         color: (indicatorData && indicatorData.delta !== undefined && indicatorData.delta >= 0) ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' 
                     })
@@ -141,19 +140,15 @@
             figures: [{ key: 'oi', title: 'OI: ', type: 'line', styles: { color: '#FFD700' } }]
         });
 
-        // --- 2. NUEVO MARCADOR PERSONALIZADO PARA BALLENAS ---
-        // Al crear nuestro propio marcador, evitamos que KLineChart nos obligue a usar sus colores por defecto.
+        // --- 2. MARCADOR PERSONALIZADO PARA BALLENAS ---
         klinecharts.registerOverlay({
             name: 'marcadorBallena',
             createPointFigures: ({ overlay, coordinates }) => {
                 let es_venta = overlay.extendData.es_venta;
                 let texto = overlay.extendData.text;
                 
-                // Color absoluto
                 let color = es_venta ? '#ef5350' : '#26a69a';
-                
-                // Calculamos si dibujarlo un poco más arriba (-10) o un poco más abajo (+10) de la vela
-                let yOffset = es_venta ? -10 : 10;
+                let yOffset = es_venta ? -15 : 15;
                 let alineacion = es_venta ? 'bottom' : 'top';
 
                 return [
@@ -166,7 +161,7 @@
                             align: 'center', 
                             baseline: alineacion 
                         },
-                        ignoreEvent: true, // Evita que el texto bloquee los clicks en el gráfico
+                        ignoreEvent: true, 
                         styles: { color: color, size: 12, weight: 'bold' }
                     }
                 ];
@@ -292,7 +287,7 @@
             return tiemposVelasActivas[0]; 
         }
 
-        // --- CAZADOR DE BALLENAS (OVERLAYS) ---
+        // --- CAZADOR DE BALLENAS (OVERLAYS AGRUPADOS) ---
         function pedirHistorialBallenas() {
             fetch('/api/ballenas')
                 .then(respuesta => respuesta.json())
@@ -306,30 +301,55 @@
         function dibujarMarcadores() {
             const limiteBtc = parseFloat(inputFiltroGrafico.value) || 5;
             
-            // Limpiamos los marcadores de la pantalla
+            // 1. Limpiamos los marcadores de la pantalla
             chart.removeOverlay({ groupId: 'whales' });
 
             const dataList = chart.getDataList();
+            let marcadoresAgrupados = {};
 
+            // 2. Agrupamos y sumamos las órdenes por cada vela
             memoriaBallenasBD.forEach(trade => {
                 const cantidadBtc = parseFloat(trade.cantidad);
                 if (cantidadBtc >= limiteBtc) {
-                    let timestamp = Math.floor(trade.tiempo_segundos * 1000); 
-                    
-                    let vela = dataList.find(v => v.timestamp === timestamp);
-                    let precioAncla = parseFloat(trade.precio);
+                    let tiempoMs = Math.floor(trade.tiempo_segundos * 1000); 
+                    let tiempoVela = obtenerVelaExacta(tiempoMs);
 
-                    if (vela) {
-                        precioAncla = trade.es_venta ? vela.high : vela.low;
+                    if (tiempoVela !== null) {
+                        if (!marcadoresAgrupados[tiempoVela]) {
+                            marcadoresAgrupados[tiempoVela] = { compras: 0, ventas: 0 };
+                        }
+                        if (trade.es_venta) {
+                            marcadoresAgrupados[tiempoVela].ventas += cantidadBtc;
+                        } else {
+                            marcadoresAgrupados[tiempoVela].compras += cantidadBtc;
+                        }
                     }
+                }
+            });
 
-                    // Usamos el overlay NUEVO que creamos más arriba
-                    chart.createOverlay({
-                        groupId: 'whales',
-                        name: 'marcadorBallena', 
-                        extendData: { text: `${cantidadBtc.toFixed(1)} BTC`, es_venta: trade.es_venta },
-                        points: [{ timestamp: timestamp, value: precioAncla }]
-                    });
+            // 3. Dibujamos un único texto totalizador por vela
+            Object.keys(marcadoresAgrupados).forEach(t => {
+                let tiempo = parseInt(t);
+                let datos = marcadoresAgrupados[tiempo];
+                let vela = dataList.find(v => v.timestamp === tiempo);
+
+                if (vela) {
+                    if (datos.compras > 0) {
+                        chart.createOverlay({
+                            groupId: 'whales',
+                            name: 'marcadorBallena', 
+                            extendData: { text: `▲ ${datos.compras.toFixed(1)} BTC`, es_venta: false },
+                            points: [{ timestamp: tiempo, value: vela.low }]
+                        });
+                    }
+                    if (datos.ventas > 0) {
+                        chart.createOverlay({
+                            groupId: 'whales',
+                            name: 'marcadorBallena', 
+                            extendData: { text: `▼ ${datos.ventas.toFixed(1)} BTC`, es_venta: true },
+                            points: [{ timestamp: tiempo, value: vela.high }]
+                        });
+                    }
                 }
             });
         }
