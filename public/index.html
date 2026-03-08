@@ -20,7 +20,6 @@
         .btn-tiempo:hover, .btn-dibujo:hover { background-color: #e2e8f0; }
         .btn-activo { background-color: #2962FF; color: white; border-color: #2962FF; }
 
-        /* Estilos para la nueva barra de herramientas de dibujo */
         .herramientas-dibujo { border-left: 2px solid #d1d4dc; padding-left: 15px; margin-left: 10px; display: flex; gap: 5px; align-items: center; }
 
         #main-content { display: flex; width: 100%; height: calc(100vh - 60px); }
@@ -119,8 +118,7 @@
         });
         inputFiltroCinta.addEventListener('change', function() { localStorage.setItem('memoriaCinta', this.value); });
 
-        // --- 3. REGISTRO DE INDICADORES PERSONALIZADOS PARA KLINECHART ---
-        // Le enseñamos a KLineChart a leer "delta" y "oi" (Open Interest) de nuestros datos
+        // --- REGISTRO DE INDICADORES PERSONALIZADOS PARA KLINECHART ---
         klinecharts.registerIndicator({
             name: 'VOL_DELTA',
             shortName: 'Delta',
@@ -140,7 +138,7 @@
             figures: [{ key: 'oi', title: 'OI: ', type: 'line', styles: { color: '#FFD700' } }]
         });
 
-        // --- 4. INICIALIZACIÓN DE KLINECHART ---
+        // --- INICIALIZACIÓN DE KLINECHART ---
         const chart = klinecharts.init('chart-container', {
             styles: {
                 grid: { horizontal: { display: false }, vertical: { display: false } },
@@ -154,7 +152,6 @@
             }
         });
 
-        // Creamos los paneles (sub-ventanas) en la parte inferior
         chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 });
         chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 });
 
@@ -164,7 +161,6 @@
         }
 
         function borrarDibujos() {
-            // Borramos explícitamente solo las herramientas de dibujo, para no borrar nuestras ballenas
             const tiposDibujo = ['segment', 'rayLine', 'fibonacciLine', 'rect'];
             tiposDibujo.forEach(tipo => chart.removeOverlay({ name: tipo }));
         }
@@ -175,7 +171,7 @@
         let memoriaBallenasBD = []; 
         let memoriaOIBD = []; 
 
-        // --- 5. CARGA DE VELAS (FORMATO KLINECHART) ---
+        // --- CARGA DE VELAS ---
         function cargarDatos(temporalidad) {
             if (binanceSocket !== null) {
                 if (binanceSocket.readyState === 0) binanceSocket.onopen = function() { binanceSocket.close(); };
@@ -189,12 +185,11 @@
                     tiemposVelasActivas = []; 
 
                     datos.forEach(v => {
-                        let timestamp = v[0]; // KLineChart usa milisegundos directamente
+                        let timestamp = v[0]; 
                         let volume = parseFloat(v[5]);
                         let comprasMercado = parseFloat(v[9]); 
                         let ventasMercado = volume - comprasMercado; 
                         
-                        // Estructura exacta que pide KLineChart
                         let kline = {
                             timestamp: timestamp,
                             open: parseFloat(v[1]),
@@ -203,7 +198,7 @@
                             close: parseFloat(v[4]),
                             volume: volume,
                             delta: comprasMercado - ventasMercado,
-                            oi: null // Lo llenaremos luego
+                            oi: null 
                         };
                         
                         velas.push(kline);
@@ -215,7 +210,6 @@
                     dibujarMarcadores(); 
                     dibujarOI(); 
 
-                    // --- WEBSOCKET DE VELAS ---
                     binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
                     binanceSocket.onmessage = function (e) {
                         const k = JSON.parse(e.data).k; 
@@ -224,7 +218,6 @@
                         let comprasMercado = parseFloat(k.V); 
                         let ventasMercado = volume - comprasMercado; 
 
-                        // Extraer el OI anterior si existía para no borrarlo en la actualización
                         let dataList = chart.getDataList();
                         let ultimaVela = dataList.length > 0 ? dataList[dataList.length - 1] : null;
                         let oiExistente = (ultimaVela && ultimaVela.timestamp === timestamp) ? ultimaVela.oi : null;
@@ -264,7 +257,7 @@
             return tiemposVelasActivas[0]; 
         }
 
-        // --- 6. CAZADOR DE BALLENAS (OVERLAYS) ---
+        // --- CAZADOR DE BALLENAS (OVERLAYS) ---
         function pedirHistorialBallenas() {
             fetch('/api/ballenas')
                 .then(respuesta => respuesta.json())
@@ -278,30 +271,44 @@
         function dibujarMarcadores() {
             const limiteBtc = parseFloat(inputFiltroGrafico.value) || 5;
             
-            // Limpiamos solo los marcadores de ballenas, no los dibujos del usuario
+            // Limpiamos solo los marcadores de ballenas
             chart.removeOverlay({ groupId: 'whales' });
+
+            // Extraemos las velas para saber sus altos y bajos
+            const dataList = chart.getDataList();
 
             memoriaBallenasBD.forEach(trade => {
                 const cantidadBtc = parseFloat(trade.cantidad);
                 if (cantidadBtc >= limiteBtc) {
-                    let timestamp = Math.floor(trade.tiempo_segundos * 1000); // Pasamos a milisegundos
-                    let precioExecucion = parseFloat(trade.precio);
+                    let timestamp = Math.floor(trade.tiempo_segundos * 1000); 
+                    
+                    // Buscamos la vela en la que ocurrió el trade
+                    let vela = dataList.find(v => v.timestamp === timestamp);
+                    let precioAncla = parseFloat(trade.precio);
 
-                    // Ventaja Gigante de KLineChart: Colocamos la etiqueta EXACTAMENTE en el precio donde compró/vendió
+                    // Si encontramos la vela, anclamos el marcador al máximo o mínimo
+                    if (vela) {
+                        precioAncla = trade.es_venta ? vela.high : vela.low;
+                    }
+
                     chart.createOverlay({
                         groupId: 'whales',
                         name: 'simpleAnnotation',
                         extendData: `${cantidadBtc.toFixed(1)} BTC`,
-                        points: [{ timestamp: timestamp, value: precioExecucion }],
+                        points: [{ timestamp: timestamp, value: precioAncla }],
                         styles: {
                             simpleAnnotation: {
                                 type: 'normal',
+                                // Las ventas van arriba ('top'), las compras van abajo ('bottom')
                                 position: trade.es_venta ? 'top' : 'bottom',
-                                backgroundColor: trade.es_venta ? '#ef5350' : '#26a69a',
-                                color: '#ffffff',
+                                // Fondo transparente para dar protagonismo al texto
+                                backgroundColor: 'transparent', 
+                                // Rojo para ventas, verde para compras
+                                color: trade.es_venta ? '#ef5350' : '#26a69a', 
                                 borderSize: 0,
-                                padding: { left: 4, right: 4, top: 4, bottom: 4 },
-                                textSize: 11
+                                padding: { left: 0, right: 0, top: 4, bottom: 4 },
+                                textSize: 12,
+                                fontWeight: 'bold'
                             }
                         }
                     });
@@ -335,7 +342,6 @@
 
                 let tiempoVela = obtenerVelaExacta(tiempoOI_ms);
                 if (tiempoVela !== null) {
-                    // Buscamos el índice de esta vela en nuestra lista local para actualizarla
                     let index = tiemposVelasActivas.indexOf(tiempoVela);
                     if (index !== -1 && dataList[index]) {
                         dataList[index].oi = parseFloat(d.valor);
@@ -345,7 +351,7 @@
             });
 
             if (huboCambios) {
-                chart.applyNewData(dataList); // Recargamos el gráfico con los datos de OI insertados
+                chart.applyNewData(dataList); 
             }
         }
 
@@ -355,9 +361,7 @@
                 .then(datos => {
                     if (tiemposVelasActivas.length > 0) {
                         let contratosAbiertos = parseFloat(datos.openInterest);
-                        let ultimoTiempo = tiemposVelasActivas[tiemposVelasActivas.length - 1];
                         
-                        // Extraemos la vela actual, le sumamos el OI y actualizamos
                         let dataList = chart.getDataList();
                         let velaActual = dataList[dataList.length - 1];
                         if(velaActual) {
@@ -377,7 +381,7 @@
             }, 3000);
         }, 1000);
 
-        // --- MUROS Y CINTA (ORDERBOOK) NO SUFREN CAMBIOS, FUNCIONAN IGUAL ---
+        // --- MUROS Y CINTA (ORDERBOOK) ---
         let orderBookLocal = { asks: {}, bids: {} };
         const TAMAÑO_GRUPO = 50; 
 
