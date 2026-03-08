@@ -27,6 +27,7 @@
 
         #orderbook-container {
             width: 320px; min-width: 320px; flex-shrink: 0; background-color: #ffffff; border-left: 1px solid #d1d4dc; display: flex; flex-direction: column; font-size: 13px; overflow-y: auto;
+            transition: all 0.2s ease-in-out;
         }
         
         .ob-titulo { text-align: center; padding: 12px 10px 5px; font-weight: bold; font-size: 15px; background-color: #ffffff; color: #1e1e1e;}
@@ -66,6 +67,8 @@
         </div>
 
         <div class="botonera">
+            <button class="btn-tiempo" id="btn-panel" onclick="togglePanel()" style="margin-right: 15px; border-color: #64748b; color: #64748b;">Ocultar Panel</button>
+            
             <button class="btn-tiempo btn-activo" id="btn-1m" onclick="cambiarTemporalidad('1m')">1m</button>
             <button class="btn-tiempo" id="btn-5m" onclick="cambiarTemporalidad('5m')">5m</button>
             <button class="btn-tiempo" id="btn-15m" onclick="cambiarTemporalidad('15m')">15m</button>
@@ -118,6 +121,22 @@
         });
         inputFiltroCinta.addEventListener('change', function() { localStorage.setItem('memoriaCinta', this.value); });
 
+        // --- FUNCIÓN PARA OCULTAR/MOSTRAR PANEL ---
+        function togglePanel() {
+            const panel = document.getElementById('orderbook-container');
+            const boton = document.getElementById('btn-panel');
+            
+            if (panel.style.display === 'none') {
+                panel.style.display = 'flex';
+                boton.textContent = 'Ocultar Panel';
+            } else {
+                panel.style.display = 'none';
+                boton.textContent = 'Mostrar Panel';
+            }
+            // Importante: Le avisamos al gráfico que el espacio disponible cambió para que se adapte
+            chart.resize();
+        }
+
         // --- 1. REGISTRO DE INDICADORES PERSONALIZADOS ---
         klinecharts.registerIndicator({
             name: 'VOL_DELTA',
@@ -137,7 +156,6 @@
             name: 'OPEN_INTEREST',
             shortName: 'Open Interest',
             calc: (kLineDataList) => kLineDataList.map(k => ({ oi: k.oi || null })),
-            // ¡AQUÍ ESTÁ LA SOLUCIÓN! Transformamos el objeto en una función flecha
             figures: [{ key: 'oi', title: 'OI: ', type: 'line', styles: () => ({ color: '#FFD700' }) }]
         });
 
@@ -148,7 +166,8 @@
                 let es_venta = overlay.extendData.es_venta;
                 let texto = overlay.extendData.text;
                 
-                let color = es_venta ? '#ef5350' : '#26a69a';
+                // Forzamos el color negro para la fuente
+                let color = '#000000';
                 let yOffset = es_venta ? -15 : 15;
                 let alineacion = es_venta ? 'bottom' : 'top';
 
@@ -181,6 +200,11 @@
                     }
                 }
             }
+        });
+
+        // Aseguramos que el gráfico se adapte si cambias el tamaño de la ventana del navegador
+        window.addEventListener('resize', () => {
+            chart.resize();
         });
 
         chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 });
@@ -333,10 +357,11 @@
 
                 if (vela) {
                     if (datos.compras > 0) {
+                        // Math.round() redondea el número quitando decimales y dejamos solo el número
                         chart.createOverlay({
                             groupId: 'whales',
                             name: 'marcadorBallena', 
-                            extendData: { text: `▲ ${datos.compras.toFixed(1)} BTC`, es_venta: false },
+                            extendData: { text: `${Math.round(datos.compras)}`, es_venta: false },
                             points: [{ timestamp: tiempo, value: vela.low }]
                         });
                     }
@@ -344,7 +369,7 @@
                         chart.createOverlay({
                             groupId: 'whales',
                             name: 'marcadorBallena', 
-                            extendData: { text: `▼ ${datos.ventas.toFixed(1)} BTC`, es_venta: true },
+                            extendData: { text: `${Math.round(datos.ventas)}`, es_venta: true },
                             points: [{ timestamp: tiempo, value: vela.high }]
                         });
                     }
