@@ -118,7 +118,7 @@
         });
         inputFiltroCinta.addEventListener('change', function() { localStorage.setItem('memoriaCinta', this.value); });
 
-        // --- REGISTRO DE INDICADORES PERSONALIZADOS PARA KLINECHART ---
+        // --- 1. REGISTRO DE INDICADORES PERSONALIZADOS (ERROR SOLUCIONADO) ---
         klinecharts.registerIndicator({
             name: 'VOL_DELTA',
             shortName: 'Delta',
@@ -126,7 +126,10 @@
             figures: [
                 {
                     key: 'delta', title: 'Delta: ', type: 'bar', baseValue: 0,
-                    styles: ({ indicatorData }) => ({ color: indicatorData.delta >= 0 ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' })
+                    // Aquí agregamos el escudo protector: nos aseguramos de que "indicatorData" y su "delta" existan antes de leerlo
+                    styles: ({ indicatorData }) => ({ 
+                        color: (indicatorData && indicatorData.delta !== undefined && indicatorData.delta >= 0) ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' 
+                    })
                 }
             ]
         });
@@ -136,6 +139,38 @@
             shortName: 'Open Interest',
             calc: (kLineDataList) => kLineDataList.map(k => ({ oi: k.oi || null })),
             figures: [{ key: 'oi', title: 'OI: ', type: 'line', styles: { color: '#FFD700' } }]
+        });
+
+        // --- 2. NUEVO MARCADOR PERSONALIZADO PARA BALLENAS ---
+        // Al crear nuestro propio marcador, evitamos que KLineChart nos obligue a usar sus colores por defecto.
+        klinecharts.registerOverlay({
+            name: 'marcadorBallena',
+            createPointFigures: ({ overlay, coordinates }) => {
+                let es_venta = overlay.extendData.es_venta;
+                let texto = overlay.extendData.text;
+                
+                // Color absoluto
+                let color = es_venta ? '#ef5350' : '#26a69a';
+                
+                // Calculamos si dibujarlo un poco más arriba (-10) o un poco más abajo (+10) de la vela
+                let yOffset = es_venta ? -10 : 10;
+                let alineacion = es_venta ? 'bottom' : 'top';
+
+                return [
+                    {
+                        type: 'text',
+                        attrs: { 
+                            x: coordinates[0].x, 
+                            y: coordinates[0].y + yOffset, 
+                            text: texto, 
+                            align: 'center', 
+                            baseline: alineacion 
+                        },
+                        ignoreEvent: true, // Evita que el texto bloquee los clicks en el gráfico
+                        styles: { color: color, size: 12, weight: 'bold' }
+                    }
+                ];
+            }
         });
 
         // --- INICIALIZACIÓN DE KLINECHART ---
@@ -271,10 +306,9 @@
         function dibujarMarcadores() {
             const limiteBtc = parseFloat(inputFiltroGrafico.value) || 5;
             
-            // Limpiamos solo los marcadores de ballenas
+            // Limpiamos los marcadores de la pantalla
             chart.removeOverlay({ groupId: 'whales' });
 
-            // Extraemos las velas para saber sus altos y bajos
             const dataList = chart.getDataList();
 
             memoriaBallenasBD.forEach(trade => {
@@ -282,35 +316,19 @@
                 if (cantidadBtc >= limiteBtc) {
                     let timestamp = Math.floor(trade.tiempo_segundos * 1000); 
                     
-                    // Buscamos la vela en la que ocurrió el trade
                     let vela = dataList.find(v => v.timestamp === timestamp);
                     let precioAncla = parseFloat(trade.precio);
 
-                    // Si encontramos la vela, anclamos el marcador al máximo o mínimo
                     if (vela) {
                         precioAncla = trade.es_venta ? vela.high : vela.low;
                     }
 
+                    // Usamos el overlay NUEVO que creamos más arriba
                     chart.createOverlay({
                         groupId: 'whales',
-                        name: 'simpleAnnotation',
-                        extendData: `${cantidadBtc.toFixed(1)} BTC`,
-                        points: [{ timestamp: timestamp, value: precioAncla }],
-                        styles: {
-                            simpleAnnotation: {
-                                type: 'normal',
-                                // Las ventas van arriba ('top'), las compras van abajo ('bottom')
-                                position: trade.es_venta ? 'top' : 'bottom',
-                                // Fondo transparente para dar protagonismo al texto
-                                backgroundColor: 'transparent', 
-                                // Rojo para ventas, verde para compras
-                                color: trade.es_venta ? '#ef5350' : '#26a69a', 
-                                borderSize: 0,
-                                padding: { left: 0, right: 0, top: 4, bottom: 4 },
-                                textSize: 12,
-                                fontWeight: 'bold'
-                            }
-                        }
+                        name: 'marcadorBallena', 
+                        extendData: { text: `${cantidadBtc.toFixed(1)} BTC`, es_venta: trade.es_venta },
+                        points: [{ timestamp: timestamp, value: precioAncla }]
                     });
                 }
             });
