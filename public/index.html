@@ -137,7 +137,8 @@
             name: 'OPEN_INTEREST',
             shortName: 'Open Interest',
             calc: (kLineDataList) => kLineDataList.map(k => ({ oi: k.oi || null })),
-            figures: [{ key: 'oi', title: 'OI: ', type: 'line', styles: { color: '#FFD700' } }]
+            // ¡AQUÍ ESTÁ LA SOLUCIÓN! Transformamos el objeto en una función flecha
+            figures: [{ key: 'oi', title: 'OI: ', type: 'line', styles: () => ({ color: '#FFD700' }) }]
         });
 
         // --- 2. MARCADOR PERSONALIZADO PARA BALLENAS ---
@@ -301,13 +302,11 @@
         function dibujarMarcadores() {
             const limiteBtc = parseFloat(inputFiltroGrafico.value) || 5;
             
-            // 1. Limpiamos los marcadores de la pantalla
             chart.removeOverlay({ groupId: 'whales' });
 
             const dataList = chart.getDataList();
             let marcadoresAgrupados = {};
 
-            // 2. Agrupamos y sumamos las órdenes por cada vela
             memoriaBallenasBD.forEach(trade => {
                 const cantidadBtc = parseFloat(trade.cantidad);
                 if (cantidadBtc >= limiteBtc) {
@@ -327,7 +326,6 @@
                 }
             });
 
-            // 3. Dibujamos un único texto totalizador por vela
             Object.keys(marcadoresAgrupados).forEach(t => {
                 let tiempo = parseInt(t);
                 let datos = marcadoresAgrupados[tiempo];
