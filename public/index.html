@@ -72,6 +72,8 @@
                 <button class="btn-dibujo" onclick="activarDibujo('rayLine')" title="Rayo">Rayo</button>
                 <button class="btn-dibujo" onclick="activarDibujo('rect')" title="Rectángulo">Caja</button>
                 <button class="btn-dibujo" onclick="activarDibujo('fibonacciLine')" title="Retroceso Fibonacci">Fibo</button>
+                <button class="btn-dibujo" onclick="activarDibujo('rangoVolumen')" title="Calcular Compras y Ventas en un rango" style="color: #2962FF; border-color: #2962FF;">Vol. Rango</button>
+                
                 <button class="btn-dibujo" onclick="borrarDibujos()" style="color: #ef5350;" title="Eliminar todos los dibujos">Borrar</button>
             </div>
         </div>
@@ -168,12 +170,11 @@
             figures: [{ key: 'oi', title: 'OI: ', type: 'line', styles: () => ({ color: '#FFD700' }) }]
         });
 
-        // NUEVO: Indicador VWAP Anclado Personalizado
         klinecharts.registerIndicator({
             name: 'VWAP_CUSTOM',
             shortName: 'VWAP',
-            calcParams: [60], // Por defecto arranca en 60 minutos (1 Hora)
-            figures: [{ key: 'vwap', title: 'VWAP: ', type: 'line', styles: () => ({ color: '#ff9800' }) }], // Color Naranja institucional
+            calcParams: [60], 
+            figures: [{ key: 'vwap', title: 'VWAP: ', type: 'line', styles: () => ({ color: '#ff9800' }) }], 
             calc: (dataList, indicator) => {
                 const minutosReset = indicator.calcParams[0];
                 const resetIntervalMs = minutosReset * 60 * 1000;
@@ -182,15 +183,11 @@
                 let currentPeriod = -1;
 
                 return dataList.map(kline => {
-                    // El "Typical Price" o Precio Típico es el estándar que usan los traders para el VWAP
                     const typicalPrice = (kline.high + kline.low + kline.close) / 3;
                     const volume = kline.volume;
-
-                    // Averiguamos en qué bloque de tiempo estamos (ej: en qué hora exacta cayó esta vela)
                     const period = Math.floor(kline.timestamp / resetIntervalMs);
 
                     if (period !== currentPeriod) {
-                        // Si pasamos a un nuevo bloque de tiempo, la matemática vuelve a empezar desde cero
                         sumVol = 0;
                         sumPriceVol = 0;
                         currentPeriod = period;
@@ -199,7 +196,6 @@
                     sumVol += volume;
                     sumPriceVol += typicalPrice * volume;
 
-                    // Evitamos divisiones por cero en caso de que una vela no tenga volumen
                     const vwap = sumVol === 0 ? typicalPrice : sumPriceVol / sumVol;
 
                     return { vwap: vwap };
@@ -207,7 +203,9 @@
             }
         });
 
-        // --- 2. MARCADOR PERSONALIZADO PARA BALLENAS ---
+        // --- 2. MARCADORES Y HERRAMIENTAS DE DIBUJO PERSONALIZADAS ---
+
+        // Marcador para Ballenas
         klinecharts.registerOverlay({
             name: 'marcadorBallena',
             createPointFigures: ({ overlay, coordinates }) => {
@@ -249,6 +247,74 @@
             }
         });
 
+        // NUEVO: Herramienta de Línea que calcula Volumen y Delta entre dos puntos
+        klinecharts.registerOverlay({
+            name: 'rangoVolumen',
+            totalStep: 3, // Requiere 2 clics para trazar la línea
+            needDefaultPointFigure: true,
+            needDefaultXAxisFigure: true,
+            needDefaultYAxisFigure: true,
+            createPointFigures: ({ overlay, coordinates }) => {
+                // Primero, dibujamos la línea normal entre los dos puntos
+                let figures = [
+                    { type: 'line', attrs: { coordinates } }
+                ];
+                
+                // Si la línea ya tiene sus dos puntos fijados, procedemos a calcular
+                if (coordinates.length === 2 && overlay.points.length === 2) {
+                    // Extraemos los tiempos (timestamps) del inicio y fin de la línea
+                    let t1 = overlay.points[0].timestamp;
+                    let t2 = overlay.points[1].timestamp;
+                    
+                    // Nos aseguramos de saber cuál es el menor (inicio) y mayor (fin)
+                    let minT = Math.min(t1, t2);
+                    let maxT = Math.max(t1, t2);
+
+                    let dataList = chart.getDataList(); // Traemos todas las velas del gráfico
+                    let totalC = 0, totalV = 0;
+                    
+                    // Recorremos todas las velas para sumar si están dentro del rango de la línea
+                    for(let i = 0; i < dataList.length; i++) {
+                        let k = dataList[i];
+                        if (k.timestamp >= minT && k.timestamp <= maxT) {
+                            totalC += (k.compras || 0); // Usamos los datos guardados
+                            totalV += (k.ventas || 0);
+                        }
+                    }
+
+                    // Preparamos los textos y matemáticas
+                    let delta = totalC - totalV;
+                    let signo = delta > 0 ? '+' : '';
+                    let txt = `Vol: ${(totalC + totalV).toFixed(2)} BTC | C: ${totalC.toFixed(2)} | V: ${totalV.toFixed(2)} | Δ: ${signo}${delta.toFixed(2)}`;
+                    
+                    // Definimos el color según el Delta resultante
+                    let colorFondo = delta >= 0 ? '#26a69a' : '#ef5350';
+
+                    // Agregamos la etiqueta de texto en el medio de la línea
+                    figures.push({
+                        type: 'text',
+                        ignoreEvent: true,
+                        attrs: {
+                            x: (coordinates[0].x + coordinates[1].x) / 2,
+                            y: ((coordinates[0].y + coordinates[1].y) / 2) - 10, // Un poquito arriba de la línea
+                            text: txt,
+                            align: 'center',
+                            baseline: 'bottom'
+                        },
+                        styles: {
+                            color: '#ffffff',
+                            backgroundColor: colorFondo,
+                            borderRadius: 4,
+                            paddingLeft: 8, paddingRight: 8, paddingTop: 4, paddingBottom: 4,
+                            size: 12,
+                            weight: 'bold'
+                        }
+                    });
+                }
+                return figures;
+            }
+        });
+
         // --- INICIALIZACIÓN DE KLINECHART ---
         const chart = klinecharts.init('chart-container', {
             styles: {
@@ -267,8 +333,6 @@
 
         chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 });
         chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 });
-        
-        // NUEVO: Agregamos el VWAP al gráfico principal de las velas (por eso usamos 'true' y 'candle_pane')
         chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' });
 
         // --- FUNCIONES DE DIBUJO Y VWAP ---
@@ -277,14 +341,13 @@
         }
 
         function borrarDibujos() {
-            const tiposDibujo = ['segment', 'rayLine', 'fibonacciLine', 'rect'];
+            // NUEVO: Agregamos 'rangoVolumen' a la lista para que se borre también
+            const tiposDibujo = ['segment', 'rayLine', 'fibonacciLine', 'rect', 'rangoVolumen'];
             tiposDibujo.forEach(tipo => chart.removeOverlay({ name: tipo }));
         }
 
-        // NUEVO: Función para actualizar el VWAP cuando cambias la selección del menú
         function cambiarVwap() {
             const minutos = parseInt(document.getElementById('select-vwap').value);
-            // Actualizamos la configuración matemática del indicador en tiempo real
             chart.overrideIndicator({ name: 'VWAP_CUSTOM', calcParams: [minutos] }, 'candle_pane');
         }
 
@@ -321,6 +384,9 @@
                             close: parseFloat(v[4]),
                             volume: volume,
                             delta: comprasMercado - ventasMercado,
+                            // NUEVO: Guardamos el desglose exacto para el dibujo de Rango
+                            compras: comprasMercado, 
+                            ventas: ventasMercado,
                             oi: null 
                         };
                         
@@ -353,6 +419,9 @@
                             close: parseFloat(k.c),
                             volume: volume,
                             delta: comprasMercado - ventasMercado,
+                            // NUEVO: Guardamos el desglose exacto en vivo
+                            compras: comprasMercado,
+                            ventas: ventasMercado,
                             oi: oiExistente
                         };
                         
