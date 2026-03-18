@@ -124,9 +124,9 @@ iniciarRastreadorBallenas();
 app.get('/api/ballenas', async (req, res) => {
     try {
         const query = `
-            SELECT precio, cantidad, es_venta, EXTRACT(EPOCH FROM fecha) as tiempo_segundos 
-            FROM ballenas 
-            ORDER BY fecha ASC
+            SELECT precio, cantidad, es_venta, EXTRACT(EPOCH FROM fecha) as tiempo_segundos
+            FROM ballenas
+            ORDER BY fecha DESC
             LIMIT 2000
         `;
         const resultado = await pool.query(query);
@@ -141,10 +141,9 @@ app.get('/api/open-interest', async (req, res) => {
     try {
         // Pedimos los últimos 1440 minutos (equivalente a 24 horas)
         const query = `
-            SELECT tiempo, valor 
-            FROM open_interest 
-            ORDER BY tiempo ASC
-            LIMIT 1440
+            SELECT tiempo, valor FROM (
+                SELECT tiempo, valor FROM open_interest ORDER BY tiempo DESC LIMIT 1440
+            ) t ORDER BY tiempo ASC
         `;
         const resultado = await pool.query(query);
         res.json(resultado.rows); 
