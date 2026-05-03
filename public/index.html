@@ -16,7 +16,25 @@
         h2 { margin: 0; font-size: 1.2rem; }
         
         .botonera { display: flex; gap: 5px; align-items: center; }
-        .btn-tiempo, .btn-dibujo { background-color: #f0f2f5; color: #1e1e1e; border: 1px solid #d1d4dc; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+        .btn-tiempo, .btn-dibujo { 
+            background-color: #f0f2f5; 
+            color: #1e1e1e; 
+            border: 1px solid #d1d4dc; 
+            padding: 8px 12px; 
+            border-radius: 4px; 
+            cursor: pointer; 
+            font-weight: bold; 
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+        }
+        .btn-dibujo {
+            padding: 8px;
+            min-width: 38px;
+            height: 38px;
+        }
         .btn-tiempo:hover, .btn-dibujo:hover { background-color: #e2e8f0; }
         .btn-activo { background-color: #2962FF; color: white; border-color: #2962FF; }
 
@@ -49,6 +67,34 @@
 </head>
 <body>
 
+    <div id="ma-config-panel" style="display: none; position: absolute; top: 65px; left: 240px; background: white; border: 1px solid #d1d4dc; padding: 15px; border-radius: 8px; z-index: 2000; box-shadow: 0 4px 12px rgba(0,0,0,0.15); width: 200px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <h4 style="margin: 0; font-size: 14px;">Medias Móviles</h4>
+            <span onclick="toggleMAConfig()" style="cursor: pointer; color: #64748b; font-size: 18px; font-weight: bold;">&times;</span>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="ma1-enabled" checked style="cursor: pointer;">
+                <span style="font-size: 11px; width: 25px; color: #64748b;">MA 1</span>
+                <input type="number" id="ma1-period" class="input-rango" value="7" style="width: 50px;">
+                <input type="color" id="ma1-color" value="#2196f3" style="width: 28px; height: 24px; border: 1px solid #d1d4dc; padding: 0; cursor: pointer; border-radius: 3px;">
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="ma2-enabled" checked style="cursor: pointer;">
+                <span style="font-size: 11px; width: 25px; color: #64748b;">MA 2</span>
+                <input type="number" id="ma2-period" class="input-rango" value="25" style="width: 50px;">
+                <input type="color" id="ma2-color" value="#ffeb3b" style="width: 28px; height: 24px; border: 1px solid #d1d4dc; padding: 0; cursor: pointer; border-radius: 3px;">
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="ma3-enabled" checked style="cursor: pointer;">
+                <span style="font-size: 11px; width: 25px; color: #64748b;">MA 3</span>
+                <input type="number" id="ma3-period" class="input-rango" value="99" style="width: 50px;">
+                <input type="color" id="ma3-color" value="#e91e63" style="width: 28px; height: 24px; border: 1px solid #d1d4dc; padding: 0; cursor: pointer; border-radius: 3px;">
+            </div>
+            <button class="btn-tiempo" onclick="aplicarMA()" style="background: #2962FF; color: white; border: none; margin-top: 5px; width: 100%; height: 32px; font-size: 12px;">Guardar y Aplicar</button>
+        </div>
+    </div>
+
     <div id="header">
         <h2>Terminal Institucional</h2>
         <div id="whale-delta-display" style="font-size: 13px; color: #64748b; margin-left: 15px; white-space: nowrap;"></div>
@@ -65,19 +111,43 @@
                     <option value="240">4H</option>
                     <option value="1440">1D</option>
                 </select>
+
+                <span style="font-size: 12px; color: #64748b; margin-left: 10px;">MA:</span>
+                <div style="display: flex; gap: 2px;">
+                    <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 Medias Móviles" style="width: auto; padding: 0 8px; font-size: 11px;">3MA</button>
+                    <button class="btn-dibujo" onclick="toggleMAConfig()" title="Configurar Medias Móviles" style="min-width: 30px; padding: 0;">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                    </button>
+                </div>
             </div>
 
             <div class="herramientas-dibujo">
                 <span style="font-size: 12px; color: #64748b;">Dibujar:</span>
-                <button class="btn-dibujo" onclick="activarDibujo('segment')" title="Línea de Tendencia">Línea</button>
-                <button class="btn-dibujo" onclick="activarDibujo('rayLine')" title="Rayo">Rayo</button>
-                <button class="btn-dibujo" onclick="activarDibujo('cajaCustom')" title="Rectángulo">Caja</button>
-                <button class="btn-dibujo" onclick="activarDibujo('canalParalelo')" title="Canal Paralelo (3 clics)">Canal</button>
-                <button class="btn-dibujo" onclick="activarDibujo('fibonacciLine')" title="Retroceso Fibonacci">Fibo</button>
-                <button class="btn-dibujo" onclick="activarDibujo('rangoVolumen')" title="Calcular Compras y Ventas en un rango" style="color: #2962FF; border-color: #2962FF;">Vol. Rango</button>
-                <button class="btn-dibujo" id="btn-toggle-ballenas" onclick="toggleBallenas()" title="Mostrar/Ocultar marcadores de ballenas" style="color: #26a69a; border-color: #26a69a;">Ballenas</button>
+                <button class="btn-dibujo" onclick="activarDibujo('segment')" title="Línea de Tendencia">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="19" x2="19" y2="5"></line></svg>
+                </button>
+                <button class="btn-dibujo" onclick="activarDibujo('rayLine')" title="Rayo">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="19" x2="19" y2="5"></line><circle cx="5" cy="19" r="1.5" fill="currentColor"></circle><polyline points="15 5 19 5 19 9"></polyline></svg>
+                </button>
+                <button class="btn-dibujo" onclick="activarDibujo('cajaCustom')" title="Rectángulo">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect></svg>
+                </button>
+                <button class="btn-dibujo" onclick="activarDibujo('canalParalelo')" title="Canal Paralelo (3 clics)">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="13" x2="19" y2="5"></line><line x1="5" y1="19" x2="19" y2="11"></line></svg>
+                </button>
+                <button class="btn-dibujo" onclick="activarDibujo('fibonacciLine')" title="Retroceso Fibonacci">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"></line><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="14" x2="21" y2="14"></line><line x1="3" y1="19" x2="21" y2="19"></line></svg>
+                </button>
+                <button class="btn-dibujo" onclick="activarDibujo('rangoVolumen')" title="Calcular Compras y Ventas en un rango" style="color: #2962FF; border-color: #2962FF;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 20V10M12 20V4M18 20v-7"></path><path d="M3 20h18"></path></svg>
+                </button>
+                <button class="btn-dibujo" id="btn-toggle-ballenas" onclick="toggleBallenas()" title="Mostrar/Ocultar marcadores de ballenas" style="color: #26a69a; border-color: #26a69a;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16c0-2.2 1.8-4 4-4 1.4 0 2.6.7 3.4 1.8.8-1.1 2-1.8 3.4-1.8 1.4 0 2.6.7 3.4 1.8.8-1.1 2-1.8 3.4-1.8 2.2 0 4 1.8 4 4v2H2v-2z"></path></svg>
+                </button>
 
-                <button class="btn-dibujo" onclick="borrarDibujos()" style="color: #ef5350;" title="Eliminar todos los dibujos">Borrar</button>
+                <button class="btn-dibujo" onclick="borrarDibujos()" style="color: #ef5350;" title="Eliminar todos los dibujos">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                </button>
             </div>
         </div>
 
@@ -419,6 +489,87 @@
             const minutos = parseInt(document.getElementById('select-vwap').value);
             chart.overrideIndicator({ name: 'VWAP_CUSTOM', calcParams: [minutos] }, 'candle_pane');
         }
+
+        // --- 3MA CONFIG ---
+        let maVisible = false;
+        const configMA = JSON.parse(localStorage.getItem('configMA')) || {
+            p1: 7, c1: '#2196f3', e1: true,
+            p2: 25, c2: '#ffeb3b', e2: true,
+            p3: 99, c3: '#e91e63', e3: true
+        };
+
+        function initMAUI() {
+            document.getElementById('ma1-period').value = configMA.p1;
+            document.getElementById('ma1-color').value = configMA.c1;
+            document.getElementById('ma1-enabled').checked = configMA.e1 !== false;
+            
+            document.getElementById('ma2-period').value = configMA.p2;
+            document.getElementById('ma2-color').value = configMA.c2;
+            document.getElementById('ma2-enabled').checked = configMA.e2 !== false;
+
+            document.getElementById('ma3-period').value = configMA.p3;
+            document.getElementById('ma3-color').value = configMA.c3;
+            document.getElementById('ma3-enabled').checked = configMA.e3 !== false;
+        }
+
+        function toggle3MA() {
+            maVisible = !maVisible;
+            const btn = document.getElementById('btn-ma');
+            if (maVisible) {
+                btn.classList.add('btn-activo');
+                chart.createIndicator('MA', true, { id: 'candle_pane' });
+                aplicarMA();
+            } else {
+                btn.classList.remove('btn-activo');
+                chart.removeIndicator('candle_pane', 'MA');
+            }
+        }
+
+        function toggleMAConfig() {
+            const panel = document.getElementById('ma-config-panel');
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function aplicarMA() {
+            configMA.p1 = parseInt(document.getElementById('ma1-period').value);
+            configMA.c1 = document.getElementById('ma1-color').value;
+            configMA.e1 = document.getElementById('ma1-enabled').checked;
+
+            configMA.p2 = parseInt(document.getElementById('ma2-period').value);
+            configMA.c2 = document.getElementById('ma2-color').value;
+            configMA.e2 = document.getElementById('ma2-enabled').checked;
+
+            configMA.p3 = parseInt(document.getElementById('ma3-period').value);
+            configMA.c3 = document.getElementById('ma3-color').value;
+            configMA.e3 = document.getElementById('ma3-enabled').checked;
+            
+            localStorage.setItem('configMA', JSON.stringify(configMA));
+
+            if (maVisible) {
+                const params = [];
+                const linesStyles = [];
+                
+                if (configMA.e1) { params.push(configMA.p1); linesStyles.push({ color: configMA.c1 }); }
+                if (configMA.e2) { params.push(configMA.p2); linesStyles.push({ color: configMA.c2 }); }
+                if (configMA.e3) { params.push(configMA.p3); linesStyles.push({ color: configMA.c3 }); }
+
+                if (params.length === 0) {
+                    chart.removeIndicator('candle_pane', 'MA');
+                    maVisible = false;
+                    document.getElementById('btn-ma').classList.remove('btn-activo');
+                } else {
+                    chart.overrideIndicator({
+                        name: 'MA',
+                        calcParams: params,
+                        styles: { lines: linesStyles }
+                    }, 'candle_pane');
+                }
+            }
+            
+            document.getElementById('ma-config-panel').style.display = 'none';
+        }
+        
+        initMAUI();
 
         // --- TOGGLE BALLENAS ---
         let ballenasVisibles = true;
