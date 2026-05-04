@@ -102,23 +102,25 @@
         <div class="botonera" style="margin-right: auto; margin-left: 20px;">
             <span style="font-size: 12px; color: #64748b; margin-right: 5px;">Filtrar Gráfico (BTC): ></span>
             <input type="number" id="filtro-grafico" class="input-rango" value="5" min="1" step="1">
-            
-            <div class="herramientas-dibujo" style="border-left: none; padding-left: 0; margin-left: 5px;">
-                <span style="font-size: 12px; color: #64748b; margin-left: 10px;">VWAP:</span>
+                        <div class="herramientas-dibujo" style="border-left: none; padding-left: 0; margin-left: 5px;">
+                <span style="font-size: 12px; color: #64748b; margin-left: 10px;">Indicadores:</span>
+                <div style="gap: 2px; display: flex;">
+                    <button id="btn-vwap" class="btn-dibujo btn-activo" onclick="toggleIndicator('VWAP')" title="Mostrar/Ocultar VWAP" style="width: auto; padding: 0 8px; font-size: 11px;">VWAP</button>
+                    <button id="btn-delta" class="btn-dibujo btn-activo" onclick="toggleIndicator('DELTA')" title="Mostrar/Ocultar Delta" style="width: auto; padding: 0 8px; font-size: 11px;">DELTA</button>
+                    <button id="btn-oi" class="btn-dibujo btn-activo" onclick="toggleIndicator('OI')" title="Mostrar/Ocultar Open Interest" style="width: auto; padding: 0 8px; font-size: 11px;">OI</button>
+                    <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 Medias Móviles Exponenciales" style="width: auto; padding: 0 8px; font-size: 11px;">3EMA</button>
+                    <button class="btn-dibujo" onclick="toggleMAConfig()" title="Configurar Medias Móviles Exponenciales" style="min-width: 30px; padding: 0;">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                    </button>
+                </div>
+
+                <span style="font-size: 12px; color: #64748b; margin-left: 10px;">Reset VWAP:</span>
                 <select id="select-vwap" onchange="cambiarVwap()" class="input-rango" style="width: 55px; cursor: pointer;">
                     <option value="15">15m</option>
                     <option value="60" selected>1H</option>
                     <option value="240">4H</option>
                     <option value="1440">1D</option>
                 </select>
-
-                <span style="font-size: 12px; color: #64748b; margin-left: 10px;">EMA:</span>
-                <div style="display: flex; gap: 2px;">
-                    <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 Medias Móviles Exponenciales" style="width: auto; padding: 0 8px; font-size: 11px;">3EMA</button>
-                    <button class="btn-dibujo" onclick="toggleMAConfig()" title="Configurar Medias Móviles Exponenciales" style="min-width: 30px; padding: 0;">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-                    </button>
-                </div>
             </div>
 
             <div class="herramientas-dibujo">
@@ -486,8 +488,49 @@
         }
 
         function cambiarVwap() {
+            if (!vwapVisible) return;
             const minutos = parseInt(document.getElementById('select-vwap').value);
             chart.overrideIndicator({ name: 'VWAP_CUSTOM', calcParams: [minutos] }, 'candle_pane');
+        }
+
+        // --- TOGGLE INDICADORES (VWAP, DELTA, OI) ---
+        let vwapVisible = true;
+        let deltaVisible = true;
+        let oiVisible = true;
+
+        function toggleIndicator(tipo) {
+            if (tipo === 'VWAP') {
+                vwapVisible = !vwapVisible;
+                const btn = document.getElementById('btn-vwap');
+                if (vwapVisible) {
+                    btn.classList.add('btn-activo');
+                    chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' });
+                    cambiarVwap();
+                } else {
+                    btn.classList.remove('btn-activo');
+                    chart.removeIndicator('candle_pane', 'VWAP_CUSTOM');
+                }
+            } else if (tipo === 'DELTA') {
+                deltaVisible = !deltaVisible;
+                const btn = document.getElementById('btn-delta');
+                if (deltaVisible) {
+                    btn.classList.add('btn-activo');
+                    chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 });
+                } else {
+                    btn.classList.remove('btn-activo');
+                    chart.removeIndicator('pane_delta', 'VOL_DELTA');
+                }
+            } else if (tipo === 'OI') {
+                oiVisible = !oiVisible;
+                const btn = document.getElementById('btn-oi');
+                if (oiVisible) {
+                    btn.classList.add('btn-activo');
+                    chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 });
+                } else {
+                    btn.classList.remove('btn-activo');
+                    chart.removeIndicator('pane_oi', 'OPEN_INTEREST');
+                }
+            }
         }
 
         // --- 3MA CONFIG ---
