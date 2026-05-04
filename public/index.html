@@ -75,19 +75,19 @@
         <div style="display: flex; flex-direction: column; gap: 10px;">
             <div style="display: flex; align-items: center; gap: 8px;">
                 <input type="checkbox" id="ma1-enabled" checked style="cursor: pointer;">
-                <span style="font-size: 11px; width: 25px; color: #64748b;">MA 1</span>
+                <span style="font-size: 11px; width: 25px; color: #64748b;">EMA 1</span>
                 <input type="number" id="ma1-period" class="input-rango" value="7" style="width: 50px;">
                 <input type="color" id="ma1-color" value="#2196f3" style="width: 28px; height: 24px; border: 1px solid #d1d4dc; padding: 0; cursor: pointer; border-radius: 3px;">
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
                 <input type="checkbox" id="ma2-enabled" checked style="cursor: pointer;">
-                <span style="font-size: 11px; width: 25px; color: #64748b;">MA 2</span>
+                <span style="font-size: 11px; width: 25px; color: #64748b;">EMA 2</span>
                 <input type="number" id="ma2-period" class="input-rango" value="25" style="width: 50px;">
                 <input type="color" id="ma2-color" value="#ffeb3b" style="width: 28px; height: 24px; border: 1px solid #d1d4dc; padding: 0; cursor: pointer; border-radius: 3px;">
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
                 <input type="checkbox" id="ma3-enabled" checked style="cursor: pointer;">
-                <span style="font-size: 11px; width: 25px; color: #64748b;">MA 3</span>
+                <span style="font-size: 11px; width: 25px; color: #64748b;">EMA 3</span>
                 <input type="number" id="ma3-period" class="input-rango" value="99" style="width: 50px;">
                 <input type="color" id="ma3-color" value="#e91e63" style="width: 28px; height: 24px; border: 1px solid #d1d4dc; padding: 0; cursor: pointer; border-radius: 3px;">
             </div>
@@ -112,10 +112,10 @@
                     <option value="1440">1D</option>
                 </select>
 
-                <span style="font-size: 12px; color: #64748b; margin-left: 10px;">MA:</span>
+                <span style="font-size: 12px; color: #64748b; margin-left: 10px;">EMA:</span>
                 <div style="display: flex; gap: 2px;">
-                    <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 Medias Móviles" style="width: auto; padding: 0 8px; font-size: 11px;">3MA</button>
-                    <button class="btn-dibujo" onclick="toggleMAConfig()" title="Configurar Medias Móviles" style="min-width: 30px; padding: 0;">
+                    <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 Medias Móviles Exponenciales" style="width: auto; padding: 0 8px; font-size: 11px;">3EMA</button>
+                    <button class="btn-dibujo" onclick="toggleMAConfig()" title="Configurar Medias Móviles Exponenciales" style="min-width: 30px; padding: 0;">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
                     </button>
                 </div>
@@ -517,11 +517,11 @@
             const btn = document.getElementById('btn-ma');
             if (maVisible) {
                 btn.classList.add('btn-activo');
-                chart.createIndicator('MA', true, { id: 'candle_pane' });
+                chart.createIndicator('EMA', true, { id: 'candle_pane' });
                 aplicarMA();
             } else {
                 btn.classList.remove('btn-activo');
-                chart.removeIndicator('candle_pane', 'MA');
+                chart.removeIndicator('candle_pane', 'EMA');
             }
         }
 
@@ -554,12 +554,12 @@
                 if (configMA.e3) { params.push(configMA.p3); linesStyles.push({ color: configMA.c3 }); }
 
                 if (params.length === 0) {
-                    chart.removeIndicator('candle_pane', 'MA');
+                    chart.removeIndicator('candle_pane', 'EMA');
                     maVisible = false;
                     document.getElementById('btn-ma').classList.remove('btn-activo');
                 } else {
                     chart.overrideIndicator({
-                        name: 'MA',
+                        name: 'EMA',
                         calcParams: params,
                         styles: { lines: linesStyles }
                     }, 'candle_pane');
