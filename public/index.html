@@ -638,80 +638,105 @@
         let memoriaOIBD = []; 
 
         // --- CARGA DE VELAS ---
-        function cargarDatos(temporalidad) {
+        async function cargarDatos(temporalidad) {
             if (binanceSocket !== null) {
                 if (binanceSocket.readyState === 0) binanceSocket.onopen = function() { binanceSocket.close(); };
                 else binanceSocket.close();
             }
 
-            fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=1000`)
-                .then(r => r.json())
-                .then(datos => {
-                    let velas = [];
-                    tiemposVelasActivas = []; 
+            try {
+                let allVelas = [];
+                let ultimoTimestamp = null;
+                const limitePorPedido = 1000;
+                const totalPedidos = 10; // 10 * 1000 = 10,000 velas
 
-                    datos.forEach(v => {
-                        let timestamp = v[0]; 
-                        let volume = parseFloat(v[5]);
-                        let comprasMercado = parseFloat(v[9]); 
-                        let ventasMercado = volume - comprasMercado; 
-                        
-                        let kline = {
-                            timestamp: timestamp,
-                            open: parseFloat(v[1]),
-                            high: parseFloat(v[2]),
-                            low: parseFloat(v[3]),
-                            close: parseFloat(v[4]),
-                            volume: volume,
-                            delta: comprasMercado - ventasMercado,
-                            // NUEVO: Guardamos el desglose exacto para el dibujo de Rango
-                            compras: comprasMercado, 
-                            ventas: ventasMercado,
-                            oi: null 
-                        };
-                        
-                        velas.push(kline);
-                        tiemposVelasActivas.push(timestamp);
-                    });
+                console.log(`🚀 Iniciando carga de ${totalPedidos * limitePorPedido} velas para ${temporalidad}...`);
+
+                for (let i = 0; i < totalPedidos; i++) {
+                    let url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=${limitePorPedido}`;
+                    if (ultimoTimestamp) {
+                        url += `&endTime=${ultimoTimestamp - 1}`;
+                    }
+
+                    const respuesta = await fetch(url);
+                    const nuevosDatos = await respuesta.json();
+
+                    if (!nuevosDatos || nuevosDatos.length === 0) break;
+
+                    // Los datos de Binance vienen de más antiguo a más nuevo.
+                    // Al pedir con endTime, recibimos el bloque anterior al tiempo indicado.
+                    allVelas = [...nuevosDatos, ...allVelas];
+                    ultimoTimestamp = nuevosDatos[0][0]; // El primer elemento es el más antiguo del bloque actual
+
+                    // Si Binance devolvió menos de lo pedido, es que no hay más historial
+                    if (nuevosDatos.length < limitePorPedido) break;
+                }
+
+                let velas = [];
+                tiemposVelasActivas = []; 
+
+                allVelas.forEach(v => {
+                    let timestamp = v[0]; 
+                    let volume = parseFloat(v[5]);
+                    let comprasMercado = parseFloat(v[9]); 
+                    let ventasMercado = volume - comprasMercado; 
                     
-                    chart.applyNewData(velas); 
-                    
-                    dibujarMarcadores(); 
-                    dibujarOI(); 
-
-                    binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
-                    binanceSocket.onmessage = function (e) {
-                        const k = JSON.parse(e.data).k; 
-                        let timestamp = k.t; 
-                        let volume = parseFloat(k.v);
-                        let comprasMercado = parseFloat(k.V); 
-                        let ventasMercado = volume - comprasMercado; 
-
-                        let dataList = chart.getDataList();
-                        let ultimaVela = dataList.length > 0 ? dataList[dataList.length - 1] : null;
-                        let oiExistente = (ultimaVela && ultimaVela.timestamp === timestamp) ? ultimaVela.oi : null;
-                        
-                        let klineActualizada = {
-                            timestamp: timestamp,
-                            open: parseFloat(k.o),
-                            high: parseFloat(k.h),
-                            low: parseFloat(k.l),
-                            close: parseFloat(k.c),
-                            volume: volume,
-                            delta: comprasMercado - ventasMercado,
-                            // NUEVO: Guardamos el desglose exacto en vivo
-                            compras: comprasMercado,
-                            ventas: ventasMercado,
-                            oi: oiExistente
-                        };
-                        
-                        chart.updateData(klineActualizada);
-                        
-                        if (tiemposVelasActivas.length === 0 || tiemposVelasActivas[tiemposVelasActivas.length - 1] !== timestamp) {
-                            tiemposVelasActivas.push(timestamp);
-                        }
+                    let kline = {
+                        timestamp: timestamp,
+                        open: parseFloat(v[1]),
+                        high: parseFloat(v[2]),
+                        low: parseFloat(v[3]),
+                        close: parseFloat(v[4]),
+                        volume: volume,
+                        delta: comprasMercado - ventasMercado,
+                        compras: comprasMercado, 
+                        ventas: ventasMercado,
+                        oi: null 
                     };
+                    
+                    velas.push(kline);
+                    tiemposVelasActivas.push(timestamp);
                 });
+                
+                chart.applyNewData(velas); 
+                
+                dibujarMarcadores(); 
+                dibujarOI(); 
+
+                binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
+                binanceSocket.onmessage = function (e) {
+                    const k = JSON.parse(e.data).k; 
+                    let timestamp = k.t; 
+                    let volume = parseFloat(k.v);
+                    let comprasMercado = parseFloat(k.V); 
+                    let ventasMercado = volume - comprasMercado; 
+
+                    let dataList = chart.getDataList();
+                    let ultimaVela = dataList.length > 0 ? dataList[dataList.length - 1] : null;
+                    let oiExistente = (ultimaVela && ultimaVela.timestamp === timestamp) ? ultimaVela.oi : null;
+                    
+                    let klineActualizada = {
+                        timestamp: timestamp,
+                        open: parseFloat(k.o),
+                        high: parseFloat(k.h),
+                        low: parseFloat(k.l),
+                        close: parseFloat(k.c),
+                        volume: volume,
+                        delta: comprasMercado - ventasMercado,
+                        compras: comprasMercado,
+                        ventas: ventasMercado,
+                        oi: oiExistente
+                    };
+                    
+                    chart.updateData(klineActualizada);
+                    
+                    if (tiemposVelasActivas.length === 0 || tiemposVelasActivas[tiemposVelasActivas.length - 1] !== timestamp) {
+                        tiemposVelasActivas.push(timestamp);
+                    }
+                };
+            } catch (error) {
+                console.error("Error cargando datos de velas:", error);
+            }
         }
 
         function cambiarTemporalidad(t) {
