@@ -118,7 +118,7 @@
                 </div>
 
                 <span style="font-size: 12px; color: #64748b; margin-left: 10px;">Reset VWAP:</span>
-                <select id="select-vwap" onchange="cambiarVwap()" class="input-rango" style="width: 55px; cursor: pointer;">
+                <select id="select-vwap" class="input-rango" style="width: 55px; cursor: pointer;">
                     <option value="15">15m</option>
                     <option value="60" selected>1H</option>
                     <option value="240">4H</option>
@@ -158,13 +158,28 @@
 
         <div class="botonera">
             <button class="btn-tiempo" id="btn-panel" onclick="togglePanel()" style="margin-right: 15px; border-color: #64748b; color: #64748b;">Ocultar Panel</button>
-            
+
             <button class="btn-tiempo btn-activo" id="btn-1m" onclick="cambiarTemporalidad('1m')">1m</button>
             <button class="btn-tiempo" id="btn-5m" onclick="cambiarTemporalidad('5m')">5m</button>
             <button class="btn-tiempo" id="btn-15m" onclick="cambiarTemporalidad('15m')">15m</button>
             <button class="btn-tiempo" id="btn-1h" onclick="cambiarTemporalidad('1h')">1H</button>
             <button class="btn-tiempo" id="btn-4h" onclick="cambiarTemporalidad('4h')">4H</button>
             <button class="btn-tiempo" id="btn-1d" onclick="cambiarTemporalidad('1d')">1D</button>
+
+            <div style="border-left: 2px solid #d1d4dc; margin-left: 8px; padding-left: 10px; display: flex; gap: 6px; align-items: center;">
+                <a id="btn-admin-link" href="/admin" class="btn-tiempo" style="display:none; font-size:12px; text-decoration:none; padding: 6px 10px;">Admin</a>
+                <div style="position:relative;">
+                    <button class="btn-tiempo" id="btn-user-menu" onclick="toggleUserMenu()" style="font-size:12px; padding: 6px 10px; display:flex; align-items:center; gap:5px;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+                        <span id="user-info-name">—</span>
+                    </button>
+                    <div id="user-menu-dropdown" style="display:none; position:absolute; right:0; top:42px; background:#fff; border:1px solid #d1d4dc; border-radius:6px; box-shadow:0 4px 16px rgba(0,0,0,0.12); z-index:3000; min-width:160px; overflow:hidden;">
+                        <div style="padding:8px 14px; font-size:11px; color:#64748b; border-bottom:1px solid #f0f2f5;">Sesión activa</div>
+                        <button onclick="abrirCambiarPassword()" style="display:block; width:100%; text-align:left; padding:10px 14px; font-size:13px; border:none; background:none; cursor:pointer; color:#1e1e1e;">Cambiar contraseña</button>
+                        <button onclick="logout()" style="display:block; width:100%; text-align:left; padding:10px 14px; font-size:13px; border:none; background:none; cursor:pointer; color:#ef5350; border-top:1px solid #f0f2f5;">Cerrar sesión</button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     
@@ -198,7 +213,56 @@
     </div>
 
     <script>
-        // --- HELPERS ---
+        // ============================================================
+        // AUTENTICACIÓN Y CONFIGURACIÓN DE USUARIO
+        // ============================================================
+        let usuarioActual = null;
+        let configGuardadaServidor = {};
+
+        async function verificarSesion() {
+            const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
+            if (!res.ok) { window.location.replace('/'); throw new Error('No autenticado'); }
+            const data = await res.json();
+            usuarioActual = data.usuario;
+
+            // Mostrar nombre de usuario en header
+            document.getElementById('user-info-name').textContent = usuarioActual.username;
+            if (usuarioActual.rol === 'admin') {
+                document.getElementById('btn-admin-link').style.display = 'inline-flex';
+            }
+        }
+
+        async function cargarConfigServidor() {
+            try {
+                const res = await fetch('/api/config', { credentials: 'same-origin' });
+                if (!res.ok) return;
+                configGuardadaServidor = await res.json();
+            } catch { }
+        }
+
+        async function guardarConfigServidor(clave, valor) {
+            try {
+                await fetch('/api/config', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ clave, valor })
+                });
+            } catch { }
+        }
+
+        function cfgGet(clave, defecto) {
+            if (configGuardadaServidor[clave] !== undefined) return configGuardadaServidor[clave];
+            return defecto;
+        }
+
+        async function logout() {
+            await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+            window.location.replace('/');
+        }
+
+        // ============================================================
+        // HELPERS ---
         function formatUSD(usd) {
             if (usd >= 1_000_000) return `$${(usd / 1_000_000).toFixed(1)}M`;
             if (usd >= 1_000) return `$${(usd / 1_000).toFixed(0)}K`;
@@ -209,18 +273,24 @@
             return Math.max(0.3, Math.min(1.0, btc / (filtro * 10)));
         }
 
-        // --- MEMORIA LOCAL ---
+        // --- MEMORIA (servidor por usuario) ---
         const inputFiltroGrafico = document.getElementById('filtro-grafico');
         const inputFiltroCinta = document.getElementById('filtro-cinta');
 
-        if (localStorage.getItem('memoriaGrafico')) inputFiltroGrafico.value = localStorage.getItem('memoriaGrafico');
-        if (localStorage.getItem('memoriaCinta')) inputFiltroCinta.value = localStorage.getItem('memoriaCinta');
+        function aplicarConfigInicial() {
+            const fg = cfgGet('filtroGrafico', null);
+            const fc = cfgGet('filtroCinta', null);
+            if (fg !== null) inputFiltroGrafico.value = fg;
+            if (fc !== null) inputFiltroCinta.value = fc;
+        }
 
         inputFiltroGrafico.addEventListener('change', function() {
-            localStorage.setItem('memoriaGrafico', this.value);
+            guardarConfigServidor('filtroGrafico', parseFloat(this.value));
             dibujarMarcadores();
         });
-        inputFiltroCinta.addEventListener('change', function() { localStorage.setItem('memoriaCinta', this.value); });
+        inputFiltroCinta.addEventListener('change', function() {
+            guardarConfigServidor('filtroCinta', parseFloat(this.value));
+        });
 
         // --- PANEL ---
         function togglePanel() {
@@ -364,10 +434,31 @@
         chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' });
 
         // --- DIBUJO Y VWAP ---
-        function activarDibujo(tipoOverlay) { chart.createOverlay({ name: tipoOverlay, id: `dibujo_${Date.now()}` }); }
+        let overlaySeleccionado = null;
+
+        function activarDibujo(tipoOverlay) {
+            chart.createOverlay({
+                name: tipoOverlay,
+                id: `dibujo_${Date.now()}`,
+                onSelected: ({ overlay }) => { overlaySeleccionado = overlay.id; },
+                onDeselected: ({ overlay }) => { if (overlaySeleccionado === overlay.id) overlaySeleccionado = null; }
+            });
+        }
+
         function borrarDibujos() {
             ['segment','rayLine','fibonacciLine','cajaCustom','canalParalelo','rangoVolumen'].forEach(t => chart.removeOverlay({ name: t }));
+            overlaySeleccionado = null;
         }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key !== 'Delete') return;
+            const tag = document.activeElement.tagName;
+            if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+            if (overlaySeleccionado && overlaySeleccionado.startsWith('dibujo_')) {
+                chart.removeOverlay({ id: overlaySeleccionado });
+                overlaySeleccionado = null;
+            }
+        });
         function cambiarVwap() {
             if (!vwapVisible) return;
             chart.overrideIndicator({ name: 'VWAP_CUSTOM', calcParams: [parseInt(document.getElementById('select-vwap').value)] }, 'candle_pane');
@@ -397,7 +488,7 @@
 
         // --- 3MA CONFIG ---
         let maVisible = false;
-        const configMA = JSON.parse(localStorage.getItem('configMA')) || { p1:7,c1:'#2196f3',e1:true, p2:25,c2:'#ffeb3b',e2:true, p3:99,c3:'#e91e63',e3:true };
+        const configMA = { p1:7,c1:'#2196f3',e1:true, p2:25,c2:'#ffeb3b',e2:true, p3:99,c3:'#e91e63',e3:true };
 
         function initMAUI() {
             document.getElementById('ma1-period').value = configMA.p1; document.getElementById('ma1-color').value = configMA.c1; document.getElementById('ma1-enabled').checked = configMA.e1 !== false;
@@ -421,7 +512,7 @@
             configMA.p1 = parseInt(document.getElementById('ma1-period').value); configMA.c1 = document.getElementById('ma1-color').value; configMA.e1 = document.getElementById('ma1-enabled').checked;
             configMA.p2 = parseInt(document.getElementById('ma2-period').value); configMA.c2 = document.getElementById('ma2-color').value; configMA.e2 = document.getElementById('ma2-enabled').checked;
             configMA.p3 = parseInt(document.getElementById('ma3-period').value); configMA.c3 = document.getElementById('ma3-color').value; configMA.e3 = document.getElementById('ma3-enabled').checked;
-            localStorage.setItem('configMA', JSON.stringify(configMA));
+            guardarConfigServidor('configMA', configMA);
             if (maVisible) {
                 const params = [], linesStyles = [];
                 if (configMA.e1) { params.push(configMA.p1); linesStyles.push({ color: configMA.c1 }); }
@@ -558,7 +649,6 @@
             document.getElementById(`btn-${t}`).classList.add('btn-activo');
             cargarDatos(t);
         }
-        cambiarTemporalidad('1m');
 
         // --- BALLENAS (OVERLAYS AGRUPADOS) ---
         function pedirHistorialBallenas() {
@@ -737,6 +827,96 @@
 
         iniciarTapeSocket();
 
+        // ============================================================
+        // USER MENU & CAMBIAR PASSWORD
+        // ============================================================
+        function toggleUserMenu() {
+            const menu = document.getElementById('user-menu-dropdown');
+            menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        }
+        document.addEventListener('click', function(e) {
+            const btn = document.getElementById('btn-user-menu');
+            const menu = document.getElementById('user-menu-dropdown');
+            if (menu && !btn.contains(e.target) && !menu.contains(e.target)) {
+                menu.style.display = 'none';
+            }
+        });
+
+        function abrirCambiarPassword() {
+            document.getElementById('user-menu-dropdown').style.display = 'none';
+            const mpOverlay = document.getElementById('modal-password-overlay');
+            mpOverlay.style.display = 'flex';
+            document.getElementById('pwd-actual').value = '';
+            document.getElementById('pwd-nueva').value = '';
+            document.getElementById('pwd-error').style.display = 'none';
+        }
+
+        async function guardarNuevaPassword() {
+            const actual = document.getElementById('pwd-actual').value;
+            const nueva  = document.getElementById('pwd-nueva').value;
+            const errEl  = document.getElementById('pwd-error');
+            errEl.style.display = 'none';
+
+            if (nueva.length < 6) { errEl.textContent = 'La nueva contraseña debe tener al menos 6 caracteres'; errEl.style.display = 'block'; return; }
+
+            const res = await fetch('/api/auth/cambiar-password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ passwordActual: actual, passwordNueva: nueva })
+            });
+            const data = await res.json();
+            if (!res.ok) { errEl.textContent = data.error || 'Error al cambiar contraseña'; errEl.style.display = 'block'; return; }
+            document.getElementById('modal-password-overlay').style.display = 'none';
+        }
+
+        // ============================================================
+        // ARRANQUE: verificar sesión → cargar config → iniciar terminal
+        // ============================================================
+        (async function arrancar() {
+            await verificarSesion();
+            await cargarConfigServidor();
+            aplicarConfigInicial();
+
+            // Aplicar configMA desde servidor si existe
+            const cfgMA = cfgGet('configMA', null);
+            if (cfgMA) {
+                Object.assign(configMA, cfgMA);
+                initMAUI();
+            }
+
+            // Aplicar VWAP reset desde servidor
+            const vwapReset = cfgGet('vwapReset', null);
+            if (vwapReset) {
+                const sel = document.getElementById('select-vwap');
+                if (sel) sel.value = String(vwapReset);
+            }
+
+            // Persistir VWAP al cambiar
+            document.getElementById('select-vwap').addEventListener('change', function() {
+                guardarConfigServidor('vwapReset', parseInt(this.value));
+                cambiarVwap();
+            });
+
+            cambiarTemporalidad('1m');
+        })();
+
     </script>
+
+    <!-- Modal cambiar contraseña -->
+    <div id="modal-password-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:4000; align-items:center; justify-content:center;">
+        <div style="background:#fff; border-radius:10px; padding:28px; width:340px; box-shadow:0 10px 40px rgba(0,0,0,0.2);" onclick="event.stopPropagation()">
+            <h3 style="margin-bottom:18px; font-size:15px;">Cambiar contraseña</h3>
+            <div id="pwd-error" style="display:none; background:#fef2f2; border:1px solid #fca5a5; color:#dc2626; border-radius:5px; padding:8px 12px; font-size:12px; margin-bottom:12px;"></div>
+            <label style="display:block; font-size:12px; font-weight:bold; color:#374151; margin-bottom:5px;">Contraseña actual</label>
+            <input type="password" id="pwd-actual" style="width:100%; padding:9px 11px; border:1px solid #d1d4dc; border-radius:5px; font-size:13px; margin-bottom:12px; outline:none;">
+            <label style="display:block; font-size:12px; font-weight:bold; color:#374151; margin-bottom:5px;">Nueva contraseña</label>
+            <input type="password" id="pwd-nueva" style="width:100%; padding:9px 11px; border:1px solid #d1d4dc; border-radius:5px; font-size:13px; margin-bottom:20px; outline:none;">
+            <div style="display:flex; justify-content:flex-end; gap:10px;">
+                <button onclick="document.getElementById('modal-password-overlay').style.display='none'" style="padding:8px 14px; border:1px solid #d1d4dc; background:#f0f2f5; border-radius:5px; cursor:pointer; font-size:13px;">Cancelar</button>
+                <button onclick="guardarNuevaPassword()" style="padding:8px 14px; background:#2962FF; color:#fff; border:none; border-radius:5px; cursor:pointer; font-size:13px; font-weight:bold;">Guardar</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

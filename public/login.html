@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terminal Institucional — Login</title>
+    <link rel="icon" href="data:,">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: #0a0e1a;
+            color: #e2e8f0;
+            font-family: Arial, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-card {
+            background: #ffffff;
+            color: #1e1e1e;
+            border-radius: 12px;
+            padding: 40px;
+            width: 360px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+        .login-logo {
+            text-align: center;
+            margin-bottom: 28px;
+        }
+        .login-logo h1 {
+            font-size: 1.3rem;
+            color: #1e1e1e;
+            margin-bottom: 4px;
+        }
+        .login-logo p {
+            font-size: 12px;
+            color: #64748b;
+        }
+        .login-logo .dot {
+            display: inline-block;
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: #26a69a;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+        label {
+            display: block;
+            font-size: 13px;
+            font-weight: bold;
+            color: #374151;
+            margin-bottom: 6px;
+        }
+        input[type="text"], input[type="password"] {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #d1d4dc;
+            border-radius: 6px;
+            font-size: 14px;
+            color: #1e1e1e;
+            background: #f8fafc;
+            outline: none;
+            transition: border-color 0.2s;
+            margin-bottom: 16px;
+        }
+        input[type="text"]:focus, input[type="password"]:focus {
+            border-color: #2962FF;
+            background: #fff;
+        }
+        .checkbox-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 20px;
+            font-size: 13px;
+            color: #374151;
+            cursor: pointer;
+        }
+        .checkbox-row input { cursor: pointer; }
+        .btn-login {
+            width: 100%;
+            padding: 11px;
+            background: #2962FF;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn-login:hover { background: #1a4fcc; }
+        .btn-login:disabled { background: #94a3b8; cursor: not-allowed; }
+        .error-msg {
+            background: #fef2f2;
+            border: 1px solid #fca5a5;
+            color: #dc2626;
+            border-radius: 6px;
+            padding: 10px 12px;
+            font-size: 13px;
+            margin-bottom: 16px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="login-logo">
+            <h1><span class="dot"></span>Terminal Institucional</h1>
+            <p>BTC/USDT — Acceso profesional</p>
+        </div>
+
+        <div id="error-msg" class="error-msg"></div>
+
+        <form id="login-form">
+            <label for="username">Usuario</label>
+            <input type="text" id="username" name="username" placeholder="nombre de usuario" autocomplete="username" required>
+
+            <label for="password">Contraseña</label>
+            <input type="password" id="password" name="password" placeholder="••••••••" autocomplete="current-password" required>
+
+            <label class="checkbox-row">
+                <input type="checkbox" id="recordar" name="recordar">
+                Recordar sesión (30 días)
+            </label>
+
+            <button type="submit" class="btn-login" id="btn-submit">Ingresar</button>
+        </form>
+    </div>
+
+    <script>
+        // Si ya tiene sesión válida, redirigir directo
+        fetch('/api/auth/me', { credentials: 'same-origin' })
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data && data.usuario) window.location.replace('/terminal'); })
+            .catch(() => {});
+
+        document.getElementById('login-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const btn = document.getElementById('btn-submit');
+            const errEl = document.getElementById('error-msg');
+            errEl.style.display = 'none';
+            btn.disabled = true;
+            btn.textContent = 'Ingresando...';
+
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            const recordar = document.getElementById('recordar').checked;
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ username, password, recordar })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    window.location.replace('/terminal');
+                } else {
+                    errEl.textContent = data.error || 'Error al iniciar sesión';
+                    errEl.style.display = 'block';
+                }
+            } catch {
+                errEl.textContent = 'Error de red. Intentá de nuevo.';
+                errEl.style.display = 'block';
+            }
+
+            btn.disabled = false;
+            btn.textContent = 'Ingresar';
+        });
+    </script>
+</body>
+</html>
