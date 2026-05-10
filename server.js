@@ -1,17 +1,18 @@
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
-const { Pool } = require('pg'); 
-const WebSocket = require('ws'); 
+const { Pool } = require('pg');
+const WebSocket = require('ws');
 
 const app = express();
-app.use(express.json()); 
+app.use(express.json());
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
 });
 
-let limiteGuardadoBD = 1.0; 
+let limiteGuardadoBD = 1.0;
 
 async function inicializarBaseDeDatos() {
     const queryTablaBallenas = `
@@ -23,19 +24,16 @@ async function inicializarBaseDeDatos() {
             es_venta BOOLEAN NOT NULL
         );
     `;
-    
     const queryTablaConfig = `
         CREATE TABLE IF NOT EXISTS configuracion (
             clave VARCHAR(50) PRIMARY KEY,
             valor NUMERIC NOT NULL
         );
     `;
-
-    // NUEVO: Tabla para guardar el Interés Abierto. 
-    // Usamos el "tiempo" como llave primaria para asegurar que haya exactamente 1 solo registro por minuto.
+    // BIGINT para evitar overflow en ~2038
     const queryTablaOI = `
         CREATE TABLE IF NOT EXISTS open_interest (
-            tiempo INTEGER PRIMARY KEY,
+            tiempo BIGINT PRIMARY KEY,
             valor NUMERIC NOT NULL
         );
     `;
@@ -44,75 +42,99 @@ async function inicializarBaseDeDatos() {
         await pool.query(queryTablaBallenas);
         await pool.query(queryTablaConfig);
         await pool.query(queryTablaOI);
-        
+
+        // Migrar INTEGER → BIGINT si la tabla ya existía con el tipo viejo
+        await pool.query(`
+            DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'open_interest'
+                      AND column_name = 'tiempo'
+                      AND data_type = 'integer'
+                ) THEN
+                    ALTER TABLE open_interest ALTER COLUMN tiempo TYPE BIGINT;
+                END IF;
+            END $$;
+        `);
+
+        // Índice para acelerar queries por fecha
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_ballenas_fecha ON ballenas(fecha DESC)`);
+
         await pool.query(`INSERT INTO configuracion (clave, valor) VALUES ('limite_bd', 1.0) ON CONFLICT (clave) DO NOTHING`);
-        
+
         const configRes = await pool.query(`SELECT valor FROM configuracion WHERE clave = 'limite_bd'`);
         if (configRes.rows.length > 0) {
             limiteGuardadoBD = parseFloat(configRes.rows[0].valor);
-            console.log(`🔧 Memoria del servidor cargada. Límite de guardado: > ${limiteGuardadoBD} BTC`);
+            console.log(`🔧 Límite de guardado cargado: > ${limiteGuardadoBD} BTC`);
         }
 
         console.log('✅ Base de datos lista y conectada.');
     } catch (error) {
-        console.error('❌ Error al crear las tablas:', error);
+        console.error('❌ Error al inicializar la BD:', error);
     }
 }
 inicializarBaseDeDatos();
 
-// --- NUEVO: RECOLECTOR DE OPEN INTEREST ---
+// --- RECOLECTOR DE OPEN INTEREST ---
 async function guardarOpenInterest() {
     try {
-        // Node.js v18+ tiene fetch incorporado, igual que el navegador
         const respuesta = await fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT');
         const datos = await respuesta.json();
-        
         if (datos && datos.openInterest) {
             const valor = parseFloat(datos.openInterest);
-            // Calculamos el inicio del minuto actual (ej: 14:05:00) en formato Epoch (segundos)
-            const tiempoVelaActual = Math.floor(Date.now() / 60000) * 60; 
-            
-            // Lo guardamos o lo actualizamos si ya existe ese minuto
-            const query = `
-                INSERT INTO open_interest (tiempo, valor) 
-                VALUES ($1, $2)
-                ON CONFLICT (tiempo) DO UPDATE SET valor = EXCLUDED.valor
-            `;
-            await pool.query(query, [tiempoVelaActual, valor]);
+            const tiempoVelaActual = Math.floor(Date.now() / 60000) * 60;
+            await pool.query(
+                `INSERT INTO open_interest (tiempo, valor) VALUES ($1, $2)
+                 ON CONFLICT (tiempo) DO UPDATE SET valor = EXCLUDED.valor`,
+                [tiempoVelaActual, valor]
+            );
         }
     } catch (error) {
-        console.error('Error al guardar Open Interest en BD:', error);
+        console.error('Error al guardar Open Interest:', error);
     }
 }
-
-// Lo ejecutamos cada 1 minuto (60000 milisegundos) exacto
 setInterval(guardarOpenInterest, 60000);
-guardarOpenInterest(); // Y lo ejecutamos 1 vez apenas arranca el servidor
+guardarOpenInterest();
 
 
 // --- CAZADOR DE BALLENAS ---
+let wsConectando = false;
+
 function iniciarRastreadorBallenas() {
+    if (wsConectando) return;
+    wsConectando = true;
+
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
 
-    ws.on('open', () => console.log('✅ Conectado a la Cinta de Binance.'));
+    ws.on('open', () => {
+        wsConectando = false;
+        console.log('✅ Conectado a la Cinta de Binance.');
+    });
 
     ws.on('message', async (data) => {
         try {
             const evento = JSON.parse(data);
             const cantidad = parseFloat(evento.q);
             const precio = parseFloat(evento.p);
-            const es_venta = evento.m; 
-
+            const es_venta = evento.m;
             if (cantidad >= limiteGuardadoBD) {
-                const queryInsertar = `INSERT INTO ballenas (precio, cantidad, es_venta) VALUES ($1, $2, $3)`;
-                await pool.query(queryInsertar, [precio, cantidad, es_venta]);
+                await pool.query(
+                    `INSERT INTO ballenas (precio, cantidad, es_venta) VALUES ($1, $2, $3)`,
+                    [precio, cantidad, es_venta]
+                );
             }
         } catch (error) {
             console.error('Error al guardar trade:', error);
         }
     });
 
+    ws.on('error', (err) => {
+        console.error('Error en WebSocket ballenas:', err.message);
+        ws.terminate();
+    });
+
     ws.on('close', () => {
+        wsConectando = false;
         console.log('⚠️ Reconectando en 5 segundos...');
         setTimeout(iniciarRastreadorBallenas, 5000);
     });
@@ -123,32 +145,43 @@ iniciarRastreadorBallenas();
 // --- RUTAS DE LA API ---
 app.get('/api/ballenas', async (req, res) => {
     try {
+        // Últimos 7 días, máximo 5000 registros para no saturar la red
         const query = `
             SELECT precio, cantidad, es_venta, EXTRACT(EPOCH FROM fecha) as tiempo_segundos
             FROM ballenas
+            WHERE fecha >= NOW() - INTERVAL '7 days'
             ORDER BY fecha DESC
-            LIMIT 50000
+            LIMIT 5000
         `;
         const resultado = await pool.query(query);
-        res.json(resultado.rows); 
+        res.json(resultado.rows);
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
-// NUEVA RUTA: Entregar el historial de Open Interest
 app.get('/api/open-interest', async (req, res) => {
     try {
-        // Pedimos los últimos 10000 minutos
         const query = `
             SELECT tiempo, valor FROM (
                 SELECT tiempo, valor FROM open_interest ORDER BY tiempo DESC LIMIT 10000
             ) t ORDER BY tiempo ASC
         `;
         const resultado = await pool.query(query);
-        res.json(resultado.rows); 
+        res.json(resultado.rows);
     } catch (error) {
         res.status(500).json({ error: 'Error interno obteniendo OI' });
+    }
+});
+
+// Proxy para OI en vivo — evita problemas de CORS y bloqueos regionales en el frontend
+app.get('/api/oi-live', async (req, res) => {
+    try {
+        const respuesta = await fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT');
+        const datos = await respuesta.json();
+        res.json(datos);
+    } catch (error) {
+        res.status(500).json({ error: 'Error obteniendo OI en vivo' });
     }
 });
 
@@ -162,7 +195,7 @@ app.post('/api/filtro-bd', async (req, res) => {
         limiteGuardadoBD = nuevoUmbral;
         try {
             await pool.query(`UPDATE configuracion SET valor = $1 WHERE clave = 'limite_bd'`, [limiteGuardadoBD]);
-            console.log(`🔧 Filtro de BD actualizado y guardado. Ahora solo guardamos > ${limiteGuardadoBD} BTC`);
+            console.log(`🔧 Filtro BD actualizado: > ${limiteGuardadoBD} BTC`);
             res.json({ status: 'ok', umbral: limiteGuardadoBD });
         } catch (error) {
             console.error('Error guardando configuración:', error);

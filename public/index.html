@@ -96,7 +96,10 @@
     </div>
 
     <div id="header">
-        <h2>Terminal Institucional</h2>
+        <div style="display:flex; align-items:center; gap:8px;">
+            <h2>Terminal Institucional</h2>
+            <div id="status-dot" style="width:10px;height:10px;border-radius:50%;background-color:#ff9800;flex-shrink:0;" title="Estado de conexiones: esperando..."></div>
+        </div>
         <div id="whale-delta-display" style="font-size: 13px; color: #64748b; margin-left: 15px; white-space: nowrap;"></div>
         
         <div class="botonera" style="margin-right: auto; margin-left: 20px;">
@@ -203,7 +206,6 @@
         }
 
         function calcularIntensidad(btc, filtro) {
-            // Escala: al filtro le damos 0.3, a 10x el filtro le damos 1.0
             return Math.max(0.3, Math.min(1.0, btc / (filtro * 10)));
         }
 
@@ -215,16 +217,15 @@
         if (localStorage.getItem('memoriaCinta')) inputFiltroCinta.value = localStorage.getItem('memoriaCinta');
 
         inputFiltroGrafico.addEventListener('change', function() {
-            localStorage.setItem('memoriaGrafico', this.value); 
-            dibujarMarcadores(); 
+            localStorage.setItem('memoriaGrafico', this.value);
+            dibujarMarcadores();
         });
         inputFiltroCinta.addEventListener('change', function() { localStorage.setItem('memoriaCinta', this.value); });
 
-        // --- FUNCIÓN PARA OCULTAR/MOSTRAR PANEL ---
+        // --- PANEL ---
         function togglePanel() {
             const panel = document.getElementById('orderbook-container');
             const boton = document.getElementById('btn-panel');
-            
             if (panel.style.display === 'none') {
                 panel.style.display = 'flex';
                 boton.textContent = 'Ocultar Panel';
@@ -240,14 +241,13 @@
             name: 'VOL_DELTA',
             shortName: 'Delta',
             calc: (kLineDataList) => kLineDataList.map(k => ({ delta: k.delta || 0 })),
-            figures: [
-                {
-                    key: 'delta', title: 'Delta: ', type: 'bar', baseValue: 0,
-                    styles: ({ indicatorData }) => ({ 
-                        color: (indicatorData && indicatorData.delta !== undefined && indicatorData.delta >= 0) ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)' 
-                    })
-                }
-            ]
+            figures: [{
+                key: 'delta', title: 'Delta: ', type: 'bar', baseValue: 0,
+                styles: ({ indicatorData }) => ({
+                    color: (indicatorData && indicatorData.delta !== undefined && indicatorData.delta >= 0)
+                        ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)'
+                })
+            }]
         });
 
         klinecharts.registerIndicator({
@@ -260,200 +260,92 @@
         klinecharts.registerIndicator({
             name: 'VWAP_CUSTOM',
             shortName: 'VWAP',
-            calcParams: [60], 
-            figures: [{ key: 'vwap', title: 'VWAP: ', type: 'line', styles: () => ({ color: '#ff9800' }) }], 
+            calcParams: [60],
+            figures: [{ key: 'vwap', title: 'VWAP: ', type: 'line', styles: () => ({ color: '#ff9800' }) }],
             calc: (dataList, indicator) => {
                 const minutosReset = indicator.calcParams[0];
                 const resetIntervalMs = minutosReset * 60 * 1000;
-                let sumVol = 0;
-                let sumPriceVol = 0;
-                let currentPeriod = -1;
-
+                let sumVol = 0, sumPriceVol = 0, currentPeriod = -1;
                 return dataList.map(kline => {
                     const typicalPrice = (kline.high + kline.low + kline.close) / 3;
-                    const volume = kline.volume;
                     const period = Math.floor(kline.timestamp / resetIntervalMs);
-
-                    if (period !== currentPeriod) {
-                        sumVol = 0;
-                        sumPriceVol = 0;
-                        currentPeriod = period;
-                    }
-
-                    sumVol += volume;
-                    sumPriceVol += typicalPrice * volume;
-
-                    const vwap = sumVol === 0 ? typicalPrice : sumPriceVol / sumVol;
-
-                    return { vwap: vwap };
+                    if (period !== currentPeriod) { sumVol = 0; sumPriceVol = 0; currentPeriod = period; }
+                    sumVol += kline.volume;
+                    sumPriceVol += typicalPrice * kline.volume;
+                    return { vwap: sumVol === 0 ? typicalPrice : sumPriceVol / sumVol };
                 });
             }
         });
 
-        // --- 2. MARCADORES Y HERRAMIENTAS DE DIBUJO PERSONALIZADAS ---
-
-        // Marcador para Ballenas
+        // --- 2. OVERLAYS PERSONALIZADOS ---
         klinecharts.registerOverlay({
             name: 'marcadorBallena',
             createPointFigures: ({ overlay, coordinates }) => {
-                let es_venta = overlay.extendData.es_venta;
-                let texto = overlay.extendData.text;
-                let alpha = overlay.extendData.intensidad || 0.7;
-
-                let x = coordinates[0].x;
-                let y = coordinates[0].y;
-
-                let colorFondo = es_venta
-                    ? `rgba(239, 83, 80, ${alpha})`
-                    : `rgba(38, 166, 154, ${alpha})`;
+                let { es_venta, text: texto, intensidad } = overlay.extendData;
+                let alpha = intensidad || 0.7;
+                let x = coordinates[0].x, y = coordinates[0].y;
+                let colorFondo = es_venta ? `rgba(239, 83, 80, ${alpha})` : `rgba(38, 166, 154, ${alpha})`;
                 let colorTexto = alpha >= 0.7 ? '#ffffff' : '#000000';
-                
                 let figures = [];
-
                 if (es_venta) {
-                    figures.push({
-                        type: 'polygon',
-                        attrs: { coordinates: [{ x: x - 5, y: y - 8 }, { x: x + 5, y: y - 8 }, { x: x, y: y - 2 }] },
-                        ignoreEvent: true, styles: { style: 'fill', color: colorFondo }
-                    });
-                    figures.push({
-                        type: 'text',
-                        attrs: { x: x, y: y - 8, text: texto, align: 'center', baseline: 'bottom' },
-                        ignoreEvent: true, styles: { color: colorTexto, size: 12, weight: 'bold', backgroundColor: colorFondo, borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 }
-                    });
+                    figures.push({ type: 'polygon', attrs: { coordinates: [{ x: x-5, y: y-8 }, { x: x+5, y: y-8 }, { x, y: y-2 }] }, ignoreEvent: true, styles: { style: 'fill', color: colorFondo } });
+                    figures.push({ type: 'text', attrs: { x, y: y-8, text: texto, align: 'center', baseline: 'bottom' }, ignoreEvent: true, styles: { color: colorTexto, size: 12, weight: 'bold', backgroundColor: colorFondo, borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 } });
                 } else {
-                    figures.push({
-                        type: 'polygon',
-                        attrs: { coordinates: [{ x: x - 5, y: y + 8 }, { x: x + 5, y: y + 8 }, { x: x, y: y + 2 }] },
-                        ignoreEvent: true, styles: { style: 'fill', color: colorFondo }
-                    });
-                    figures.push({
-                        type: 'text',
-                        attrs: { x: x, y: y + 8, text: texto, align: 'center', baseline: 'top' },
-                        ignoreEvent: true, styles: { color: colorTexto, size: 12, weight: 'bold', backgroundColor: colorFondo, borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 }
-                    });
+                    figures.push({ type: 'polygon', attrs: { coordinates: [{ x: x-5, y: y+8 }, { x: x+5, y: y+8 }, { x, y: y+2 }] }, ignoreEvent: true, styles: { style: 'fill', color: colorFondo } });
+                    figures.push({ type: 'text', attrs: { x, y: y+8, text: texto, align: 'center', baseline: 'top' }, ignoreEvent: true, styles: { color: colorTexto, size: 12, weight: 'bold', backgroundColor: colorFondo, borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 } });
                 }
                 return figures;
             }
         });
 
-        // NUEVO: Herramienta de Línea que calcula Volumen y Delta entre dos puntos
         klinecharts.registerOverlay({
             name: 'rangoVolumen',
-            totalStep: 3, // Requiere 2 clics para trazar la línea
-            needDefaultPointFigure: true,
-            needDefaultXAxisFigure: true,
-            needDefaultYAxisFigure: true,
+            totalStep: 3,
+            needDefaultPointFigure: true, needDefaultXAxisFigure: true, needDefaultYAxisFigure: true,
             createPointFigures: ({ overlay, coordinates }) => {
-                // Primero, dibujamos la línea normal entre los dos puntos
-                let figures = [
-                    { type: 'line', attrs: { coordinates } }
-                ];
-                
-                // Si la línea ya tiene sus dos puntos fijados, procedemos a calcular
+                let figures = [{ type: 'line', attrs: { coordinates } }];
                 if (coordinates.length === 2 && overlay.points.length === 2) {
-                    // Extraemos los tiempos (timestamps) del inicio y fin de la línea
-                    let t1 = overlay.points[0].timestamp;
-                    let t2 = overlay.points[1].timestamp;
-                    
-                    // Nos aseguramos de saber cuál es el menor (inicio) y mayor (fin)
-                    let minT = Math.min(t1, t2);
-                    let maxT = Math.max(t1, t2);
-
-                    let dataList = chart.getDataList(); // Traemos todas las velas del gráfico
+                    let minT = Math.min(overlay.points[0].timestamp, overlay.points[1].timestamp);
+                    let maxT = Math.max(overlay.points[0].timestamp, overlay.points[1].timestamp);
                     let totalC = 0, totalV = 0;
-                    
-                    // Recorremos todas las velas para sumar si están dentro del rango de la línea
-                    for(let i = 0; i < dataList.length; i++) {
-                        let k = dataList[i];
-                        if (k.timestamp >= minT && k.timestamp <= maxT) {
-                            totalC += (k.compras || 0); // Usamos los datos guardados
-                            totalV += (k.ventas || 0);
-                        }
-                    }
-
-                    // Preparamos los textos y matemáticas
-                    let delta = totalC - totalV;
-                    let signo = delta > 0 ? '+' : '';
-                    let txt = `Vol: ${(totalC + totalV).toFixed(2)} BTC | C: ${totalC.toFixed(2)} | V: ${totalV.toFixed(2)} | Δ: ${signo}${delta.toFixed(2)}`;
-                    
-                    // Definimos el color según el Delta resultante
-                    let colorFondo = delta >= 0 ? '#26a69a' : '#ef5350';
-
-                    // Agregamos la etiqueta de texto en el medio de la línea
-                    figures.push({
-                        type: 'text',
-                        ignoreEvent: true,
-                        attrs: {
-                            x: (coordinates[0].x + coordinates[1].x) / 2,
-                            y: ((coordinates[0].y + coordinates[1].y) / 2) - 10, // Un poquito arriba de la línea
-                            text: txt,
-                            align: 'center',
-                            baseline: 'bottom'
-                        },
-                        styles: {
-                            color: '#ffffff',
-                            backgroundColor: colorFondo,
-                            borderRadius: 4,
-                            paddingLeft: 8, paddingRight: 8, paddingTop: 4, paddingBottom: 4,
-                            size: 12,
-                            weight: 'bold'
-                        }
+                    chart.getDataList().forEach(k => {
+                        if (k.timestamp >= minT && k.timestamp <= maxT) { totalC += (k.compras || 0); totalV += (k.ventas || 0); }
                     });
+                    let delta = totalC - totalV;
+                    let txt = `Vol: ${(totalC+totalV).toFixed(2)} BTC | C: ${totalC.toFixed(2)} | V: ${totalV.toFixed(2)} | Δ: ${delta>0?'+':''}${delta.toFixed(2)}`;
+                    figures.push({ type: 'text', ignoreEvent: true, attrs: { x: (coordinates[0].x+coordinates[1].x)/2, y: ((coordinates[0].y+coordinates[1].y)/2)-10, text: txt, align: 'center', baseline: 'bottom' }, styles: { color: '#ffffff', backgroundColor: delta>=0?'#26a69a':'#ef5350', borderRadius: 4, paddingLeft: 8, paddingRight: 8, paddingTop: 4, paddingBottom: 4, size: 12, weight: 'bold' } });
                 }
                 return figures;
             }
         });
 
-        // --- OVERLAY PERSONALIZADO: CAJA (RECTÁNGULO) ---
         klinecharts.registerOverlay({
             name: 'cajaCustom',
             totalStep: 3,
-            needDefaultPointFigure: true,
-            needDefaultXAxisFigure: true,
-            needDefaultYAxisFigure: true,
+            needDefaultPointFigure: true, needDefaultXAxisFigure: true, needDefaultYAxisFigure: true,
             createPointFigures: ({ overlay, coordinates }) => {
                 if (coordinates.length === 2) {
-                    const x1 = coordinates[0].x, y1 = coordinates[0].y;
-                    const x2 = coordinates[1].x, y2 = coordinates[1].y;
-                    return [{
-                        type: 'polygon',
-                        attrs: {
-                            coordinates: [
-                                { x: x1, y: y1 }, { x: x2, y: y1 },
-                                { x: x2, y: y2 }, { x: x1, y: y2 }
-                            ]
-                        },
-                        styles: { style: 'stroke_fill', color: 'rgba(41, 98, 255, 0.07)', borderColor: '#2962FF', borderSize: 1 }
-                    }];
+                    const { x: x1, y: y1 } = coordinates[0], { x: x2, y: y2 } = coordinates[1];
+                    return [{ type: 'polygon', attrs: { coordinates: [{ x: x1, y: y1 }, { x: x2, y: y1 }, { x: x2, y: y2 }, { x: x1, y: y2 }] }, styles: { style: 'stroke_fill', color: 'rgba(41,98,255,0.07)', borderColor: '#2962FF', borderSize: 1 } }];
                 }
                 return [];
             }
         });
 
-        // --- OVERLAY PERSONALIZADO: CANAL PARALELO ---
         klinecharts.registerOverlay({
             name: 'canalParalelo',
             totalStep: 4,
-            needDefaultPointFigure: true,
-            needDefaultXAxisFigure: true,
-            needDefaultYAxisFigure: true,
+            needDefaultPointFigure: true, needDefaultXAxisFigure: true, needDefaultYAxisFigure: true,
             createPointFigures: ({ overlay, coordinates }) => {
                 if (coordinates.length < 2) return [];
-                const figures = [];
                 if (coordinates.length === 2) {
-                    figures.push({ type: 'line', attrs: { coordinates: [coordinates[0], coordinates[1]] }, styles: { color: '#2962FF', size: 1 } });
-                } else if (coordinates.length === 3) {
-                    const dx = coordinates[1].x - coordinates[0].x;
-                    const dy = coordinates[1].y - coordinates[0].y;
-                    const p4 = { x: coordinates[2].x + dx, y: coordinates[2].y + dy };
-                    figures.push({
-                        type: 'polygon',
-                        attrs: { coordinates: [coordinates[0], coordinates[1], p4, coordinates[2]] },
-                        styles: { style: 'stroke_fill', color: 'rgba(41, 98, 255, 0.07)', borderColor: '#2962FF', borderSize: 1 }
-                    });
+                    return [{ type: 'line', attrs: { coordinates: [coordinates[0], coordinates[1]] }, styles: { color: '#2962FF', size: 1 } }];
                 }
-                return figures;
+                // coordinates.length >= 3: canal completo
+                const dx = coordinates[1].x - coordinates[0].x;
+                const dy = coordinates[1].y - coordinates[0].y;
+                const p4 = { x: coordinates[2].x + dx, y: coordinates[2].y + dy };
+                return [{ type: 'polygon', attrs: { coordinates: [coordinates[0], coordinates[1], p4, coordinates[2]] }, styles: { style: 'stroke_fill', color: 'rgba(41,98,255,0.07)', borderColor: '#2962FF', borderSize: 1 } }];
             }
         });
 
@@ -461,13 +353,7 @@
         const chart = klinecharts.init('chart-container', {
             styles: {
                 grid: { horizontal: { display: false }, vertical: { display: false } },
-                candle: {
-                    bar: {
-                        upColor: '#26a69a', downColor: '#ef5350',
-                        upBorderColor: '#000000', downBorderColor: '#000000',
-                        upWickColor: '#000000', downWickColor: '#000000'
-                    }
-                }
+                candle: { bar: { upColor: '#26a69a', downColor: '#ef5350', upBorderColor: '#000000', downBorderColor: '#000000', upWickColor: '#000000', downWickColor: '#000000' } }
             }
         });
 
@@ -477,141 +363,76 @@
         chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 });
         chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' });
 
-        // --- FUNCIONES DE DIBUJO Y VWAP ---
-        function activarDibujo(tipoOverlay) {
-            chart.createOverlay({ name: tipoOverlay, id: `dibujo_${Date.now()}` });
-        }
-
+        // --- DIBUJO Y VWAP ---
+        function activarDibujo(tipoOverlay) { chart.createOverlay({ name: tipoOverlay, id: `dibujo_${Date.now()}` }); }
         function borrarDibujos() {
-            const tiposDibujo = ['segment', 'rayLine', 'fibonacciLine', 'cajaCustom', 'canalParalelo', 'rangoVolumen'];
-            tiposDibujo.forEach(tipo => chart.removeOverlay({ name: tipo }));
+            ['segment','rayLine','fibonacciLine','cajaCustom','canalParalelo','rangoVolumen'].forEach(t => chart.removeOverlay({ name: t }));
         }
-
         function cambiarVwap() {
             if (!vwapVisible) return;
-            const minutos = parseInt(document.getElementById('select-vwap').value);
-            chart.overrideIndicator({ name: 'VWAP_CUSTOM', calcParams: [minutos] }, 'candle_pane');
+            chart.overrideIndicator({ name: 'VWAP_CUSTOM', calcParams: [parseInt(document.getElementById('select-vwap').value)] }, 'candle_pane');
         }
 
-        // --- TOGGLE INDICADORES (VWAP, DELTA, OI) ---
-        let vwapVisible = true;
-        let deltaVisible = true;
-        let oiVisible = true;
+        // --- TOGGLE INDICADORES ---
+        let vwapVisible = true, deltaVisible = true, oiVisible = true;
 
         function toggleIndicator(tipo) {
             if (tipo === 'VWAP') {
                 vwapVisible = !vwapVisible;
                 const btn = document.getElementById('btn-vwap');
-                if (vwapVisible) {
-                    btn.classList.add('btn-activo');
-                    chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' });
-                    cambiarVwap();
-                } else {
-                    btn.classList.remove('btn-activo');
-                    chart.removeIndicator('candle_pane', 'VWAP_CUSTOM');
-                }
+                if (vwapVisible) { btn.classList.add('btn-activo'); chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' }); cambiarVwap(); }
+                else { btn.classList.remove('btn-activo'); chart.removeIndicator('candle_pane', 'VWAP_CUSTOM'); }
             } else if (tipo === 'DELTA') {
                 deltaVisible = !deltaVisible;
                 const btn = document.getElementById('btn-delta');
-                if (deltaVisible) {
-                    btn.classList.add('btn-activo');
-                    chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 });
-                } else {
-                    btn.classList.remove('btn-activo');
-                    chart.removeIndicator('pane_delta', 'VOL_DELTA');
-                }
+                if (deltaVisible) { btn.classList.add('btn-activo'); chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 }); }
+                else { btn.classList.remove('btn-activo'); chart.removeIndicator('pane_delta', 'VOL_DELTA'); }
             } else if (tipo === 'OI') {
                 oiVisible = !oiVisible;
                 const btn = document.getElementById('btn-oi');
-                if (oiVisible) {
-                    btn.classList.add('btn-activo');
-                    chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 });
-                } else {
-                    btn.classList.remove('btn-activo');
-                    chart.removeIndicator('pane_oi', 'OPEN_INTEREST');
-                }
+                if (oiVisible) { btn.classList.add('btn-activo'); chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 }); }
+                else { btn.classList.remove('btn-activo'); chart.removeIndicator('pane_oi', 'OPEN_INTEREST'); }
             }
         }
 
         // --- 3MA CONFIG ---
         let maVisible = false;
-        const configMA = JSON.parse(localStorage.getItem('configMA')) || {
-            p1: 7, c1: '#2196f3', e1: true,
-            p2: 25, c2: '#ffeb3b', e2: true,
-            p3: 99, c3: '#e91e63', e3: true
-        };
+        const configMA = JSON.parse(localStorage.getItem('configMA')) || { p1:7,c1:'#2196f3',e1:true, p2:25,c2:'#ffeb3b',e2:true, p3:99,c3:'#e91e63',e3:true };
 
         function initMAUI() {
-            document.getElementById('ma1-period').value = configMA.p1;
-            document.getElementById('ma1-color').value = configMA.c1;
-            document.getElementById('ma1-enabled').checked = configMA.e1 !== false;
-            
-            document.getElementById('ma2-period').value = configMA.p2;
-            document.getElementById('ma2-color').value = configMA.c2;
-            document.getElementById('ma2-enabled').checked = configMA.e2 !== false;
-
-            document.getElementById('ma3-period').value = configMA.p3;
-            document.getElementById('ma3-color').value = configMA.c3;
-            document.getElementById('ma3-enabled').checked = configMA.e3 !== false;
+            document.getElementById('ma1-period').value = configMA.p1; document.getElementById('ma1-color').value = configMA.c1; document.getElementById('ma1-enabled').checked = configMA.e1 !== false;
+            document.getElementById('ma2-period').value = configMA.p2; document.getElementById('ma2-color').value = configMA.c2; document.getElementById('ma2-enabled').checked = configMA.e2 !== false;
+            document.getElementById('ma3-period').value = configMA.p3; document.getElementById('ma3-color').value = configMA.c3; document.getElementById('ma3-enabled').checked = configMA.e3 !== false;
         }
 
         function toggle3MA() {
             maVisible = !maVisible;
             const btn = document.getElementById('btn-ma');
-            if (maVisible) {
-                btn.classList.add('btn-activo');
-                chart.createIndicator('EMA', true, { id: 'candle_pane' });
-                aplicarMA();
-            } else {
-                btn.classList.remove('btn-activo');
-                chart.removeIndicator('candle_pane', 'EMA');
-            }
+            if (maVisible) { btn.classList.add('btn-activo'); chart.createIndicator('EMA', true, { id: 'candle_pane' }); aplicarMA(); }
+            else { btn.classList.remove('btn-activo'); chart.removeIndicator('candle_pane', 'EMA'); }
         }
 
         function toggleMAConfig() {
-            const panel = document.getElementById('ma-config-panel');
-            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+            const p = document.getElementById('ma-config-panel');
+            p.style.display = p.style.display === 'none' ? 'block' : 'none';
         }
 
         function aplicarMA() {
-            configMA.p1 = parseInt(document.getElementById('ma1-period').value);
-            configMA.c1 = document.getElementById('ma1-color').value;
-            configMA.e1 = document.getElementById('ma1-enabled').checked;
-
-            configMA.p2 = parseInt(document.getElementById('ma2-period').value);
-            configMA.c2 = document.getElementById('ma2-color').value;
-            configMA.e2 = document.getElementById('ma2-enabled').checked;
-
-            configMA.p3 = parseInt(document.getElementById('ma3-period').value);
-            configMA.c3 = document.getElementById('ma3-color').value;
-            configMA.e3 = document.getElementById('ma3-enabled').checked;
-            
+            configMA.p1 = parseInt(document.getElementById('ma1-period').value); configMA.c1 = document.getElementById('ma1-color').value; configMA.e1 = document.getElementById('ma1-enabled').checked;
+            configMA.p2 = parseInt(document.getElementById('ma2-period').value); configMA.c2 = document.getElementById('ma2-color').value; configMA.e2 = document.getElementById('ma2-enabled').checked;
+            configMA.p3 = parseInt(document.getElementById('ma3-period').value); configMA.c3 = document.getElementById('ma3-color').value; configMA.e3 = document.getElementById('ma3-enabled').checked;
             localStorage.setItem('configMA', JSON.stringify(configMA));
-
             if (maVisible) {
-                const params = [];
-                const linesStyles = [];
-                
+                const params = [], linesStyles = [];
                 if (configMA.e1) { params.push(configMA.p1); linesStyles.push({ color: configMA.c1 }); }
                 if (configMA.e2) { params.push(configMA.p2); linesStyles.push({ color: configMA.c2 }); }
                 if (configMA.e3) { params.push(configMA.p3); linesStyles.push({ color: configMA.c3 }); }
-
-                if (params.length === 0) {
-                    chart.removeIndicator('candle_pane', 'EMA');
-                    maVisible = false;
-                    document.getElementById('btn-ma').classList.remove('btn-activo');
-                } else {
-                    chart.overrideIndicator({
-                        name: 'EMA',
-                        calcParams: params,
-                        styles: { lines: linesStyles }
-                    }, 'candle_pane');
-                }
+                if (params.length === 0) { chart.removeIndicator('candle_pane','EMA'); maVisible=false; document.getElementById('btn-ma').classList.remove('btn-activo'); }
+                else { chart.overrideIndicator({ name:'EMA', calcParams:params, styles:{ lines:linesStyles } }, 'candle_pane'); }
             }
-            
             document.getElementById('ma-config-panel').style.display = 'none';
         }
-        
+
         initMAUI();
 
         // --- TOGGLE BALLENAS ---
@@ -620,119 +441,112 @@
         function toggleBallenas() {
             ballenasVisibles = !ballenasVisibles;
             const btn = document.getElementById('btn-toggle-ballenas');
-            if (ballenasVisibles) {
-                btn.style.color = '#26a69a';
-                btn.style.borderColor = '#26a69a';
-                dibujarMarcadores();
-            } else {
-                btn.style.color = '#94a3b8';
-                btn.style.borderColor = '#94a3b8';
-                chart.removeOverlay({ groupId: 'whales' });
-            }
+            if (ballenasVisibles) { btn.style.color='#26a69a'; btn.style.borderColor='#26a69a'; dibujarMarcadores(); }
+            else { btn.style.color='#94a3b8'; btn.style.borderColor='#94a3b8'; chart.removeOverlay({ groupId:'whales' }); }
         }
 
         // --- VARIABLES GLOBALES DE DATOS ---
         let binanceSocket = null;
-        let tiemposVelasActivas = []; 
-        let memoriaBallenasBD = []; 
-        let memoriaOIBD = []; 
+        let tiemposVelasActivas = [];
+        let velasActuales = [];       // fuente de verdad local de las velas
+        let memoriaBallenasBD = [];
+        let memoriaOIBD = [];
+
+        // --- INDICADOR DE ESTADO DE CONEXIONES ---
+        const _estados = { kline: false, tape: false, depth: false };
+        function actualizarEstadoConexion(tipo, ok) {
+            _estados[tipo] = ok;
+            const todoOK = _estados.kline && _estados.tape && _estados.depth;
+            const alguno  = _estados.kline || _estados.tape || _estados.depth;
+            const dot = document.getElementById('status-dot');
+            if (!dot) return;
+            dot.style.backgroundColor = todoOK ? '#26a69a' : alguno ? '#ff9800' : '#ef5350';
+            dot.title = `Kline: ${_estados.kline?'✓':'✗'} | Cinta: ${_estados.tape?'✓':'✗'} | Orderbook: ${_estados.depth?'✓':'✗'}`;
+        }
+
+        // --- BÚSQUEDA BINARIA O(log n) ---
+        function obtenerVelaExacta(tiempoBuscado_ms) {
+            if (tiemposVelasActivas.length === 0) return null;
+            let lo = 0, hi = tiemposVelasActivas.length - 1;
+            while (lo <= hi) {
+                const mid = (lo + hi) >> 1;
+                if (tiemposVelasActivas[mid] === tiempoBuscado_ms) return tiemposVelasActivas[mid];
+                else if (tiemposVelasActivas[mid] < tiempoBuscado_ms) lo = mid + 1;
+                else hi = mid - 1;
+            }
+            return hi >= 0 ? tiemposVelasActivas[hi] : tiemposVelasActivas[0];
+        }
+
+        // --- MERGE OI → VELAS (Map para O(1) lookup) ---
+        function aplicarOIAVelas(velas) {
+            if (memoriaOIBD.length === 0) return;
+            const porTiempo = new Map(velas.map((v, i) => [v.timestamp, i]));
+            memoriaOIBD.forEach(d => {
+                const t_ms = parseInt(d.tiempo) * 1000;
+                if (isNaN(t_ms)) return;
+                const tVela = obtenerVelaExacta(t_ms);
+                if (tVela === null) return;
+                const idx = porTiempo.get(tVela);
+                if (idx !== undefined && velas[idx]) velas[idx].oi = parseFloat(d.valor);
+            });
+        }
 
         // --- CARGA DE VELAS ---
         async function cargarDatos(temporalidad) {
             if (binanceSocket !== null) {
-                if (binanceSocket.readyState === 0) binanceSocket.onopen = function() { binanceSocket.close(); };
+                if (binanceSocket.readyState === 0) binanceSocket.onopen = () => binanceSocket.close();
                 else binanceSocket.close();
             }
 
             try {
-                let allVelas = [];
-                let ultimoTimestamp = null;
-                const limitePorPedido = 1000;
-                const totalPedidos = 10; // 10 * 1000 = 10,000 velas
-
-                console.log(`🚀 Iniciando carga de ${totalPedidos * limitePorPedido} velas para ${temporalidad}...`);
+                let allVelas = [], ultimoTimestamp = null;
+                const limitePorPedido = 1000, totalPedidos = 10;
+                console.log(`🚀 Cargando ${totalPedidos * limitePorPedido} velas para ${temporalidad}...`);
 
                 for (let i = 0; i < totalPedidos; i++) {
                     let url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=${limitePorPedido}`;
-                    if (ultimoTimestamp) {
-                        url += `&endTime=${ultimoTimestamp - 1}`;
-                    }
-
-                    const respuesta = await fetch(url);
-                    const nuevosDatos = await respuesta.json();
-
-                    if (!nuevosDatos || nuevosDatos.length === 0) break;
-
-                    // Los datos de Binance vienen de más antiguo a más nuevo.
-                    // Al pedir con endTime, recibimos el bloque anterior al tiempo indicado.
-                    allVelas = [...nuevosDatos, ...allVelas];
-                    ultimoTimestamp = nuevosDatos[0][0]; // El primer elemento es el más antiguo del bloque actual
-
-                    // Si Binance devolvió menos de lo pedido, es que no hay más historial
-                    if (nuevosDatos.length < limitePorPedido) break;
+                    if (ultimoTimestamp) url += `&endTime=${ultimoTimestamp - 1}`;
+                    const resp = await fetch(url);
+                    const datos = await resp.json();
+                    if (!datos || datos.length === 0) break;
+                    allVelas = [...datos, ...allVelas];
+                    ultimoTimestamp = datos[0][0];
+                    if (datos.length < limitePorPedido) break;
                 }
 
-                let velas = [];
-                tiemposVelasActivas = []; 
+                velasActuales = [];
+                tiemposVelasActivas = [];
 
                 allVelas.forEach(v => {
-                    let timestamp = v[0]; 
-                    let volume = parseFloat(v[5]);
-                    let comprasMercado = parseFloat(v[9]); 
-                    let ventasMercado = volume - comprasMercado; 
-                    
-                    let kline = {
-                        timestamp: timestamp,
-                        open: parseFloat(v[1]),
-                        high: parseFloat(v[2]),
-                        low: parseFloat(v[3]),
-                        close: parseFloat(v[4]),
-                        volume: volume,
-                        delta: comprasMercado - ventasMercado,
-                        compras: comprasMercado, 
-                        ventas: ventasMercado,
-                        oi: null 
-                    };
-                    
-                    velas.push(kline);
-                    tiemposVelasActivas.push(timestamp);
+                    const ts = v[0], vol = parseFloat(v[5]), c = parseFloat(v[9]), vt = vol - c;
+                    velasActuales.push({ timestamp: ts, open: parseFloat(v[1]), high: parseFloat(v[2]), low: parseFloat(v[3]), close: parseFloat(v[4]), volume: vol, delta: c - vt, compras: c, ventas: vt, oi: null });
+                    tiemposVelasActivas.push(ts);
                 });
-                
-                chart.applyNewData(velas); 
-                
-                dibujarMarcadores(); 
-                dibujarOI(); 
+
+                // Cargar OI y mergearlo ANTES del primer applyNewData (una sola llamada sin flash)
+                try {
+                    const oiResp = await fetch('/api/open-interest');
+                    memoriaOIBD = await oiResp.json();
+                    aplicarOIAVelas(velasActuales);
+                } catch (e) { console.error('Error cargando OI inicial:', e); }
+
+                chart.applyNewData(velasActuales);
+                dibujarMarcadores();
+                pedirHistorialBallenas(); // después de que las velas están listas
 
                 binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
-                binanceSocket.onmessage = function (e) {
-                    const k = JSON.parse(e.data).k; 
-                    let timestamp = k.t; 
-                    let volume = parseFloat(k.v);
-                    let comprasMercado = parseFloat(k.V); 
-                    let ventasMercado = volume - comprasMercado; 
-
-                    let dataList = chart.getDataList();
-                    let ultimaVela = dataList.length > 0 ? dataList[dataList.length - 1] : null;
-                    let oiExistente = (ultimaVela && ultimaVela.timestamp === timestamp) ? ultimaVela.oi : null;
-                    
-                    let klineActualizada = {
-                        timestamp: timestamp,
-                        open: parseFloat(k.o),
-                        high: parseFloat(k.h),
-                        low: parseFloat(k.l),
-                        close: parseFloat(k.c),
-                        volume: volume,
-                        delta: comprasMercado - ventasMercado,
-                        compras: comprasMercado,
-                        ventas: ventasMercado,
-                        oi: oiExistente
-                    };
-                    
-                    chart.updateData(klineActualizada);
-                    
-                    if (tiemposVelasActivas.length === 0 || tiemposVelasActivas[tiemposVelasActivas.length - 1] !== timestamp) {
-                        tiemposVelasActivas.push(timestamp);
-                    }
+                binanceSocket.onopen  = () => actualizarEstadoConexion('kline', true);
+                binanceSocket.onerror = (e) => console.error('Error kline socket:', e);
+                binanceSocket.onclose = () => { actualizarEstadoConexion('kline', false); console.warn('Kline socket cerrado.'); };
+                binanceSocket.onmessage = function(e) {
+                    const k = JSON.parse(e.data).k;
+                    const ts = k.t, vol = parseFloat(k.v), c = parseFloat(k.V), vt = vol - c;
+                    const ultima = velasActuales.length > 0 ? velasActuales[velasActuales.length - 1] : null;
+                    const oiActual = (ultima && ultima.timestamp === ts) ? ultima.oi : null;
+                    const kActualizada = { timestamp: ts, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: vol, delta: c - vt, compras: c, ventas: vt, oi: oiActual };
+                    if (ultima && ultima.timestamp === ts) velasActuales[velasActuales.length - 1] = kActualizada;
+                    else { velasActuales.push(kActualizada); tiemposVelasActivas.push(ts); }
+                    chart.updateData(kActualizada);
                 };
             } catch (error) {
                 console.error("Error cargando datos de velas:", error);
@@ -741,289 +555,187 @@
 
         function cambiarTemporalidad(t) {
             document.querySelectorAll('.btn-tiempo').forEach(btn => btn.classList.remove('btn-activo'));
-            document.getElementById(`btn-${t}`).classList.add('btn-activo'); 
+            document.getElementById(`btn-${t}`).classList.add('btn-activo');
             cargarDatos(t);
         }
         cambiarTemporalidad('1m');
 
-        function obtenerVelaExacta(tiempoBuscado_ms) {
-            if (tiemposVelasActivas.length === 0) return null;
-            for (let i = tiemposVelasActivas.length - 1; i >= 0; i--) {
-                if (tiemposVelasActivas[i] <= tiempoBuscado_ms) return tiemposVelasActivas[i];
-            }
-            return tiemposVelasActivas[0]; 
-        }
-
-        // --- CAZADOR DE BALLENAS (OVERLAYS AGRUPADOS) ---
+        // --- BALLENAS (OVERLAYS AGRUPADOS) ---
         function pedirHistorialBallenas() {
             fetch('/api/ballenas')
-                .then(respuesta => respuesta.json())
-                .then(datos => {
-                    memoriaBallenasBD = datos;
-                    dibujarMarcadores(); 
-                })
-                .catch(err => console.error("Error al pedir historial:", err));
+                .then(r => r.json())
+                .then(datos => { memoriaBallenasBD = datos; dibujarMarcadores(); })
+                .catch(err => console.error("Error al pedir historial ballenas:", err));
         }
 
         function dibujarMarcadores() {
             if (!ballenasVisibles) return;
             const limiteBtc = parseFloat(inputFiltroGrafico.value) || 5;
-
             chart.removeOverlay({ groupId: 'whales' });
             actualizarWhaleDelta();
 
             const dataList = chart.getDataList();
-            let marcadoresAgrupados = {};
+            const velasPorTiempo = new Map(dataList.map(v => [v.timestamp, v]));
+            const agrupados = {};
 
             memoriaBallenasBD.forEach(trade => {
-                const cantidadBtc = parseFloat(trade.cantidad);
-                if (cantidadBtc >= limiteBtc) {
-                    let tiempoMs = Math.floor(trade.tiempo_segundos * 1000);
-                    let tiempoVela = obtenerVelaExacta(tiempoMs);
-
-                    if (tiempoVela !== null) {
-                        if (!marcadoresAgrupados[tiempoVela]) {
-                            marcadoresAgrupados[tiempoVela] = { compras: 0, ventas: 0, comprasUSD: 0, ventasUSD: 0 };
-                        }
-                        const usd = cantidadBtc * parseFloat(trade.precio);
-                        if (trade.es_venta) {
-                            marcadoresAgrupados[tiempoVela].ventas += cantidadBtc;
-                            marcadoresAgrupados[tiempoVela].ventasUSD += usd;
-                        } else {
-                            marcadoresAgrupados[tiempoVela].compras += cantidadBtc;
-                            marcadoresAgrupados[tiempoVela].comprasUSD += usd;
-                        }
-                    }
-                }
+                const btc = parseFloat(trade.cantidad);
+                if (btc < limiteBtc) return;
+                const tVela = obtenerVelaExacta(Math.floor(trade.tiempo_segundos * 1000));
+                if (tVela === null) return;
+                if (!agrupados[tVela]) agrupados[tVela] = { compras:0, ventas:0, comprasUSD:0, ventasUSD:0 };
+                const usd = btc * parseFloat(trade.precio);
+                if (trade.es_venta) { agrupados[tVela].ventas += btc; agrupados[tVela].ventasUSD += usd; }
+                else               { agrupados[tVela].compras += btc; agrupados[tVela].comprasUSD += usd; }
             });
 
-            Object.keys(marcadoresAgrupados).forEach(t => {
-                let tiempo = parseInt(t);
-                let datos = marcadoresAgrupados[tiempo];
-                let vela = dataList.find(v => v.timestamp === tiempo);
-
-                if (vela) {
-                    if (datos.compras > 0) {
-                        chart.createOverlay({
-                            groupId: 'whales',
-                            name: 'marcadorBallena',
-                            extendData: {
-                                text: `${Math.round(datos.compras)} BTC · ${formatUSD(datos.comprasUSD)}`,
-                                es_venta: false,
-                                intensidad: calcularIntensidad(datos.compras, limiteBtc)
-                            },
-                            points: [{ timestamp: tiempo, value: vela.low }]
-                        });
-                    }
-                    if (datos.ventas > 0) {
-                        chart.createOverlay({
-                            groupId: 'whales',
-                            name: 'marcadorBallena',
-                            extendData: {
-                                text: `${Math.round(datos.ventas)} BTC · ${formatUSD(datos.ventasUSD)}`,
-                                es_venta: true,
-                                intensidad: calcularIntensidad(datos.ventas, limiteBtc)
-                            },
-                            points: [{ timestamp: tiempo, value: vela.high }]
-                        });
-                    }
-                }
+            Object.entries(agrupados).forEach(([t, d]) => {
+                const tiempo = parseInt(t);
+                const vela = velasPorTiempo.get(tiempo);
+                if (!vela) return;
+                if (d.compras > 0) chart.createOverlay({ groupId:'whales', name:'marcadorBallena', extendData:{ text:`${Math.round(d.compras)} BTC · ${formatUSD(d.comprasUSD)}`, es_venta:false, intensidad:calcularIntensidad(d.compras,limiteBtc) }, points:[{ timestamp:tiempo, value:vela.low }] });
+                if (d.ventas  > 0) chart.createOverlay({ groupId:'whales', name:'marcadorBallena', extendData:{ text:`${Math.round(d.ventas)} BTC · ${formatUSD(d.ventasUSD)}`,   es_venta:true,  intensidad:calcularIntensidad(d.ventas,limiteBtc)  }, points:[{ timestamp:tiempo, value:vela.high }] });
             });
         }
 
         function actualizarWhaleDelta() {
-            const hace24h = Date.now() - 24 * 60 * 60 * 1000;
+            const hace24h = Date.now() - 86400000;
             let comprasTotal = 0, ventasTotal = 0;
-
             memoriaBallenasBD.forEach(trade => {
-                const tiempoMs = parseFloat(trade.tiempo_segundos) * 1000;
-                if (tiempoMs >= hace24h) {
+                const tms = parseFloat(trade.tiempo_segundos) * 1000;
+                if (tms >= hace24h) {
                     const btc = parseFloat(trade.cantidad);
-                    if (trade.es_venta) ventasTotal += btc;
-                    else comprasTotal += btc;
+                    if (trade.es_venta) ventasTotal += btc; else comprasTotal += btc;
                 }
             });
-
-            const delta = comprasTotal - ventasTotal;
-            const signo = delta >= 0 ? '+' : '';
-            const color = delta >= 0 ? '#26a69a' : '#ef5350';
-            const label = delta >= 0 ? '▲' : '▼';
+            const delta = comprasTotal - ventasTotal, signo = delta>=0?'+':'', color = delta>=0?'#26a69a':'#ef5350', label = delta>=0?'▲':'▼';
             const el = document.getElementById('whale-delta-display');
-            if (el) {
-                el.innerHTML = `Ballenas 24h: <span style="color:${color}; font-weight:bold;">${label} ${signo}${Math.round(delta)} BTC</span> <span style="color:#94a3b8;">(C:${Math.round(comprasTotal)} / V:${Math.round(ventasTotal)})</span>`;
-            }
+            if (el) el.innerHTML = `Ballenas 24h: <span style="color:${color};font-weight:bold;">${label} ${signo}${Math.round(delta)} BTC</span> <span style="color:#94a3b8;">(C:${Math.round(comprasTotal)} / V:${Math.round(ventasTotal)})</span>`;
         }
 
-        setTimeout(pedirHistorialBallenas, 2000);
         setInterval(pedirHistorialBallenas, 30000);
 
-        // --- OPEN INTEREST ---
-        function cargarHistorialOI() {
-            fetch('/api/open-interest')
-                .then(respuesta => respuesta.json())
-                .then(datos => {
-                    memoriaOIBD = datos;
-                    dibujarOI(); 
-                })
-                .catch(error => console.error("Error al cargar historial OI:", error));
-        }
-
-        function dibujarOI() {
-            if (memoriaOIBD.length === 0 || tiemposVelasActivas.length === 0) return;
-
-            let dataList = chart.getDataList();
-            let huboCambios = false;
-
-            memoriaOIBD.forEach(d => {
-                let tiempoOI_ms = parseInt(d.tiempo) * 1000;
-                if (isNaN(tiempoOI_ms)) return; 
-
-                let tiempoVela = obtenerVelaExacta(tiempoOI_ms);
-                if (tiempoVela !== null) {
-                    let index = tiemposVelasActivas.indexOf(tiempoVela);
-                    if (index !== -1 && dataList[index]) {
-                        dataList[index].oi = parseFloat(d.valor);
-                        huboCambios = true;
-                    }
-                }
-            });
-
-            if (huboCambios) {
-                chart.applyNewData(dataList); 
-            }
-        }
-
+        // --- OPEN INTEREST EN VIVO (via proxy del servidor, sin CORS) ---
         function actualizarOpenInterestEnVivo() {
-            fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT')
-                .then(respuesta => respuesta.json())
+            fetch('/api/oi-live')
+                .then(r => r.json())
                 .then(datos => {
-                    if (tiemposVelasActivas.length > 0) {
-                        let contratosAbiertos = parseFloat(datos.openInterest);
-                        
-                        let dataList = chart.getDataList();
-                        let velaActual = dataList[dataList.length - 1];
-                        if(velaActual) {
-                            velaActual.oi = contratosAbiertos;
-                            chart.updateData(velaActual);
-                        }
+                    if (velasActuales.length > 0 && datos.openInterest) {
+                        const ultima = velasActuales[velasActuales.length - 1];
+                        ultima.oi = parseFloat(datos.openInterest);
+                        chart.updateData(ultima);
                     }
                 })
-                .catch(error => console.log("Error al traer Open Interest en vivo:", error));
+                .catch(err => console.log("Error OI en vivo:", err));
         }
-        
-        setTimeout(() => {
-            cargarHistorialOI();
-            setTimeout(() => {
-                actualizarOpenInterestEnVivo();
-                setInterval(actualizarOpenInterestEnVivo, 3000);
-            }, 3000);
-        }, 1000);
 
-        // --- MUROS Y CINTA (ORDERBOOK) ---
+        setTimeout(() => { actualizarOpenInterestEnVivo(); setInterval(actualizarOpenInterestEnVivo, 3000); }, 3000);
+
+        // --- ORDERBOOK CON RESINCRONIZACIÓN EN DESCONEXIÓN ---
         let orderBookLocal = { asks: {}, bids: {} };
-        const TAMAÑO_GRUPO = 50; 
+        const TAMAÑO_GRUPO = 50;
+        let depthSocket = null;
 
-        fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000')
-            .then(r => r.json())
-            .then(datos => {
-                datos.asks.forEach(a => orderBookLocal.asks[parseFloat(a[0])] = parseFloat(a[1]));
-                datos.bids.forEach(b => orderBookLocal.bids[parseFloat(b[0])] = parseFloat(b[1]));
-                iniciarActualizacionMurosEnVivo();
-            });
+        function iniciarOrderbook() {
+            fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000')
+                .then(r => r.json())
+                .then(datos => {
+                    orderBookLocal = { asks: {}, bids: {} };
+                    datos.asks.forEach(a => orderBookLocal.asks[parseFloat(a[0])] = parseFloat(a[1]));
+                    datos.bids.forEach(b => orderBookLocal.bids[parseFloat(b[0])] = parseFloat(b[1]));
+                    iniciarDepthSocket();
+                })
+                .catch(err => { console.error('Error snapshot orderbook:', err); setTimeout(iniciarOrderbook, 5000); });
+        }
 
-        function iniciarActualizacionMurosEnVivo() {
-            const depthSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@depth@1000ms');
+        function iniciarDepthSocket() {
+            if (depthSocket && depthSocket.readyState <= 1) depthSocket.close();
+            depthSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@depth@1000ms');
+            depthSocket.onopen  = () => actualizarEstadoConexion('depth', true);
+            depthSocket.onerror = (e) => console.error('Error depth socket:', e);
+            depthSocket.onclose = () => {
+                actualizarEstadoConexion('depth', false);
+                console.warn('Depth socket cerrado. Resincronizando en 3s...');
+                setTimeout(iniciarOrderbook, 3000); // snapshot completo al reconectar
+            };
             depthSocket.onmessage = function(e) {
                 const cambios = JSON.parse(e.data);
-                cambios.a.forEach(ask => {
-                    let precio = parseFloat(ask[0]); let cantidad = parseFloat(ask[1]);
-                    if (cantidad === 0) delete orderBookLocal.asks[precio];
-                    else orderBookLocal.asks[precio] = cantidad;
-                });
-                cambios.b.forEach(bid => {
-                    let precio = parseFloat(bid[0]); let cantidad = parseFloat(bid[1]);
-                    if (cantidad === 0) delete orderBookLocal.bids[precio];
-                    else orderBookLocal.bids[precio] = cantidad;
-                });
+                cambios.a.forEach(ask => { const p=parseFloat(ask[0]),q=parseFloat(ask[1]); if(q===0) delete orderBookLocal.asks[p]; else orderBookLocal.asks[p]=q; });
+                cambios.b.forEach(bid => { const p=parseFloat(bid[0]),q=parseFloat(bid[1]); if(q===0) delete orderBookLocal.bids[p]; else orderBookLocal.bids[p]=q; });
             };
         }
 
-        function agruparDiccionario(diccionario) {
-            let agrupado = {};
-            for (let precioStr in diccionario) {
-                let precio = parseFloat(precioStr); let cantidad = diccionario[precioStr];
-                let precioAgrupado = Math.floor(precio / TAMAÑO_GRUPO) * TAMAÑO_GRUPO;
-                if (!agrupado[precioAgrupado]) agrupado[precioAgrupado] = 0;
-                agrupado[precioAgrupado] += cantidad;
+        iniciarOrderbook();
+
+        function agruparDiccionario(dic) {
+            const ag = {};
+            for (const pStr in dic) {
+                const p = parseFloat(pStr), pa = Math.floor(p/TAMAÑO_GRUPO)*TAMAÑO_GRUPO;
+                ag[pa] = (ag[pa] || 0) + dic[pStr];
             }
-            return Object.keys(agrupado).map(p => [parseFloat(p), agrupado[p]]);
+            return Object.keys(ag).map(p => [parseFloat(p), ag[p]]);
         }
 
         function dibujarMuros() {
-            let preciosVentas = Object.keys(orderBookLocal.asks).map(parseFloat).sort((a,b) => a - b);
-            let preciosCompras = Object.keys(orderBookLocal.bids).map(parseFloat).sort((a,b) => b - a);
-            if (preciosVentas.length === 0 || preciosCompras.length === 0) return; 
-
-            let precioActual = (preciosVentas[0] + preciosCompras[0]) / 2;
-            let porcentajeInput = parseFloat(document.getElementById('input-rango').value);
-            if (isNaN(porcentajeInput) || porcentajeInput <= 0) porcentajeInput = 2; 
-            
-            let factorArriba = 1 + (porcentajeInput / 100); let factorAbajo = 1 - (porcentajeInput / 100);  
-
-            let ventasAgrupadas = agruparDiccionario(orderBookLocal.asks);
-            let comprasAgrupadas = agruparDiccionario(orderBookLocal.bids);
-
-            let ventasEnRango = ventasAgrupadas.filter(v => v[0] <= precioActual * factorArriba).sort((a, b) => b[1] - a[1]);
-            let comprasEnRango = comprasAgrupadas.filter(c => c[0] >= precioActual * factorAbajo).sort((a, b) => b[1] - a[1]);
-            
-            let top3Ventas = ventasEnRango.slice(0, 3); let top3Compras = comprasEnRango.slice(0, 3);
-
-            document.getElementById('top-ventas').innerHTML = top3Ventas.map(v => `<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
-            document.getElementById('top-compras').innerHTML = top3Compras.map(c => `<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
+            const pV = Object.keys(orderBookLocal.asks).map(parseFloat).sort((a,b)=>a-b);
+            const pC = Object.keys(orderBookLocal.bids).map(parseFloat).sort((a,b)=>b-a);
+            if (pV.length===0 || pC.length===0) return;
+            const mid = (pV[0]+pC[0])/2;
+            let rng = parseFloat(document.getElementById('input-rango').value);
+            if (isNaN(rng)||rng<=0) rng=2;
+            const fA=1+(rng/100), fB=1-(rng/100);
+            const vA = agruparDiccionario(orderBookLocal.asks).filter(v=>v[0]<=mid*fA).sort((a,b)=>b[1]-a[1]);
+            const cA = agruparDiccionario(orderBookLocal.bids).filter(c=>c[0]>=mid*fB).sort((a,b)=>b[1]-a[1]);
+            document.getElementById('top-ventas').innerHTML = vA.slice(0,3).map(v=>`<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
+            document.getElementById('top-compras').innerHTML = cA.slice(0,3).map(c=>`<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
         }
 
         setInterval(dibujarMuros, 2000);
         document.getElementById('input-rango').addEventListener('change', dibujarMuros);
 
+        // --- FILTRO BD con reversión si el servidor rechaza ---
         fetch('/api/filtro-bd')
             .then(res => res.json())
-            .then(data => { document.getElementById('filtro-bd').value = data.umbral; })
+            .then(data => {
+                const el = document.getElementById('filtro-bd');
+                el.value = data.umbral;
+                el.dataset.valorConfirmado = data.umbral;
+            })
             .catch(err => console.log('Error al leer filtro de BD:', err));
 
         document.getElementById('filtro-bd').addEventListener('change', function() {
-            const nuevoUmbral = parseFloat(this.value);
-            fetch('/api/filtro-bd', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ umbral: nuevoUmbral })
-            })
-            .then(res => res.json())
-            .then(data => console.log('El servidor confirmó el nuevo límite de BD:', data.umbral))
-            .catch(err => console.log('Error al actualizar filtro en servidor:', err));
+            const el = this;
+            const anterior = el.dataset.valorConfirmado || el.value;
+            fetch('/api/filtro-bd', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ umbral: parseFloat(el.value) }) })
+                .then(r => r.json())
+                .then(data => { el.dataset.valorConfirmado = data.umbral; console.log('Límite BD confirmado:', data.umbral); })
+                .catch(err => { console.log('Error actualizando filtro BD:', err); el.value = anterior; });
         });
 
-        const tapeSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
-        let ultimosTrades = []; 
+        // --- CINTA EN VIVO CON RECONEXIÓN ---
+        let ultimosTrades = [], tapeSocket = null;
 
-        tapeSocket.onmessage = function(evento) {
-            const data = JSON.parse(evento.data); 
-            const cantidad = parseFloat(data.q); 
-            const precio = parseFloat(data.p); 
-            const agresorFueVendedor = data.m; 
-            
-            const limiteCintaVisual = parseFloat(inputFiltroCinta.value) || 1.0;
+        function iniciarTapeSocket() {
+            if (tapeSocket && tapeSocket.readyState <= 1) tapeSocket.close();
+            tapeSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
+            tapeSocket.onopen  = () => actualizarEstadoConexion('tape', true);
+            tapeSocket.onerror = (e) => console.error('Error tape socket:', e);
+            tapeSocket.onclose = () => { actualizarEstadoConexion('tape', false); console.warn('Tape socket cerrado. Reconectando en 3s...'); setTimeout(iniciarTapeSocket, 3000); };
+            tapeSocket.onmessage = function(evento) {
+                const data = JSON.parse(evento.data);
+                const cantidad = parseFloat(data.q), precio = parseFloat(data.p);
+                const limite = parseFloat(inputFiltroCinta.value) || 1.0;
+                if (cantidad >= limite) {
+                    ultimosTrades.unshift({ precio, cantidad, esVenta: data.m });
+                    if (ultimosTrades.length > 5) ultimosTrades.pop();
+                    document.getElementById('whale-tape').innerHTML = ultimosTrades.map((t,i) =>
+                        `<div class="muro-item ${i===0?'flash-trade':''}"><span class="muro-precio" style="color:${t.esVenta?'#ef5350':'#26a69a'};">$${t.precio.toFixed(2)}</span><span class="muro-volumen">${t.cantidad.toFixed(2)} BTC</span></div>`
+                    ).join('');
+                }
+            };
+        }
 
-            if (cantidad >= limiteCintaVisual) {
-                ultimosTrades.unshift({ precio: precio, cantidad: cantidad, esVenta: agresorFueVendedor });
-                if (ultimosTrades.length > 5) ultimosTrades.pop(); 
-                let htmlCinta = '';
-                ultimosTrades.forEach((trade, indice) => {
-                    let color = trade.esVenta ? '#ef5350' : '#26a69a'; let claseFlash = indice === 0 ? 'flash-trade' : '';
-                    htmlCinta += `<div class="muro-item ${claseFlash}"><span class="muro-precio" style="color:${color};">$${trade.precio.toFixed(2)}</span><span class="muro-volumen">${trade.cantidad.toFixed(2)} BTC</span></div>`;
-                });
-                document.getElementById('whale-tape').innerHTML = htmlCinta;
-            }
-        };
+        iniciarTapeSocket();
 
     </script>
 </body>
