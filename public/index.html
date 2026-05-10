@@ -162,6 +162,8 @@
             <button class="btn-tiempo" id="btn-4h" onclick="cambiarTemporalidad('4h')">4H</button>
             <button class="btn-tiempo" id="btn-1d" onclick="cambiarTemporalidad('1d')">1D</button>
 
+            <button class="btn-tiempo" id="btn-guardar" onclick="guardarTodo()" style="margin-left: 8px; border-color: #26a69a; color: #26a69a;" title="Guardar toda la configuración: filtros, dibujos, indicadores, temporalidad">Guardar</button>
+
             <div style="border-left: 2px solid #d1d4dc; margin-left: 5px; padding-left: 6px; display: flex; gap: 4px; align-items: center;">
                 <a id="btn-admin-link" href="/admin" class="btn-tiempo" style="display:none; font-size:12px; text-decoration:none; padding: 6px 10px;">Admin</a>
                 <div style="position:relative;">
@@ -431,19 +433,36 @@
 
         // --- DIBUJO Y VWAP ---
         let overlaySeleccionado = null;
+        let registroDibujos = {};     // { '1m': [{id, name, points}], '5m': [...] }
+        let temporalidadActual = '1m';
+
+        function _callbacksDibujo(tf) {
+            return {
+                onDrawEnd: ({ overlay }) => {
+                    if (!registroDibujos[tf]) registroDibujos[tf] = [];
+                    registroDibujos[tf] = registroDibujos[tf].filter(d => d.id !== overlay.id);
+                    registroDibujos[tf].push({ id: overlay.id, name: overlay.name, points: overlay.points });
+                },
+                onRemoved: ({ overlay }) => {
+                    if (registroDibujos[tf]) registroDibujos[tf] = registroDibujos[tf].filter(d => d.id !== overlay.id);
+                },
+                onSelected: ({ overlay }) => { overlaySeleccionado = overlay.id; },
+                onDeselected: ({ overlay }) => { if (overlaySeleccionado === overlay.id) overlaySeleccionado = null; }
+            };
+        }
 
         function activarDibujo(tipoOverlay) {
             chart.createOverlay({
                 name: tipoOverlay,
                 id: `dibujo_${Date.now()}`,
-                onSelected: ({ overlay }) => { overlaySeleccionado = overlay.id; },
-                onDeselected: ({ overlay }) => { if (overlaySeleccionado === overlay.id) overlaySeleccionado = null; }
+                ..._callbacksDibujo(temporalidadActual)
             });
         }
 
         function borrarDibujos() {
             ['segment','rayLine','fibonacciLine','cajaCustom','canalParalelo','rangoVolumen'].forEach(t => chart.removeOverlay({ name: t }));
             overlaySeleccionado = null;
+            registroDibujos[temporalidadActual] = [];
         }
 
         document.addEventListener('keydown', function(e) {
@@ -451,6 +470,8 @@
             const tag = document.activeElement.tagName;
             if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
             if (overlaySeleccionado && overlaySeleccionado.startsWith('dibujo_')) {
+                if (registroDibujos[temporalidadActual])
+                    registroDibujos[temporalidadActual] = registroDibujos[temporalidadActual].filter(d => d.id !== overlaySeleccionado);
                 chart.removeOverlay({ id: overlaySeleccionado });
                 overlaySeleccionado = null;
             }
@@ -618,6 +639,7 @@
                 } catch (e) { console.error('Error cargando OI inicial:', e); }
 
                 chart.applyNewData(velasActuales);
+                restaurarDibujos(temporalidad);
                 dibujarMarcadores();
                 pedirHistorialBallenas(); // después de que las velas están listas
 
@@ -643,7 +665,20 @@
         function cambiarTemporalidad(t) {
             document.querySelectorAll('.btn-tiempo').forEach(btn => btn.classList.remove('btn-activo'));
             document.getElementById(`btn-${t}`).classList.add('btn-activo');
+            temporalidadActual = t;
             cargarDatos(t);
+        }
+
+        function restaurarDibujos(tf) {
+            const dibujos = registroDibujos[tf] || [];
+            dibujos.forEach(d => {
+                chart.createOverlay({
+                    name: d.name,
+                    id: d.id,
+                    points: d.points,
+                    ..._callbacksDibujo(tf)
+                });
+            });
         }
 
         // --- BALLENAS (OVERLAYS AGRUPADOS) ---
@@ -867,34 +902,118 @@
         }
 
         // ============================================================
+        // GUARDAR TODO
+        // ============================================================
+        async function guardarTodo() {
+            const btn = document.getElementById('btn-guardar');
+            btn.disabled = true;
+            btn.textContent = 'Guardando...';
+
+            const config = {
+                filtroGrafico:  parseFloat(inputFiltroGrafico.value),
+                filtroCinta:    parseFloat(inputFiltroCinta.value),
+                filtroObRango:  parseFloat(document.getElementById('input-rango').value),
+                temporalidad:   temporalidadActual,
+                panelVisible:   document.getElementById('orderbook-container').style.display !== 'none',
+                ballenasVisibles,
+                vwapVisible, deltaVisible, oiVisible, maVisible,
+                configMA:       { ...configMA },
+                vwapReset:      parseInt(document.getElementById('select-vwap').value),
+                dibujos:        registroDibujos
+            };
+
+            await guardarConfigServidor('userConfig', config);
+
+            btn.textContent = '✓ Guardado';
+            btn.style.background = '#26a69a';
+            btn.style.color = 'white';
+            btn.style.borderColor = '#26a69a';
+            setTimeout(() => {
+                btn.textContent = 'Guardar';
+                btn.style.background = '';
+                btn.style.color = '#26a69a';
+                btn.style.borderColor = '#26a69a';
+                btn.disabled = false;
+            }, 2000);
+        }
+
+        // ============================================================
         // ARRANQUE: verificar sesión → cargar config → iniciar terminal
         // ============================================================
         (async function arrancar() {
             await verificarSesion();
             await cargarConfigServidor();
-            aplicarConfigInicial();
 
-            // Aplicar configMA desde servidor si existe
-            const cfgMA = cfgGet('configMA', null);
-            if (cfgMA) {
-                Object.assign(configMA, cfgMA);
-                initMAUI();
+            document.getElementById('select-vwap').addEventListener('change', cambiarVwap);
+
+            const cfg = cfgGet('userConfig', null);
+
+            if (cfg) {
+                // Filtros
+                if (cfg.filtroGrafico != null) inputFiltroGrafico.value = cfg.filtroGrafico;
+                if (cfg.filtroCinta   != null) inputFiltroCinta.value   = cfg.filtroCinta;
+                if (cfg.filtroObRango != null) document.getElementById('input-rango').value = cfg.filtroObRango;
+
+                // EMAs
+                if (cfg.configMA) { Object.assign(configMA, cfg.configMA); initMAUI(); }
+
+                // VWAP reset
+                if (cfg.vwapReset) document.getElementById('select-vwap').value = String(cfg.vwapReset);
+
+                // Panel lateral
+                if (cfg.panelVisible === false) {
+                    document.getElementById('orderbook-container').style.display = 'none';
+                    document.getElementById('btn-panel').textContent = 'Mostrar Panel';
+                }
+
+                // Ballenas
+                if (cfg.ballenasVisibles === false) {
+                    ballenasVisibles = false;
+                    const b = document.getElementById('btn-toggle-ballenas');
+                    b.style.color = '#94a3b8'; b.style.borderColor = '#94a3b8';
+                }
+
+                // Indicadores — se quitan del gráfico si estaban apagados
+                if (cfg.vwapVisible === false) {
+                    vwapVisible = false;
+                    document.getElementById('btn-vwap').classList.remove('btn-activo');
+                    chart.removeIndicator('candle_pane', 'VWAP_CUSTOM');
+                }
+                if (cfg.deltaVisible === false) {
+                    deltaVisible = false;
+                    document.getElementById('btn-delta').classList.remove('btn-activo');
+                    chart.removeIndicator('pane_delta', 'VOL_DELTA');
+                }
+                if (cfg.oiVisible === false) {
+                    oiVisible = false;
+                    document.getElementById('btn-oi').classList.remove('btn-activo');
+                    chart.removeIndicator('pane_oi', 'OPEN_INTEREST');
+                }
+                if (cfg.maVisible === true) {
+                    maVisible = true;
+                    document.getElementById('btn-ma').classList.add('btn-activo');
+                    chart.createIndicator('EMA', true, { id: 'candle_pane' });
+                    const params = [], linesStyles = [];
+                    if (configMA.e1) { params.push(configMA.p1); linesStyles.push({ color: configMA.c1 }); }
+                    if (configMA.e2) { params.push(configMA.p2); linesStyles.push({ color: configMA.c2 }); }
+                    if (configMA.e3) { params.push(configMA.p3); linesStyles.push({ color: configMA.c3 }); }
+                    if (params.length > 0) chart.overrideIndicator({ name: 'EMA', calcParams: params, styles: { lines: linesStyles } }, 'candle_pane');
+                }
+
+                // Dibujos: se pre-cargan en el registro; restaurarDibujos los pintará al cargar velas
+                if (cfg.dibujos) registroDibujos = cfg.dibujos;
+
+                cambiarTemporalidad(cfg.temporalidad || '1m');
+
+            } else {
+                // Fallback: claves individuales (usuarios sin guardado previo)
+                aplicarConfigInicial();
+                const cfgMA = cfgGet('configMA', null);
+                if (cfgMA) { Object.assign(configMA, cfgMA); initMAUI(); }
+                const vwapReset = cfgGet('vwapReset', null);
+                if (vwapReset) document.getElementById('select-vwap').value = String(vwapReset);
+                cambiarTemporalidad('1m');
             }
-
-            // Aplicar VWAP reset desde servidor
-            const vwapReset = cfgGet('vwapReset', null);
-            if (vwapReset) {
-                const sel = document.getElementById('select-vwap');
-                if (sel) sel.value = String(vwapReset);
-            }
-
-            // Persistir VWAP al cambiar
-            document.getElementById('select-vwap').addEventListener('change', function() {
-                guardarConfigServidor('vwapReset', parseInt(this.value));
-                cambiarVwap();
-            });
-
-            cambiarTemporalidad('1m');
         })();
 
     </script>
