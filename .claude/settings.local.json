@@ -14,7 +14,10 @@
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/)",
       "Bash(curl *)",
       "PowerShell(Get-Process *)",
-      "Bash(node server.js)"
+      "Bash(node server.js)",
+      "Bash(taskkill /F /IM node.exe)",
+      "Bash(exit 0)",
+      "PowerShell(Stop-Process *)"
     ]
   }
 }

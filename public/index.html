@@ -45,6 +45,22 @@
         #main-content { display: flex; flex: 1; min-height: 0; }
         #chart-container { flex-grow: 1; position: relative; overflow: hidden; background-color: #f0f2f5; }
 
+        #rsi-15m-display {
+            position: absolute;
+            top: 65px;
+            left: 10px;
+            z-index: 100;
+            background: rgba(255,255,255,0.88);
+            border: 1px solid #d1d4dc;
+            border-radius: 5px;
+            padding: 5px 10px;
+            font-size: 13px;
+            font-family: monospace;
+            font-weight: bold;
+            pointer-events: none;
+            display: none;
+        }
+
         #orderbook-container {
             width: 320px; min-width: 320px; flex-shrink: 0; background-color: #ffffff; border-left: 1px solid #d1d4dc; display: flex; flex-direction: column; font-size: 13px; overflow-y: auto;
             transition: all 0.2s ease-in-out;
@@ -182,7 +198,9 @@
     </div>
     
     <div id="main-content">
-        <div id="chart-container"></div>
+        <div id="chart-container">
+            <div id="rsi-15m-display">RSI 15m: —</div>
+        </div>
         <div id="orderbook-container">
             <div class="ob-titulo">TOP 3 MUROS (INTENCIÓN)</div>
             <div class="ob-subtitulo">Rango: <input type="number" id="input-rango" class="input-rango" value="2" min="1" max="10">% | Agrupado: $50</div>
@@ -667,6 +685,7 @@
             document.getElementById(`btn-${t}`).classList.add('btn-activo');
             temporalidadActual = t;
             cargarDatos(t);
+            actualizarDisplayRSI15m();
         }
 
         function restaurarDibujos(tf) {
@@ -940,6 +959,79 @@
         // ============================================================
         // ARRANQUE: verificar sesión → cargar config → iniciar terminal
         // ============================================================
+        // ============================================================
+        // RSI 15 MINUTOS (valor en pantalla, sin graficar)
+        // ============================================================
+        let velas15m = [];
+        let socket15m = null;
+
+        function calcularRSI14(cierres) {
+            const periodo = 14;
+            if (cierres.length < periodo + 1) return null;
+            // Wilder smoothing
+            const ultimos = cierres.slice(-(periodo * 3 + 1));
+            let gainSum = 0, lossSum = 0;
+            for (let i = 1; i <= periodo; i++) {
+                const d = ultimos[i] - ultimos[i - 1];
+                if (d >= 0) gainSum += d; else lossSum -= d;
+            }
+            let avgGain = gainSum / periodo;
+            let avgLoss = lossSum / periodo;
+            for (let i = periodo + 1; i < ultimos.length; i++) {
+                const d = ultimos[i] - ultimos[i - 1];
+                avgGain = (avgGain * (periodo - 1) + (d > 0 ? d : 0)) / periodo;
+                avgLoss = (avgLoss * (periodo - 1) + (d < 0 ? -d : 0)) / periodo;
+            }
+            if (avgLoss === 0) return 100;
+            return 100 - (100 / (1 + avgGain / avgLoss));
+        }
+
+        function actualizarDisplayRSI15m() {
+            const el = document.getElementById('rsi-15m-display');
+            if (!el) return;
+            const mostrar = (temporalidadActual === '1m' || temporalidadActual === '5m');
+            if (!mostrar) { el.style.display = 'none'; return; }
+
+            if (velas15m.length < 15) { el.style.display = 'block'; el.style.color = '#64748b'; el.textContent = 'RSI 15m: …'; return; }
+
+            const cierres = velas15m.map(v => v.close);
+            const rsi = calcularRSI14(cierres);
+            if (rsi === null) { el.style.display = 'block'; el.style.color = '#64748b'; el.textContent = 'RSI 15m: —'; return; }
+
+            let color;
+            if (rsi < 40) color = '#ef5350';
+            else if (rsi > 60) color = '#26a69a';
+            else color = '#94a3b8';
+
+            el.style.display = 'block';
+            el.style.color = color;
+            el.textContent = `RSI 15m: ${rsi.toFixed(2)}`;
+        }
+
+        async function cargarVelas15m() {
+            try {
+                const resp = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=100');
+                const datos = await resp.json();
+                velas15m = datos.map(v => ({ timestamp: v[0], close: parseFloat(v[4]) }));
+                actualizarDisplayRSI15m();
+            } catch (e) { console.error('Error cargando velas 15m:', e); }
+        }
+
+        function iniciarSocket15m() {
+            if (socket15m && socket15m.readyState <= 1) socket15m.close();
+            socket15m = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_15m');
+            socket15m.onmessage = function(e) {
+                const k = JSON.parse(e.data).k;
+                const ts = k.t, close = parseFloat(k.c);
+                const ultima = velas15m.length > 0 ? velas15m[velas15m.length - 1] : null;
+                if (ultima && ultima.timestamp === ts) ultima.close = close;
+                else velas15m.push({ timestamp: ts, close });
+                actualizarDisplayRSI15m();
+            };
+            socket15m.onclose = () => setTimeout(iniciarSocket15m, 5000);
+            socket15m.onerror = (e) => console.error('Error socket 15m RSI:', e);
+        }
+
         (async function arrancar() {
             await verificarSesion();
             await cargarConfigServidor();
@@ -1014,6 +1106,10 @@
                 if (vwapReset) document.getElementById('select-vwap').value = String(vwapReset);
                 cambiarTemporalidad('1m');
             }
+
+            // RSI 15m: carga inicial + websocket
+            await cargarVelas15m();
+            iniciarSocket15m();
         })();
 
     </script>
