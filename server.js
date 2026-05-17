@@ -446,6 +446,29 @@ app.post('/api/filtro-bd', autenticar, async (req, res) => {
 });
 
 
+app.get('/api/whale-histogram', autenticar, async (req, res) => {
+    const horas   = Math.min(Math.max(parseInt(req.query.horas)  || 8,  1), 168);
+    const bucket  = [50, 100, 200].includes(parseInt(req.query.bucket)) ? parseInt(req.query.bucket) : 100;
+    try {
+        const result = await pool.query(`
+            SELECT
+                (FLOOR(precio::numeric / $2) * $2)::bigint AS nivel,
+                ROUND(SUM(CASE WHEN es_venta = false THEN cantidad ELSE 0 END)::numeric, 2) AS compras,
+                ROUND(SUM(CASE WHEN es_venta = true  THEN cantidad ELSE 0 END)::numeric, 2) AS ventas
+            FROM ballenas
+            WHERE fecha >= NOW() - make_interval(hours => $1)
+            GROUP BY nivel
+            HAVING SUM(cantidad) > 0
+            ORDER BY nivel DESC
+        `, [horas, bucket]);
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error whale-histogram:', error);
+        res.status(500).json({ error: 'Error interno' });
+    }
+});
+
+
 // ============================================================
 // RUTAS DE PÁGINAS (deben ir ANTES de express.static para que
 // tomen prioridad sobre el auto-index de index.html en "/")

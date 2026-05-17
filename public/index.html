@@ -50,21 +50,19 @@
             transition: all 0.2s ease-in-out;
         }
         
-        .ob-titulo { text-align: center; padding: 12px 10px 5px; font-weight: bold; font-size: 15px; background-color: #ffffff; color: #1e1e1e;}
-        .ob-subtitulo { text-align: center; font-size: 11px; color: #64748b; padding-bottom: 10px; border-bottom: 1px solid #d1d4dc; background-color: #ffffff; display: flex; justify-content: center; align-items: center; gap: 5px;}
-        
         .input-rango { background-color: #ffffff; color: #1e1e1e; border: 1px solid #d1d4dc; border-radius: 4px; width: 45px; text-align: center; font-weight: bold; font-size: 11px; padding: 2px; outline: none; }
-        
-        .seccion-panel { padding: 10px; border-bottom: 1px solid #d1d4dc; }
-        .titulo-rojo { color: #ef5350; font-weight: bold; margin-bottom: 8px; text-align: center; }
-        .titulo-verde { color: #26a69a; font-weight: bold; margin-bottom: 8px; text-align: center; }
-        
-        .muro-item { display: flex; justify-content: space-between; background-color: #f8f9fa; border: 1px solid #e2e8f0; padding: 6px 10px; margin-bottom: 4px; border-radius: 4px; font-family: monospace; align-items: center; }
-        .muro-precio { font-weight: bold; font-size: 13px; }
-        .muro-volumen { color: #64748b; font-size: 13px; }
 
-        @keyframes destello { 0% { background-color: rgba(41, 98, 255, 0.2); } 100% { background-color: #f8f9fa; } }
-        .flash-trade { animation: destello 1s ease-out; }
+        .btn-histo { background: #f0f2f5; color: #1e1e1e; border: 1px solid #d1d4dc; padding: 3px 7px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold; }
+        .btn-histo:hover { background: #e2e8f0; }
+        .btn-histo.btn-activo { background: #2962FF; color: white; border-color: #2962FF; }
+
+        .hist-row { display: flex; align-items: center; height: 20px; padding: 0 4px; border-bottom: 1px solid #f0f2f5; }
+        .hist-row.current-price { background: rgba(41,98,255,0.08); border-top: 1px solid rgba(41,98,255,0.35); border-bottom: 1px solid rgba(41,98,255,0.35); }
+        .hist-col-buy  { flex: 1; display: flex; justify-content: flex-end; align-items: center; overflow: hidden; }
+        .hist-bar-buy  { height: 12px; background: rgba(38,166,154,0.85); border-radius: 2px 0 0 2px; min-width: 1px; flex-shrink: 0; }
+        .hist-price-label { width: 70px; text-align: center; flex-shrink: 0; color: #374151; font-size: 10px; font-family: monospace; }
+        .hist-col-sell { flex: 1; display: flex; justify-content: flex-start; align-items: center; overflow: hidden; }
+        .hist-bar-sell { height: 12px; background: rgba(239,83,80,0.85); border-radius: 0 2px 2px 0; min-width: 1px; flex-shrink: 0; }
     </style>
 </head>
 <body>
@@ -184,28 +182,25 @@
     <div id="main-content">
         <div id="chart-container"></div>
         <div id="orderbook-container">
-            <div class="ob-titulo">TOP 3 MUROS (INTENCIÓN)</div>
-            <div class="ob-subtitulo">Rango: <input type="number" id="input-rango" class="input-rango" value="2" min="1" max="10">% | Agrupado: $50</div>
-            
-            <div class="seccion-panel">
-                <div class="titulo-rojo">RESISTENCIAS (Ventas)</div>
-                <div id="top-ventas">Cargando radar...</div>
-            </div>
-            
-            <div class="seccion-panel">
-                <div class="titulo-verde">SOPORTES (Compras)</div>
-                <div id="top-compras">Cargando radar...</div>
-            </div>
-
-            <div class="seccion-panel" style="border-bottom: none;">
-                <div class="ob-titulo" style="padding-top: 5px;">CINTA EN VIVO (ACCIÓN)</div>
-                
-                <div class="ob-subtitulo" style="flex-direction: column; gap: 8px;">
-                    <div>Ver en Cinta: > <input type="number" id="filtro-cinta" class="input-rango" value="1" min="0.1" step="0.5"> BTC</div>
-                    <div>Guardar BD: > <input type="number" id="filtro-bd" class="input-rango" value="1" min="0.1" step="0.5" title="Actualiza el servidor"> BTC</div>
+            <div style="padding: 8px 10px; border-bottom: 1px solid #d1d4dc; background: #ffffff; flex-shrink: 0;">
+                <div style="font-weight: bold; font-size: 13px; text-align: center; margin-bottom: 8px; color: #1e1e1e;">WHALE ACTIVITY</div>
+                <div style="display: flex; gap: 3px; justify-content: center; margin-bottom: 6px; flex-wrap: wrap;">
+                    <button class="btn-histo btn-activo" data-h="4"   onclick="setHistoHoras(4)">4H</button>
+                    <button class="btn-histo"            data-h="8"   onclick="setHistoHoras(8)">8H</button>
+                    <button class="btn-histo"            data-h="24"  onclick="setHistoHoras(24)">24H</button>
+                    <span style="border-left: 1px solid #d1d4dc; margin: 0 3px;"></span>
+                    <button class="btn-histo"            data-b="50"  onclick="setHistoBucket(50)">$50</button>
+                    <button class="btn-histo btn-activo" data-b="100" onclick="setHistoBucket(100)">$100</button>
+                    <button class="btn-histo"            data-b="200" onclick="setHistoBucket(200)">$200</button>
                 </div>
-
-                <div id="whale-tape">Esperando órdenes gigantes...</div>
+                <div style="display: flex; justify-content: center; align-items: center; gap: 6px; font-size: 11px; color: #64748b;">
+                    Guardar BD: &gt;
+                    <input type="number" id="filtro-bd" class="input-rango" value="1" min="0.1" step="0.5" title="Mínimo BTC para guardar en BD">
+                    BTC
+                </div>
+            </div>
+            <div id="histo-container" style="flex: 1; overflow-y: auto; background: #ffffff;">
+                <div style="text-align:center;color:#94a3b8;padding:20px;font-size:12px;">Cargando histograma...</div>
             </div>
         </div>
     </div>
@@ -273,21 +268,15 @@
 
         // --- MEMORIA (servidor por usuario) ---
         const inputFiltroGrafico = document.getElementById('filtro-grafico');
-        const inputFiltroCinta = document.getElementById('filtro-cinta');
 
         function aplicarConfigInicial() {
             const fg = cfgGet('filtroGrafico', null);
-            const fc = cfgGet('filtroCinta', null);
             if (fg !== null) inputFiltroGrafico.value = fg;
-            if (fc !== null) inputFiltroCinta.value = fc;
         }
 
         inputFiltroGrafico.addEventListener('change', function() {
             guardarConfigServidor('filtroGrafico', parseFloat(this.value));
             dibujarMarcadores();
-        });
-        inputFiltroCinta.addEventListener('change', function() {
-            guardarConfigServidor('filtroCinta', parseFloat(this.value));
         });
 
         // --- PANEL ---
@@ -561,15 +550,12 @@
         let memoriaOIBD = [];
 
         // --- INDICADOR DE ESTADO DE CONEXIONES ---
-        const _estados = { kline: false, tape: false, depth: false };
         function actualizarEstadoConexion(tipo, ok) {
-            _estados[tipo] = ok;
-            const todoOK = _estados.kline && _estados.tape && _estados.depth;
-            const alguno  = _estados.kline || _estados.tape || _estados.depth;
+            if (tipo !== 'kline') return;
             const dot = document.getElementById('status-dot');
             if (!dot) return;
-            dot.style.backgroundColor = todoOK ? '#26a69a' : alguno ? '#ff9800' : '#ef5350';
-            dot.title = `Kline: ${_estados.kline?'✓':'✗'} | Cinta: ${_estados.tape?'✓':'✗'} | Orderbook: ${_estados.depth?'✓':'✗'}`;
+            dot.style.backgroundColor = ok ? '#26a69a' : '#ef5350';
+            dot.title = `Kline: ${ok ? '✓' : '✗'}`;
         }
 
         // --- BÚSQUEDA BINARIA O(log n) ---
@@ -683,9 +669,9 @@
 
         // --- BALLENAS (OVERLAYS AGRUPADOS) ---
         function pedirHistorialBallenas() {
-            fetch('/api/ballenas')
+            fetch('/api/ballenas', { credentials: 'same-origin' })
                 .then(r => r.json())
-                .then(datos => { memoriaBallenasBD = datos; dibujarMarcadores(); })
+                .then(datos => { memoriaBallenasBD = datos; dibujarMarcadores(); cargarHistograma(); })
                 .catch(err => console.error("Error al pedir historial ballenas:", err));
         }
 
@@ -752,67 +738,78 @@
 
         setTimeout(() => { actualizarOpenInterestEnVivo(); setInterval(actualizarOpenInterestEnVivo, 3000); }, 3000);
 
-        // --- ORDERBOOK CON RESINCRONIZACIÓN EN DESCONEXIÓN ---
-        let orderBookLocal = { asks: {}, bids: {} };
-        const TAMAÑO_GRUPO = 50;
-        let depthSocket = null;
+        // --- WHALE ACTIVITY HISTOGRAM ---
+        let histoHoras   = 4;
+        let histoBucket  = 100;
+        let histoCentrado = false;
 
-        function iniciarOrderbook() {
-            fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000')
-                .then(r => r.json())
-                .then(datos => {
-                    orderBookLocal = { asks: {}, bids: {} };
-                    datos.asks.forEach(a => orderBookLocal.asks[parseFloat(a[0])] = parseFloat(a[1]));
-                    datos.bids.forEach(b => orderBookLocal.bids[parseFloat(b[0])] = parseFloat(b[1]));
-                    iniciarDepthSocket();
-                })
-                .catch(err => { console.error('Error snapshot orderbook:', err); setTimeout(iniciarOrderbook, 5000); });
+        function setHistoHoras(h) {
+            histoHoras = h;
+            document.querySelectorAll('[data-h]').forEach(b => b.classList.toggle('btn-activo', parseInt(b.dataset.h) === h));
+            histoCentrado = false;
+            cargarHistograma();
         }
 
-        function iniciarDepthSocket() {
-            if (depthSocket && depthSocket.readyState <= 1) depthSocket.close();
-            depthSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@depth@1000ms');
-            depthSocket.onopen  = () => actualizarEstadoConexion('depth', true);
-            depthSocket.onerror = (e) => console.error('Error depth socket:', e);
-            depthSocket.onclose = () => {
-                actualizarEstadoConexion('depth', false);
-                console.warn('Depth socket cerrado. Resincronizando en 3s...');
-                setTimeout(iniciarOrderbook, 3000); // snapshot completo al reconectar
-            };
-            depthSocket.onmessage = function(e) {
-                const cambios = JSON.parse(e.data);
-                cambios.a.forEach(ask => { const p=parseFloat(ask[0]),q=parseFloat(ask[1]); if(q===0) delete orderBookLocal.asks[p]; else orderBookLocal.asks[p]=q; });
-                cambios.b.forEach(bid => { const p=parseFloat(bid[0]),q=parseFloat(bid[1]); if(q===0) delete orderBookLocal.bids[p]; else orderBookLocal.bids[p]=q; });
-            };
+        function setHistoBucket(b) {
+            histoBucket = b;
+            document.querySelectorAll('[data-b]').forEach(btn => btn.classList.toggle('btn-activo', parseInt(btn.dataset.b) === b));
+            histoCentrado = false;
+            cargarHistograma();
         }
 
-        iniciarOrderbook();
-
-        function agruparDiccionario(dic) {
-            const ag = {};
-            for (const pStr in dic) {
-                const p = parseFloat(pStr), pa = Math.floor(p/TAMAÑO_GRUPO)*TAMAÑO_GRUPO;
-                ag[pa] = (ag[pa] || 0) + dic[pStr];
+        async function cargarHistograma() {
+            try {
+                const res = await fetch(`/api/whale-histogram?horas=${histoHoras}&bucket=${histoBucket}`, { credentials: 'same-origin' });
+                if (!res.ok) return;
+                renderizarHistograma(await res.json());
+            } catch (e) {
+                console.error('Error cargando histograma:', e);
             }
-            return Object.keys(ag).map(p => [parseFloat(p), ag[p]]);
         }
 
-        function dibujarMuros() {
-            const pV = Object.keys(orderBookLocal.asks).map(parseFloat).sort((a,b)=>a-b);
-            const pC = Object.keys(orderBookLocal.bids).map(parseFloat).sort((a,b)=>b-a);
-            if (pV.length===0 || pC.length===0) return;
-            const mid = (pV[0]+pC[0])/2;
-            let rng = parseFloat(document.getElementById('input-rango').value);
-            if (isNaN(rng)||rng<=0) rng=2;
-            const fA=1+(rng/100), fB=1-(rng/100);
-            const vA = agruparDiccionario(orderBookLocal.asks).filter(v=>v[0]<=mid*fA).sort((a,b)=>b[1]-a[1]);
-            const cA = agruparDiccionario(orderBookLocal.bids).filter(c=>c[0]>=mid*fB).sort((a,b)=>b[1]-a[1]);
-            document.getElementById('top-ventas').innerHTML = vA.slice(0,3).map(v=>`<div class="muro-item"><span class="muro-precio" style="color:#ef5350;">$${v[0].toFixed(2)}</span> <span class="muro-volumen">${v[1].toFixed(2)} BTC</span></div>`).join('');
-            document.getElementById('top-compras').innerHTML = cA.slice(0,3).map(c=>`<div class="muro-item"><span class="muro-precio" style="color:#26a69a;">$${c[0].toFixed(2)}</span> <span class="muro-volumen">${c[1].toFixed(2)} BTC</span></div>`).join('');
-        }
+        function renderizarHistograma(datos) {
+            const contenedor = document.getElementById('histo-container');
+            if (!contenedor) return;
 
-        setInterval(dibujarMuros, 2000);
-        document.getElementById('input-rango').addEventListener('change', dibujarMuros);
+            if (!datos || datos.length === 0) {
+                contenedor.innerHTML = '<div style="text-align:center;color:#94a3b8;padding:20px;font-size:12px;">Sin actividad de ballenas en este período</div>';
+                return;
+            }
+
+            const precioActual = velasActuales.length > 0 ? velasActuales[velasActuales.length - 1].close : null;
+
+            let maxVol = 0;
+            datos.forEach(d => { maxVol = Math.max(maxVol, parseFloat(d.compras || 0), parseFloat(d.ventas || 0)); });
+            if (maxVol === 0) maxVol = 1;
+
+            let closestIdx = -1, closestDist = Infinity;
+            if (precioActual !== null) {
+                datos.forEach((d, i) => {
+                    const dist = Math.abs(parseInt(d.nivel) - precioActual);
+                    if (dist < closestDist) { closestDist = dist; closestIdx = i; }
+                });
+            }
+
+            contenedor.innerHTML = datos.map((d, i) => {
+                const nivel   = parseInt(d.nivel);
+                const compras = parseFloat(d.compras || 0);
+                const ventas  = parseFloat(d.ventas  || 0);
+                const buyPct  = (compras / maxVol * 100).toFixed(1);
+                const sellPct = (ventas  / maxVol * 100).toFixed(1);
+                const delta   = compras - ventas;
+                const esCurrent = i === closestIdx;
+                return `<div class="hist-row${esCurrent ? ' current-price' : ''}" title="C: ${compras.toFixed(2)} BTC | V: ${ventas.toFixed(2)} BTC | Δ: ${delta >= 0 ? '+' : ''}${delta.toFixed(2)} BTC">
+                    <div class="hist-col-buy"><div class="hist-bar-buy" style="width:${buyPct}%"></div></div>
+                    <div class="hist-price-label">$${nivel.toLocaleString('en-US')}</div>
+                    <div class="hist-col-sell"><div class="hist-bar-sell" style="width:${sellPct}%"></div></div>
+                </div>`;
+            }).join('');
+
+            if (!histoCentrado && closestIdx >= 0) {
+                const rows = contenedor.querySelectorAll('.hist-row');
+                if (rows[closestIdx]) { rows[closestIdx].scrollIntoView({ block: 'center' }); histoCentrado = true; }
+            }
+        }
 
         // --- FILTRO BD con reversión si el servidor rechaza ---
         fetch('/api/filtro-bd')
@@ -833,30 +830,6 @@
                 .catch(err => { console.log('Error actualizando filtro BD:', err); el.value = anterior; });
         });
 
-        // --- CINTA EN VIVO CON RECONEXIÓN ---
-        let ultimosTrades = [], tapeSocket = null;
-
-        function iniciarTapeSocket() {
-            if (tapeSocket && tapeSocket.readyState <= 1) tapeSocket.close();
-            tapeSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
-            tapeSocket.onopen  = () => actualizarEstadoConexion('tape', true);
-            tapeSocket.onerror = (e) => console.error('Error tape socket:', e);
-            tapeSocket.onclose = () => { actualizarEstadoConexion('tape', false); console.warn('Tape socket cerrado. Reconectando en 3s...'); setTimeout(iniciarTapeSocket, 3000); };
-            tapeSocket.onmessage = function(evento) {
-                const data = JSON.parse(evento.data);
-                const cantidad = parseFloat(data.q), precio = parseFloat(data.p);
-                const limite = parseFloat(inputFiltroCinta.value) || 1.0;
-                if (cantidad >= limite) {
-                    ultimosTrades.unshift({ precio, cantidad, esVenta: data.m });
-                    if (ultimosTrades.length > 5) ultimosTrades.pop();
-                    document.getElementById('whale-tape').innerHTML = ultimosTrades.map((t,i) =>
-                        `<div class="muro-item ${i===0?'flash-trade':''}"><span class="muro-precio" style="color:${t.esVenta?'#ef5350':'#26a69a'};">$${t.precio.toFixed(2)}</span><span class="muro-volumen">${t.cantidad.toFixed(2)} BTC</span></div>`
-                    ).join('');
-                }
-            };
-        }
-
-        iniciarTapeSocket();
 
         // ============================================================
         // USER MENU & CAMBIAR PASSWORD
@@ -911,8 +884,8 @@
 
             const config = {
                 filtroGrafico:  parseFloat(inputFiltroGrafico.value),
-                filtroCinta:    parseFloat(inputFiltroCinta.value),
-                filtroObRango:  parseFloat(document.getElementById('input-rango').value),
+                histoHoras,
+                histoBucket,
                 temporalidad:   temporalidadActual,
                 panelVisible:   document.getElementById('orderbook-container').style.display !== 'none',
                 ballenasVisibles,
@@ -951,8 +924,8 @@
             if (cfg) {
                 // Filtros
                 if (cfg.filtroGrafico != null) inputFiltroGrafico.value = cfg.filtroGrafico;
-                if (cfg.filtroCinta   != null) inputFiltroCinta.value   = cfg.filtroCinta;
-                if (cfg.filtroObRango != null) document.getElementById('input-rango').value = cfg.filtroObRango;
+                if (cfg.histoHoras    != null) { histoHoras = cfg.histoHoras; document.querySelectorAll('[data-h]').forEach(b => b.classList.toggle('btn-activo', parseInt(b.dataset.h) === histoHoras)); }
+                if (cfg.histoBucket   != null) { histoBucket = cfg.histoBucket; document.querySelectorAll('[data-b]').forEach(b => b.classList.toggle('btn-activo', parseInt(b.dataset.b) === histoBucket)); }
 
                 // EMAs
                 if (cfg.configMA) { Object.assign(configMA, cfg.configMA); initMAUI(); }
