@@ -16,7 +16,10 @@
       "PowerShell(Get-Process *)",
       "Bash(node server.js)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\marti\\\\Desktop\\\\proyectos\\\\trading\" -Recurse -Force)",
-      "Bash(Select-Object -Property FullName, PSIsContainer)"
+      "Bash(Select-Object -Property FullName, PSIsContainer)",
+      "Bash(taskkill /F /IM node.exe)",
+      "Bash(exit 0)",
+      "PowerShell(Stop-Process *)"
     ]
   }
 }

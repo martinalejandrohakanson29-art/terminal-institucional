@@ -389,9 +389,7 @@ app.get('/api/ballenas', autenticar, async (req, res) => {
         const query = `
             SELECT precio, cantidad, es_venta, EXTRACT(EPOCH FROM fecha) as tiempo_segundos
             FROM ballenas
-            WHERE fecha >= NOW() - INTERVAL '7 days'
             ORDER BY fecha DESC
-            LIMIT 5000
         `;
         const resultado = await pool.query(query);
         res.json(resultado.rows);
