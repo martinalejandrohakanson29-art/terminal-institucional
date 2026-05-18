@@ -19,7 +19,9 @@
       "Bash(Select-Object -Property FullName, PSIsContainer)",
       "Bash(taskkill /F /IM node.exe)",
       "Bash(exit 0)",
-      "PowerShell(Stop-Process *)"
+      "PowerShell(Stop-Process *)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\User\\\\Desktop\\\\claude\\\\terminal\" -Recurse -Exclude \"node_modules\", \".git\" | Where-Object { $_.Extension -in @\\(\".js\", \".html\", \".css\", \".json\", \".py\", \".md\", \".txt\"\\) } | Select-Object FullName | Sort-Object FullName)",
+      "Bash(node -e ' *3)"
     ]
   }
 }

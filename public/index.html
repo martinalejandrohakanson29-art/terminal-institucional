@@ -252,14 +252,13 @@
         }
 
         async function guardarConfigServidor(clave, valor) {
-            try {
-                await fetch('/api/config', {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'same-origin',
-                    body: JSON.stringify({ clave, valor })
-                });
-            } catch { }
+            const res = await fetch('/api/config', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ clave, valor })
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
         }
 
         function cfgGet(clave, defecto) {
@@ -293,7 +292,7 @@
         }
 
         inputFiltroGrafico.addEventListener('change', function() {
-            guardarConfigServidor('filtroGrafico', parseFloat(this.value));
+            guardarConfigServidor('filtroGrafico', parseFloat(this.value)).catch(() => {});
             dibujarMarcadores();
         });
 
@@ -536,7 +535,7 @@
             configMA.p1 = parseInt(document.getElementById('ma1-period').value); configMA.c1 = document.getElementById('ma1-color').value; configMA.e1 = document.getElementById('ma1-enabled').checked;
             configMA.p2 = parseInt(document.getElementById('ma2-period').value); configMA.c2 = document.getElementById('ma2-color').value; configMA.e2 = document.getElementById('ma2-enabled').checked;
             configMA.p3 = parseInt(document.getElementById('ma3-period').value); configMA.c3 = document.getElementById('ma3-color').value; configMA.e3 = document.getElementById('ma3-enabled').checked;
-            guardarConfigServidor('configMA', configMA);
+            guardarConfigServidor('configMA', configMA).catch(() => {});
             if (maVisible) {
                 const params = [], linesStyles = [];
                 if (configMA.e1) { params.push(configMA.p1); linesStyles.push({ color: configMA.c1 }); }
@@ -562,6 +561,8 @@
 
         // --- VARIABLES GLOBALES DE DATOS ---
         let binanceSocket = null;
+        let binanceSocketIntencional = false;
+        const DURACION_INTERVALO = { '1m': 60000, '5m': 300000, '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 };
         let tiemposVelasActivas = [];
         let velasActuales = [];       // fuente de verdad local de las velas
         let memoriaBallenasBD = [];
@@ -606,25 +607,32 @@
         // --- CARGA DE VELAS ---
         async function cargarDatos(temporalidad) {
             if (binanceSocket !== null) {
+                binanceSocketIntencional = true;
                 if (binanceSocket.readyState === 0) binanceSocket.onopen = () => binanceSocket.close();
                 else binanceSocket.close();
             }
 
             try {
-                let allVelas = [], ultimoTimestamp = null;
                 const limitePorPedido = 1000, totalPedidos = 10;
                 console.log(`🚀 Cargando ${totalPedidos * limitePorPedido} velas para ${temporalidad}...`);
 
-                for (let i = 0; i < totalPedidos; i++) {
+                const duracionMs  = DURACION_INTERVALO[temporalidad] || 60000;
+                const tamañoBloque = limitePorPedido * duracionMs;
+                const ahora = Date.now();
+
+                const pedidos = Array.from({ length: totalPedidos }, (_, i) => {
                     let url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=${limitePorPedido}`;
-                    if (ultimoTimestamp) url += `&endTime=${ultimoTimestamp - 1}`;
-                    const resp = await fetch(url);
-                    const datos = await resp.json();
-                    if (!datos || datos.length === 0) break;
-                    allVelas = [...datos, ...allVelas];
-                    ultimoTimestamp = datos[0][0];
-                    if (datos.length < limitePorPedido) break;
-                }
+                    if (i > 0) url += `&endTime=${ahora - i * tamañoBloque}`;
+                    return fetch(url).then(r => r.json()).catch(() => []);
+                });
+
+                const resultados = await Promise.all(pedidos);
+                const seen = new Set();
+                const allVelas = [];
+                resultados.flat().forEach(v => {
+                    if (Array.isArray(v) && !seen.has(v[0])) { seen.add(v[0]); allVelas.push(v); }
+                });
+                allVelas.sort((a, b) => a[0] - b[0]);
 
                 velasActuales = [];
                 tiemposVelasActivas = [];
@@ -650,16 +658,28 @@
                 binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
                 binanceSocket.onopen  = () => actualizarEstadoConexion('kline', true);
                 binanceSocket.onerror = (e) => console.error('Error kline socket:', e);
-                binanceSocket.onclose = () => { actualizarEstadoConexion('kline', false); console.warn('Kline socket cerrado.'); };
+                binanceSocket.onclose = () => {
+                    actualizarEstadoConexion('kline', false);
+                    if (!binanceSocketIntencional) {
+                        console.warn('Kline socket cerrado inesperadamente. Reconectando en 5s...');
+                        setTimeout(() => cargarDatos(temporalidadActual), 5000);
+                    }
+                    binanceSocketIntencional = false;
+                };
                 binanceSocket.onmessage = function(e) {
-                    const k = JSON.parse(e.data).k;
-                    const ts = k.t, vol = parseFloat(k.v), c = parseFloat(k.V), vt = vol - c;
-                    const ultima = velasActuales.length > 0 ? velasActuales[velasActuales.length - 1] : null;
-                    const oiActual = (ultima && ultima.timestamp === ts) ? ultima.oi : null;
-                    const kActualizada = { timestamp: ts, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: vol, delta: c - vt, compras: c, ventas: vt, oi: oiActual };
-                    if (ultima && ultima.timestamp === ts) velasActuales[velasActuales.length - 1] = kActualizada;
-                    else { velasActuales.push(kActualizada); tiemposVelasActivas.push(ts); }
-                    chart.updateData(kActualizada);
+                    try {
+                        const k = JSON.parse(e.data).k;
+                        if (!k) return;
+                        const ts = k.t, vol = parseFloat(k.v), c = parseFloat(k.V), vt = vol - c;
+                        const ultima = velasActuales.length > 0 ? velasActuales[velasActuales.length - 1] : null;
+                        const oiActual = (ultima && ultima.timestamp === ts) ? ultima.oi : null;
+                        const kActualizada = { timestamp: ts, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: vol, delta: c - vt, compras: c, ventas: vt, oi: oiActual };
+                        if (ultima && ultima.timestamp === ts) velasActuales[velasActuales.length - 1] = kActualizada;
+                        else { velasActuales.push(kActualizada); tiemposVelasActivas.push(ts); }
+                        chart.updateData(kActualizada);
+                    } catch (err) {
+                        console.error('Error procesando mensaje kline:', err);
+                    }
                 };
             } catch (error) {
                 console.error("Error cargando datos de velas:", error);
@@ -687,10 +707,22 @@
         }
 
         // --- BALLENAS (OVERLAYS AGRUPADOS) ---
+        let ultimoTiempoBallena = -1;
+
         function pedirHistorialBallenas() {
             fetch('/api/ballenas', { credentials: 'same-origin' })
                 .then(r => r.json())
-                .then(datos => { memoriaBallenasBD = datos; dibujarMarcadores(); cargarHistograma(); })
+                .then(datos => {
+                    const nuevoTiempo = datos.length > 0 ? datos[0].tiempo_segundos : -1;
+                    memoriaBallenasBD = datos;
+                    if (nuevoTiempo !== ultimoTiempoBallena) {
+                        ultimoTiempoBallena = nuevoTiempo;
+                        dibujarMarcadores(); // incluye actualizarWhaleDelta
+                    } else {
+                        actualizarWhaleDelta(); // la ventana 24h avanza aunque no haya trades nuevos
+                    }
+                    cargarHistograma();
+                })
                 .catch(err => console.error("Error al pedir historial ballenas:", err));
         }
 
@@ -914,19 +946,27 @@
                 dibujos:        registroDibujos
             };
 
-            await guardarConfigServidor('userConfig', config);
-
-            btn.textContent = '✓ Guardado';
-            btn.style.background = '#26a69a';
-            btn.style.color = 'white';
-            btn.style.borderColor = '#26a69a';
-            setTimeout(() => {
-                btn.textContent = 'Guardar';
-                btn.style.background = '';
-                btn.style.color = '#26a69a';
+            try {
+                await guardarConfigServidor('userConfig', config);
+                btn.textContent = '✓ Guardado';
+                btn.style.background = '#26a69a';
+                btn.style.color = 'white';
                 btn.style.borderColor = '#26a69a';
-                btn.disabled = false;
-            }, 2000);
+            } catch (err) {
+                console.error('Error al guardar configuración:', err);
+                btn.textContent = '✗ Error al guardar';
+                btn.style.background = '#ef5350';
+                btn.style.color = 'white';
+                btn.style.borderColor = '#ef5350';
+            } finally {
+                setTimeout(() => {
+                    btn.textContent = 'Guardar';
+                    btn.style.background = '';
+                    btn.style.color = '#26a69a';
+                    btn.style.borderColor = '#26a69a';
+                    btn.disabled = false;
+                }, 2000);
+            }
         }
 
         // ============================================================
