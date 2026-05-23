@@ -125,6 +125,7 @@
                     <button id="btn-vwap" class="btn-dibujo btn-activo" onclick="toggleIndicator('VWAP')" title="Mostrar/Ocultar VWAP" style="width: auto; padding: 0 6px; font-size: 11px;">VWAP</button>
                     <button id="btn-delta" class="btn-dibujo btn-activo" onclick="toggleIndicator('DELTA')" title="Mostrar/Ocultar Delta" style="width: auto; padding: 0 6px; font-size: 11px;">DELTA</button>
                     <button id="btn-oi" class="btn-dibujo btn-activo" onclick="toggleIndicator('OI')" title="Mostrar/Ocultar Open Interest" style="width: auto; padding: 0 6px; font-size: 11px;">OI</button>
+                    <button id="btn-macd" class="btn-dibujo btn-activo" onclick="toggleIndicator('MACD')" title="Mostrar/Ocultar MACD 15m" style="width: auto; padding: 0 6px; font-size: 11px;">MACD</button>
                     <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 EMAs" style="width: auto; padding: 0 6px; font-size: 11px;">3EMA</button>
                     <button class="btn-dibujo" onclick="toggleMAConfig()" title="Configurar Medias Móviles">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -332,6 +333,52 @@
         });
 
         klinecharts.registerIndicator({
+            name: 'MACD_CUSTOM',
+            shortName: 'MACD 15m',
+            figures: [
+                { key: 'histograma', title: 'Hist: ', type: 'bar', baseValue: 0,
+                  styles: ({ indicatorData }) => ({
+                      color: (indicatorData && indicatorData.histograma !== undefined && indicatorData.histograma >= 0)
+                          ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)'
+                  })
+                },
+                { key: 'macd',   title: 'MACD: ',  type: 'line', styles: () => ({ color: '#2196f3', size: 1 }) },
+                { key: 'signal', title: 'Señal: ', type: 'line', styles: () => ({ color: '#ff9800', size: 1 }) }
+            ],
+            calc: (dataList) => {
+                const MS_15M = 900000;
+                const macdMap = new Map();
+
+                if (velas15m.length >= 35) {
+                    const k12 = 2 / 13, k26 = 2 / 27, k9 = 2 / 10;
+                    const cierres = velas15m.map(v => v.close);
+                    let ema12 = cierres.slice(0, 12).reduce((s, c) => s + c, 0) / 12;
+                    let ema26 = cierres.slice(0, 26).reduce((s, c) => s + c, 0) / 26;
+                    for (let i = 12; i < 26; i++) ema12 = cierres[i] * k12 + ema12 * (1 - k12);
+                    const macdLine = [];
+                    for (let i = 26; i < cierres.length; i++) {
+                        ema12 = cierres[i] * k12 + ema12 * (1 - k12);
+                        ema26 = cierres[i] * k26 + ema26 * (1 - k26);
+                        macdLine.push({ ts: velas15m[i].timestamp, v: ema12 - ema26 });
+                    }
+                    if (macdLine.length >= 9) {
+                        let signalEma = macdLine.slice(0, 9).reduce((s, d) => s + d.v, 0) / 9;
+                        for (let j = 9; j < macdLine.length; j++) {
+                            const { ts, v: macd } = macdLine[j];
+                            signalEma = macd * k9 + signalEma * (1 - k9);
+                            macdMap.set(ts, { macd, signal: signalEma, histograma: macd - signalEma });
+                        }
+                    }
+                }
+
+                return dataList.map(k => {
+                    const t15m = Math.floor(k.timestamp / MS_15M) * MS_15M;
+                    return macdMap.get(t15m) || {};
+                });
+            }
+        });
+
+        klinecharts.registerIndicator({
             name: 'VWAP_CUSTOM',
             shortName: 'VWAP',
             calcParams: [60],
@@ -435,6 +482,7 @@
 
         chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 });
         chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 });
+        chart.createIndicator('MACD_CUSTOM', false, { id: 'pane_macd', height: 120 });
         chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' });
 
         // --- DIBUJO Y VWAP ---
@@ -488,7 +536,7 @@
         }
 
         // --- TOGGLE INDICADORES ---
-        let vwapVisible = true, deltaVisible = true, oiVisible = true;
+        let vwapVisible = true, deltaVisible = true, oiVisible = true, macdVisible = true;
 
         function toggleIndicator(tipo) {
             if (tipo === 'VWAP') {
@@ -506,6 +554,11 @@
                 const btn = document.getElementById('btn-oi');
                 if (oiVisible) { btn.classList.add('btn-activo'); chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 }); }
                 else { btn.classList.remove('btn-activo'); chart.removeIndicator('pane_oi', 'OPEN_INTEREST'); }
+            } else if (tipo === 'MACD') {
+                macdVisible = !macdVisible;
+                const btn = document.getElementById('btn-macd');
+                if (macdVisible) { btn.classList.add('btn-activo'); chart.createIndicator('MACD_CUSTOM', false, { id: 'pane_macd', height: 120 }); }
+                else { btn.classList.remove('btn-activo'); chart.removeIndicator('pane_macd', 'MACD_CUSTOM'); }
             }
         }
 
@@ -940,7 +993,7 @@
                 temporalidad:   temporalidadActual,
                 panelVisible:   document.getElementById('orderbook-container').style.display !== 'none',
                 ballenasVisibles,
-                vwapVisible, deltaVisible, oiVisible, maVisible,
+                vwapVisible, deltaVisible, oiVisible, maVisible, macdVisible,
                 configMA:       { ...configMA },
                 vwapReset:      parseInt(document.getElementById('select-vwap').value),
                 dibujos:        registroDibujos
@@ -1023,10 +1076,11 @@
 
         async function cargarVelas15m() {
             try {
-                const resp = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=100');
+                const resp = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=1000');
                 const datos = await resp.json();
                 velas15m = datos.map(v => ({ timestamp: v[0], close: parseFloat(v[4]) }));
                 actualizarDisplayRSI15m();
+                if (velasActuales.length > 0) chart.updateData(velasActuales[velasActuales.length - 1]);
             } catch (e) { console.error('Error cargando velas 15m:', e); }
         }
 
@@ -1040,6 +1094,7 @@
                 if (ultima && ultima.timestamp === ts) ultima.close = close;
                 else velas15m.push({ timestamp: ts, close });
                 actualizarDisplayRSI15m();
+                if (velasActuales.length > 0) chart.updateData(velasActuales[velasActuales.length - 1]);
             };
             socket15m.onclose = () => setTimeout(iniciarSocket15m, 5000);
             socket15m.onerror = (e) => console.error('Error socket 15m RSI:', e);
@@ -1094,6 +1149,12 @@
                     document.getElementById('btn-oi').classList.remove('btn-activo');
                     chart.removeIndicator('pane_oi', 'OPEN_INTEREST');
                 }
+                if (cfg.macdVisible === false) {
+                    macdVisible = false;
+                    document.getElementById('btn-macd').classList.remove('btn-activo');
+                    chart.removeIndicator('pane_macd', 'MACD_CUSTOM');
+                }
+
                 if (cfg.maVisible === true) {
                     maVisible = true;
                     document.getElementById('btn-ma').classList.add('btn-activo');
