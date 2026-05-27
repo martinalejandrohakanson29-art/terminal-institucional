@@ -469,6 +469,247 @@ app.get('/api/whale-histogram', autenticar, async (req, res) => {
 
 
 // ============================================================
+// MOTOR DE BACKTEST
+// ============================================================
+
+function calcEMA(values, period) {
+    const k = 2 / (period + 1);
+    const result = new Array(values.length).fill(null);
+    if (values.length < period) return result;
+    result[period - 1] = values.slice(0, period).reduce((s, v) => s + v, 0) / period;
+    for (let i = period; i < values.length; i++) {
+        result[i] = values[i] * k + result[i - 1] * (1 - k);
+    }
+    return result;
+}
+
+function calcRSI14(closes) {
+    const p = 14;
+    const result = new Array(closes.length).fill(null);
+    if (closes.length <= p) return result;
+    let gSum = 0, lSum = 0;
+    for (let i = 1; i <= p; i++) {
+        const d = closes[i] - closes[i - 1];
+        if (d > 0) gSum += d; else lSum -= d;
+    }
+    let avgG = gSum / p, avgL = lSum / p;
+    result[p] = avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL);
+    for (let i = p + 1; i < closes.length; i++) {
+        const d = closes[i] - closes[i - 1];
+        avgG = (avgG * 13 + (d > 0 ? d : 0)) / 14;
+        avgL = (avgL * 13 + (d < 0 ? -d : 0)) / 14;
+        result[i] = avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL);
+    }
+    return result;
+}
+
+function calcMACDArr(closes, fast = 12, slow = 26, signal = 9) {
+    const emaF = calcEMA(closes, fast);
+    const emaS = calcEMA(closes, slow);
+    const macdLine = closes.map((_, i) =>
+        emaF[i] !== null && emaS[i] !== null ? emaF[i] - emaS[i] : null
+    );
+    const signalLine = new Array(closes.length).fill(null);
+    const firstIdx = macdLine.findIndex(v => v !== null);
+    if (firstIdx < 0) return { macd: macdLine, signal: signalLine };
+    const sigEMA = calcEMA(macdLine.slice(firstIdx), signal);
+    sigEMA.forEach((v, i) => { signalLine[firstIdx + i] = v; });
+    return { macd: macdLine, signal: signalLine };
+}
+
+async function fetchKlinesBatch(interval, totalBars) {
+    const perReq = 1000;
+    const dur = { '1m': 60000, '5m': 300000, '15m': 900000 }[interval] || 60000;
+    const n = Math.ceil(totalBars / perReq);
+    const now = Date.now();
+    const reqs = Array.from({ length: n }, (_, i) => {
+        const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${perReq}${i > 0 ? `&endTime=${now - i * perReq * dur}` : ''}`;
+        return fetch(url).then(r => r.json()).catch(() => []);
+    });
+    const results = await Promise.all(reqs);
+    const seen = new Set();
+    const all = [];
+    results.flat().forEach(v => {
+        if (Array.isArray(v) && !seen.has(v[0])) { seen.add(v[0]); all.push(v); }
+    });
+    return all.sort((a, b) => a[0] - b[0]);
+}
+
+function lookupHTF(sortedTs, byTs, target) {
+    let lo = 0, hi = sortedTs.length - 1, found = -1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (sortedTs[mid] <= target) { found = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return found >= 0 ? byTs.get(sortedTs[found]) : null;
+}
+
+function runBacktest(bars1m, bars5m, bars15m, p) {
+    const c1m = bars1m.map(b => parseFloat(b[4]));
+    const e50 = calcEMA(c1m, 50), e100 = calcEMA(c1m, 100),
+          e200 = calcEMA(c1m, 200), e500 = calcEMA(c1m, 500);
+
+    const c15m = bars15m.map(b => parseFloat(b[4]));
+    const rsiArr = calcRSI14(c15m);
+    const rsi15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[0]), rsiArr[i]]));
+    const ts15m = bars15m.map(b => parseInt(b[0])).sort((a, b) => a - b);
+
+    const c5m = bars5m.map(b => parseFloat(b[4]));
+    const { macd: macdArr, signal: sigArr } = calcMACDArr(c5m);
+    const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[0]), { macd: macdArr[i], signal: sigArr[i] }]));
+    const ts5m = bars5m.map(b => parseInt(b[0])).sort((a, b) => a - b);
+
+    let capital = p.initialCapital, position = 0, entryPrice = 0;
+    let entryBarIdx = null, lastClosedBarIdx = null;
+    const trades = [];
+    const equity = [{ ts: parseInt(bars1m[0][0]), v: capital }];
+    const WARMUP = 500;
+
+    for (let i = WARMUP; i < bars1m.length; i++) {
+        const bar = bars1m[i];
+        const ts = parseInt(bar[0]);
+        const high = parseFloat(bar[2]), low = parseFloat(bar[3]), close = parseFloat(bar[4]);
+        const E50 = e50[i], E100 = e100[i], E200 = e200[i], E500 = e500[i];
+        if (!E500) continue;
+
+        const rsiRaw  = lookupHTF(ts15m, rsi15mByTs, ts);
+        const macdRaw = lookupHTF(ts5m, macd5mByTs, ts);
+        if (rsiRaw === null || rsiRaw === undefined || !macdRaw || macdRaw.macd === null || macdRaw.signal === null) continue;
+
+        const rsi15 = rsiRaw;
+        const { macd: macd5, signal: sig5 } = macdRaw;
+
+        // SALIDAS
+        if (position !== 0) {
+            const barsIn  = i - entryBarIdx;
+            const longTP  = entryPrice * (1 + p.tpPerc / 100);
+            const shortTP = entryPrice * (1 - p.tpPerc / 100);
+            const longSL  = entryPrice * (1 - p.slPerc / 100);
+            const shortSL = entryPrice * (1 + p.slPerc / 100);
+            let exitPrice = null, exitReason = null;
+
+            if (position === 1) {
+                if (p.stopType === 'Porcentaje') {
+                    if      (high >= longTP && low <= longSL) { exitPrice = longSL; exitReason = 'SL'; }
+                    else if (high >= longTP)                  { exitPrice = longTP; exitReason = 'TP'; }
+                    else if (low  <= longSL)                  { exitPrice = longSL; exitReason = 'SL'; }
+                } else {
+                    if (high >= longTP) { exitPrice = longTP; exitReason = 'TP'; }
+                    else { const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500; if (close < se) { exitPrice = close; exitReason = 'EMA'; } }
+                }
+                if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
+            } else {
+                if (p.stopType === 'Porcentaje') {
+                    if      (low <= shortTP && high >= shortSL) { exitPrice = shortSL; exitReason = 'SL'; }
+                    else if (low  <= shortTP)                   { exitPrice = shortTP; exitReason = 'TP'; }
+                    else if (high >= shortSL)                   { exitPrice = shortSL; exitReason = 'SL'; }
+                } else {
+                    if (low <= shortTP) { exitPrice = shortTP; exitReason = 'TP'; }
+                    else { const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500; if (close > se) { exitPrice = close; exitReason = 'EMA'; } }
+                }
+                if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
+            }
+
+            if (exitPrice) {
+                const raw = position === 1 ? (exitPrice - entryPrice) / entryPrice : (entryPrice - exitPrice) / entryPrice;
+                const net = raw - (p.commission / 100) * 2;
+                const pnlAbs = capital * net;
+                capital += pnlAbs;
+                trades.push({ type: position === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[entryBarIdx][0]), exitTs: ts, entryPrice, exitPrice, pnlPerc: net * 100, pnlAbs, reason: exitReason, capital });
+                equity.push({ ts, v: capital });
+                position = 0; lastClosedBarIdx = i; entryBarIdx = null;
+            }
+        }
+
+        // ENTRADAS
+        if (position === 0) {
+            const barHour = new Date(ts).getUTCHours();
+            if (barHour < p.startHour || barHour >= p.endHour) continue;
+            const barsSinceClose = lastClosedBarIdx !== null ? i - lastClosedBarIdx : 999999;
+            if (p.useCooldown && barsSinceClose < p.cooldownMinutes) continue;
+
+            const above = close > E50 && close > E100 && close > E200 && close > E500;
+            const below = close < E50 && close < E100 && close < E200 && close < E500;
+            const bullAlign = E50 > E100 && E100 > E200 && E200 > E500;
+            const bearAlign = E50 < E100 && E100 < E200 && E200 < E500;
+            const d50 = Math.abs(close - E50) / close * 100, d100 = Math.abs(close - E100) / close * 100,
+                  d200 = Math.abs(close - E200) / close * 100, d500 = Math.abs(close - E500) / close * 100;
+            const nearEMA = d50 <= p.pullbackPerc || d100 <= p.pullbackPerc || d200 <= p.pullbackPerc || d500 <= p.pullbackPerc;
+            const pullOK  = !p.usePullbackFilter || nearEMA;
+            const alignLong  = !p.useEmaAlignment || bullAlign;
+            const alignShort = !p.useEmaAlignment || bearAlign;
+
+            if      (p.enableLongs  && above && alignLong  && rsi15 >= 60 && macd5 > sig5 && pullOK) { position = 1;  entryPrice = close; entryBarIdx = i; }
+            else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK) { position = -1; entryPrice = close; entryBarIdx = i; }
+        }
+    }
+
+    const wins   = trades.filter(t => t.pnlPerc > 0);
+    const losses = trades.filter(t => t.pnlPerc <= 0);
+    const grossW = wins.reduce((s, t) => s + Math.abs(t.pnlAbs), 0);
+    const grossL = losses.reduce((s, t) => s + Math.abs(t.pnlAbs), 0);
+    let peak = p.initialCapital, maxDDPerc = 0;
+    equity.forEach(pt => {
+        if (pt.v > peak) peak = pt.v;
+        const dd = (peak - pt.v) / peak * 100;
+        if (dd > maxDDPerc) maxDDPerc = dd;
+    });
+
+    return {
+        stats: {
+            totalTrades: trades.length,
+            winners: wins.length, losers: losses.length,
+            winRate: trades.length > 0 ? wins.length / trades.length * 100 : 0,
+            netProfit: capital - p.initialCapital,
+            netProfitPerc: (capital - p.initialCapital) / p.initialCapital * 100,
+            finalCapital: capital,
+            profitFactor: grossL > 0 ? grossW / grossL : grossW > 0 ? Infinity : 0,
+            maxDrawdownPerc: maxDDPerc,
+            avgWinPerc:  wins.length   > 0 ? wins.reduce((s, t) => s + t.pnlPerc, 0)   / wins.length   : 0,
+            avgLossPerc: losses.length > 0 ? Math.abs(losses.reduce((s, t) => s + t.pnlPerc, 0) / losses.length) : 0,
+            longsCount:  trades.filter(t => t.type === 'Long').length,
+            shortsCount: trades.filter(t => t.type === 'Short').length,
+        },
+        trades: trades.slice(-300),
+        equity
+    };
+}
+
+app.post('/api/backtest', autenticar, async (req, res) => {
+    try {
+        const p = {
+            enableLongs:       req.body.enableLongs !== false,
+            enableShorts:      req.body.enableShorts !== false,
+            tpPerc:            parseFloat(req.body.tpPerc)  || 0.5,
+            stopType:          req.body.stopType || 'Porcentaje',
+            slPerc:            parseFloat(req.body.slPerc)  || 1.0,
+            startHour:         parseInt(req.body.startHour) ?? 9,
+            endHour:           parseInt(req.body.endHour)   ?? 20,
+            usePullbackFilter: req.body.usePullbackFilter !== false,
+            pullbackPerc:      parseFloat(req.body.pullbackPerc) || 0.20,
+            useEmaAlignment:   req.body.useEmaAlignment !== false,
+            useMaxTradeTime:   req.body.useMaxTradeTime !== false,
+            maxTradeMinutes:   parseInt(req.body.maxTradeMinutes) || 15,
+            useCooldown:       req.body.useCooldown !== false,
+            cooldownMinutes:   parseInt(req.body.cooldownMinutes) || 45,
+            commission:        0.04,
+            initialCapital:    parseFloat(req.body.initialCapital) || 1000,
+        };
+        const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 30);
+        const [bars1m, bars5m, bars15m] = await Promise.all([
+            fetchKlinesBatch('1m',  Math.min(days * 1440, 10000)),
+            fetchKlinesBatch('5m',  Math.min(days * 288,  2000)),
+            fetchKlinesBatch('15m', Math.min(days * 96,   1000)),
+        ]);
+        res.json(runBacktest(bars1m, bars5m, bars15m, p));
+    } catch (err) {
+        console.error('Error backtest:', err);
+        res.status(500).json({ error: 'Error al ejecutar backtest' });
+    }
+});
+
+
+// ============================================================
 // RUTAS DE PÁGINAS (deben ir ANTES de express.static para que
 // tomen prioridad sobre el auto-index de index.html en "/")
 // ============================================================
@@ -476,6 +717,7 @@ app.get('/api/whale-histogram', autenticar, async (req, res) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'login.html')));
 app.get('/terminal', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
+app.get('/estrategias', (req, res) => res.sendFile(path.join(__dirname, 'public', 'estrategias.html')));
 
 // index: false evita que express.static sirva index.html automáticamente para "/"
 app.use(express.static(path.join(__dirname, 'public'), { index: false }));

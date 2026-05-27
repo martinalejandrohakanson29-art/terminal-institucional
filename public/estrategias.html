@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backtester — Terminal Institucional</title>
+    <link rel="icon" href="data:,">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: Arial, sans-serif; background: #f0f2f5; color: #1e1e1e; min-height: 100vh; overflow: hidden; }
+
+        #header {
+            background: #fff; border-bottom: 1px solid #d1d4dc;
+            padding: 0 20px; display: flex; align-items: center; gap: 16px; height: 48px; flex-shrink: 0;
+        }
+        #header h2 { font-size: 1rem; }
+        .back-link { color: #2962FF; text-decoration: none; font-size: 13px; white-space: nowrap; }
+        .back-link:hover { text-decoration: underline; }
+
+        #main { display: flex; height: calc(100vh - 48px); }
+
+        /* ─── Left: Form ─── */
+        #form-panel {
+            width: 280px; min-width: 280px; background: #fff;
+            border-right: 1px solid #d1d4dc; overflow-y: auto;
+            display: flex; flex-direction: column;
+        }
+        .form-section { border-bottom: 1px solid #f0f2f5; padding: 10px 14px; }
+        .form-section h3 {
+            font-size: 10px; font-weight: bold; color: #94a3b8;
+            text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px;
+        }
+        .form-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+        .form-row label { font-size: 12px; color: #374151; }
+        .form-input {
+            width: 75px; padding: 3px 6px; border: 1px solid #d1d4dc;
+            border-radius: 4px; font-size: 12px; text-align: right; background: #f8fafc; color: #1e1e1e;
+        }
+        .form-select {
+            width: 130px; padding: 3px 6px; border: 1px solid #d1d4dc;
+            border-radius: 4px; font-size: 12px; background: #f8fafc; color: #1e1e1e;
+        }
+        .form-check { cursor: pointer; accent-color: #2962FF; }
+        .btn-run {
+            margin: 12px 14px; padding: 10px;
+            background: #2962FF; color: white; border: none;
+            border-radius: 6px; font-size: 13px; font-weight: bold;
+            cursor: pointer; width: calc(100% - 28px);
+        }
+        .btn-run:hover:not(:disabled) { background: #1a4fd6; }
+        .btn-run:disabled { background: #94a3b8; cursor: not-allowed; }
+
+        /* ─── Right: Results ─── */
+        #results-panel { flex: 1; overflow-y: auto; padding: 16px; min-width: 0; }
+
+        .placeholder {
+            display: flex; flex-direction: column; align-items: center;
+            justify-content: center; height: 100%; color: #94a3b8; gap: 10px;
+        }
+        .placeholder p { font-size: 14px; }
+
+        /* Stats */
+        .stats-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 10px; margin-bottom: 14px;
+        }
+        .stat-card {
+            background: #fff; border: 1px solid #d1d4dc;
+            border-radius: 8px; padding: 11px 13px;
+        }
+        .stat-label { font-size: 10px; color: #94a3b8; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.3px; }
+        .stat-value { font-size: 17px; font-weight: bold; }
+        .stat-sub   { font-size: 11px; color: #64748b; margin-top: 2px; }
+        .positive { color: #26a69a; }
+        .negative { color: #ef5350; }
+        .neutral  { color: #1e1e1e; }
+
+        /* Chart */
+        .chart-box {
+            background: #fff; border: 1px solid #d1d4dc;
+            border-radius: 8px; padding: 14px; margin-bottom: 14px;
+        }
+        .chart-box h3 { font-size: 12px; font-weight: bold; color: #374151; margin-bottom: 10px; }
+
+        /* Exit reasons */
+        .reason-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+        .reason-item {
+            background: #fff; border: 1px solid #d1d4dc;
+            border-radius: 6px; padding: 7px 11px; font-size: 12px;
+            display: flex; gap: 6px; align-items: center;
+        }
+        .reason-item .r-label { color: #64748b; }
+        .reason-item .r-val   { font-weight: bold; color: #1e1e1e; }
+
+        /* Trades table */
+        .table-box {
+            background: #fff; border: 1px solid #d1d4dc;
+            border-radius: 8px; overflow: hidden; margin-bottom: 14px;
+        }
+        .table-box h3 { font-size: 12px; font-weight: bold; color: #374151; padding: 11px 13px; border-bottom: 1px solid #f0f2f5; }
+        .trades-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .trades-table th {
+            background: #f8fafc; padding: 6px 10px; text-align: left;
+            font-size: 10px; font-weight: bold; color: #64748b; text-transform: uppercase;
+            border-bottom: 1px solid #f0f2f5; position: sticky; top: 0;
+        }
+        .trades-table td { padding: 5px 10px; border-bottom: 1px solid #f8fafc; }
+        .trades-table tr:last-child td { border-bottom: none; }
+
+        .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; }
+        .badge-long  { background: rgba(38,166,154,0.12); color: #26a69a; }
+        .badge-short { background: rgba(239,83,80,0.12);  color: #ef5350; }
+        .badge-tp    { background: rgba(38,166,154,0.10); color: #26a69a; }
+        .badge-sl    { background: rgba(239,83,80,0.10);  color: #ef5350; }
+        .badge-ema   { background: rgba(255,152,0,0.10);  color: #ff9800; }
+        .badge-time  { background: rgba(100,116,139,0.10);color: #64748b; }
+
+        .loading-msg {
+            display: flex; align-items: center; justify-content: center;
+            height: 220px; color: #64748b; font-size: 13px; gap: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="header">
+    <a href="/terminal" class="back-link">← Terminal</a>
+    <h2>Backtester de Estrategias</h2>
+    <span style="font-size:11px;color:#94a3b8;margin-left:auto;">BTC/USDT 1m · multi-timeframe · horarios en UTC</span>
+</div>
+
+<div id="main">
+
+    <!-- ═══════════ FORM ═══════════ -->
+    <div id="form-panel">
+
+        <div class="form-section">
+            <h3>General</h3>
+            <div class="form-row">
+                <label>Capital inicial ($)</label>
+                <input type="number" id="p-capital" class="form-input" value="1000" min="100">
+            </div>
+            <div class="form-row">
+                <label>Días de historial</label>
+                <input type="number" id="p-days" class="form-input" value="7" min="1" max="30">
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>Operaciones</h3>
+            <div class="form-row">
+                <label>Activar Longs</label>
+                <input type="checkbox" id="p-longs" class="form-check" checked>
+            </div>
+            <div class="form-row">
+                <label>Activar Shorts</label>
+                <input type="checkbox" id="p-shorts" class="form-check" checked>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>Take Profit / Stop Loss</h3>
+            <div class="form-row">
+                <label>Take Profit %</label>
+                <input type="number" id="p-tp" class="form-input" value="0.5" step="0.1" min="0.1">
+            </div>
+            <div class="form-row">
+                <label>Tipo de Stop</label>
+                <select id="p-stop-type" class="form-select">
+                    <option value="Porcentaje">Porcentaje</option>
+                    <option value="Ruptura EMA 200">Ruptura EMA 200</option>
+                    <option value="Ruptura EMA 500">Ruptura EMA 500</option>
+                </select>
+            </div>
+            <div class="form-row" id="row-sl">
+                <label>Stop Loss %</label>
+                <input type="number" id="p-sl" class="form-input" value="1.0" step="0.1" min="0.1">
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>Horario (UTC)</h3>
+            <div class="form-row">
+                <label>Hora inicio</label>
+                <input type="number" id="p-start-hour" class="form-input" value="9" min="0" max="23">
+            </div>
+            <div class="form-row">
+                <label>Hora fin</label>
+                <input type="number" id="p-end-hour" class="form-input" value="20" min="1" max="24">
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>Filtros</h3>
+            <div class="form-row">
+                <label>Pullback a EMAs</label>
+                <input type="checkbox" id="p-pullback" class="form-check" checked>
+            </div>
+            <div class="form-row">
+                <label>Distancia máx. %</label>
+                <input type="number" id="p-pullback-perc" class="form-input" value="0.20" step="0.05" min="0.01">
+            </div>
+            <div class="form-row">
+                <label>Alineamiento EMAs</label>
+                <input type="checkbox" id="p-ema-align" class="form-check" checked>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>Tiempo en operación</h3>
+            <div class="form-row">
+                <label>Usar tiempo máx.</label>
+                <input type="checkbox" id="p-max-time" class="form-check" checked>
+            </div>
+            <div class="form-row">
+                <label>Máx. minutos</label>
+                <input type="number" id="p-max-minutes" class="form-input" value="15" min="1">
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>Cooldown</h3>
+            <div class="form-row">
+                <label>Usar cooldown</label>
+                <input type="checkbox" id="p-cooldown" class="form-check" checked>
+            </div>
+            <div class="form-row">
+                <label>Minutos de espera</label>
+                <input type="number" id="p-cooldown-min" class="form-input" value="45" min="1">
+            </div>
+        </div>
+
+        <button class="btn-run" id="btn-run" onclick="ejecutar()">▶ Ejecutar Backtest</button>
+    </div>
+
+    <!-- ═══════════ RESULTS ═══════════ -->
+    <div id="results-panel">
+        <div class="placeholder" id="placeholder">
+            <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="#d1d4dc" stroke-width="1.5">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>
+            <p>Configurá los parámetros y ejecutá el backtest</p>
+            <p style="font-size:12px;color:#b0b8c4;">Descarga velas 1m + 5m + 15m de Binance y simula la estrategia</p>
+        </div>
+        <div id="results" style="display:none;"></div>
+    </div>
+
+</div>
+
+<script>
+    fetch('/api/auth/me', { credentials: 'same-origin' }).then(r => { if (!r.ok) window.location.replace('/'); });
+
+    document.getElementById('p-stop-type').addEventListener('change', function() {
+        document.getElementById('row-sl').style.display = this.value === 'Porcentaje' ? 'flex' : 'none';
+    });
+
+    function getParams() {
+        return {
+            initialCapital:    parseFloat(document.getElementById('p-capital').value) || 1000,
+            lookbackDays:      parseInt(document.getElementById('p-days').value) || 7,
+            enableLongs:       document.getElementById('p-longs').checked,
+            enableShorts:      document.getElementById('p-shorts').checked,
+            tpPerc:            parseFloat(document.getElementById('p-tp').value) || 0.5,
+            stopType:          document.getElementById('p-stop-type').value,
+            slPerc:            parseFloat(document.getElementById('p-sl').value) || 1.0,
+            startHour:         parseInt(document.getElementById('p-start-hour').value) || 9,
+            endHour:           parseInt(document.getElementById('p-end-hour').value) || 20,
+            usePullbackFilter: document.getElementById('p-pullback').checked,
+            pullbackPerc:      parseFloat(document.getElementById('p-pullback-perc').value) || 0.20,
+            useEmaAlignment:   document.getElementById('p-ema-align').checked,
+            useMaxTradeTime:   document.getElementById('p-max-time').checked,
+            maxTradeMinutes:   parseInt(document.getElementById('p-max-minutes').value) || 15,
+            useCooldown:       document.getElementById('p-cooldown').checked,
+            cooldownMinutes:   parseInt(document.getElementById('p-cooldown-min').value) || 45,
+        };
+    }
+
+    async function ejecutar() {
+        const btn = document.getElementById('btn-run');
+        btn.disabled = true; btn.textContent = '⏳ Descargando velas...';
+        document.getElementById('placeholder').style.display = 'none';
+        document.getElementById('results').style.display = 'block';
+        document.getElementById('results').innerHTML = '<div class="loading-msg"><span>Ejecutando backtest — descargando 3 temporalidades de Binance...</span></div>';
+
+        try {
+            const res = await fetch('/api/backtest', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify(getParams())
+            });
+            if (!res.ok) { const e = await res.json(); throw new Error(e.error || `HTTP ${res.status}`); }
+            const data = await res.json();
+            renderResults(data, getParams().initialCapital);
+        } catch (err) {
+            document.getElementById('results').innerHTML = `<div class="loading-msg" style="color:#ef5350;">Error: ${err.message}</div>`;
+        } finally {
+            btn.disabled = false; btn.textContent = '▶ Ejecutar Backtest';
+        }
+    }
+
+    function f2(v) { return v.toFixed(2); }
+    function fUSD(v) { return `${v >= 0 ? '+' : ''}$${Math.abs(v).toFixed(2)}`; }
+    function fTs(ts) {
+        const d = new Date(ts);
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getUTCMonth()+1}/${d.getUTCDate()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+    }
+
+    function renderResults({ stats: s, trades, equity }, initialCapital) {
+        const pClass = s.netProfit >= 0 ? 'positive' : 'negative';
+
+        // ── Stats Cards ──
+        const statsHTML = `<div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Net Profit</div>
+                <div class="stat-value ${pClass}">${fUSD(s.netProfit)}</div>
+                <div class="stat-sub ${pClass}">${s.netProfit >= 0 ? '+' : ''}${f2(s.netProfitPerc)}%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Win Rate</div>
+                <div class="stat-value ${s.winRate >= 50 ? 'positive' : 'negative'}">${f2(s.winRate)}%</div>
+                <div class="stat-sub">${s.winners}W / ${s.losers}L</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total Trades</div>
+                <div class="stat-value neutral">${s.totalTrades}</div>
+                <div class="stat-sub">L: ${s.longsCount} &nbsp;|&nbsp; S: ${s.shortsCount}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Profit Factor</div>
+                <div class="stat-value ${s.profitFactor >= 1.2 ? 'positive' : s.profitFactor >= 1 ? 'neutral' : 'negative'}">${isFinite(s.profitFactor) ? f2(s.profitFactor) : '∞'}</div>
+                <div class="stat-sub">Ganancias / Pérdidas</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Max Drawdown</div>
+                <div class="stat-value ${s.maxDrawdownPerc < 10 ? 'positive' : 'negative'}">${f2(s.maxDrawdownPerc)}%</div>
+                <div class="stat-sub">Desde el pico</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Avg Win / Avg Loss</div>
+                <div class="stat-value neutral" style="font-size:14px;">${f2(s.avgWinPerc)}% / ${f2(s.avgLossPerc)}%</div>
+                <div class="stat-sub">RR: ${s.avgLossPerc > 0 ? f2(s.avgWinPerc / s.avgLossPerc) : '∞'}</div>
+            </div>
+        </div>`;
+
+        // ── Equity Curve ──
+        const equityHTML = equity.length > 1 ? `
+            <div class="chart-box">
+                <h3>Curva de Equity — Capital inicial: $${initialCapital.toFixed(0)} → Final: $${s.finalCapital.toFixed(2)}</h3>
+                ${buildEquitySVG(equity, initialCapital)}
+            </div>` : '';
+
+        // ── Exit Reason Breakdown ──
+        const reasons = {};
+        trades.forEach(t => { reasons[t.reason] = (reasons[t.reason] || 0) + 1; });
+        const reasonHTML = `<div class="reason-bar">
+            <span style="font-size:12px;color:#64748b;align-self:center;">Salidas:</span>
+            ${Object.entries(reasons).sort((a,b) => b[1]-a[1]).map(([r, cnt]) => `
+                <div class="reason-item">
+                    <span class="r-label">${r}</span>
+                    <span class="r-val">${cnt}</span>
+                    <span style="color:#94a3b8;font-size:10px;">${(cnt/trades.length*100).toFixed(0)}%</span>
+                </div>`).join('')}
+        </div>`;
+
+        // ── Trades Table ──
+        const shown = [...trades].reverse().slice(0, 150);
+        const tradesHTML = `<div class="table-box">
+            <h3>Últimos ${shown.length} trades (de ${trades.length} total)</h3>
+            <div style="max-height:380px;overflow-y:auto;">
+                <table class="trades-table">
+                    <thead><tr>
+                        <th>#</th><th>Tipo</th><th>Entrada UTC</th><th>Salida UTC</th>
+                        <th>PnL %</th><th>PnL $</th><th>Capital</th><th>Razón</th>
+                    </tr></thead>
+                    <tbody>
+                    ${shown.map((t, idx) => {
+                        const pc = t.pnlPerc >= 0 ? '#26a69a' : '#ef5350';
+                        const rBadge = { TP:'badge-tp', SL:'badge-sl', EMA:'badge-ema', Tiempo:'badge-time' }[t.reason] || 'badge-time';
+                        return `<tr>
+                            <td style="color:#94a3b8;font-size:11px;">${trades.length - idx}</td>
+                            <td><span class="badge ${t.type === 'Long' ? 'badge-long' : 'badge-short'}">${t.type}</span></td>
+                            <td style="font-family:monospace;font-size:11px;color:#374151;">
+                                ${fTs(t.entryTs)}<br>
+                                <span style="color:#94a3b8;">$${Math.round(t.entryPrice).toLocaleString()}</span>
+                            </td>
+                            <td style="font-family:monospace;font-size:11px;color:#374151;">
+                                ${fTs(t.exitTs)}<br>
+                                <span style="color:#94a3b8;">$${Math.round(t.exitPrice).toLocaleString()}</span>
+                            </td>
+                            <td style="color:${pc};font-weight:bold;">${t.pnlPerc >= 0 ? '+' : ''}${f2(t.pnlPerc)}%</td>
+                            <td style="color:${pc};">${t.pnlAbs >= 0 ? '+' : ''}$${Math.abs(t.pnlAbs).toFixed(2)}</td>
+                            <td style="font-family:monospace;font-size:11px;">$${t.capital.toFixed(2)}</td>
+                            <td><span class="badge ${rBadge}">${t.reason}</span></td>
+                        </tr>`;
+                    }).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>`;
+
+        if (s.totalTrades === 0) {
+            document.getElementById('results').innerHTML = statsHTML + `
+                <div class="loading-msg" style="flex-direction:column;gap:6px;">
+                    <span style="font-size:24px;">🔍</span>
+                    <span>Sin trades en el período. Probá relajar los filtros o aumentar los días.</span>
+                </div>`;
+            return;
+        }
+
+        document.getElementById('results').innerHTML = statsHTML + equityHTML + reasonHTML + tradesHTML;
+    }
+
+    function buildEquitySVG(equity, initialCapital) {
+        const W = 900, H = 160;
+        const PAD = { t: 10, r: 10, b: 22, l: 60 };
+        const cw = W - PAD.l - PAD.r, ch = H - PAD.t - PAD.b;
+
+        const vals = equity.map(p => p.v);
+        const minV = Math.min(...vals, initialCapital);
+        const maxV = Math.max(...vals, initialCapital);
+        const range = maxV - minV || 1;
+
+        const sx = i => PAD.l + (i / (equity.length - 1)) * cw;
+        const sy = v => PAD.t + ch - ((v - minV) / range) * ch;
+
+        const pathD  = equity.map((p, i) => `${i === 0 ? 'M' : 'L'}${sx(i).toFixed(1)},${sy(p.v).toFixed(1)}`).join(' ');
+        const baseY  = sy(initialCapital).toFixed(1);
+        const areaD  = `${pathD} L${sx(equity.length-1).toFixed(1)},${baseY} L${sx(0).toFixed(1)},${baseY} Z`;
+        const final  = vals[vals.length - 1];
+        const color  = final >= initialCapital ? '#26a69a' : '#ef5350';
+        const areaC  = final >= initialCapital ? 'rgba(38,166,154,0.12)' : 'rgba(239,83,80,0.12)';
+
+        // Y axis labels (3 ticks)
+        const ticks = [minV, (minV + maxV) / 2, maxV].map(v => ({
+            y: sy(v).toFixed(1), label: `$${Math.round(v)}`
+        }));
+
+        // X axis: dates from equity timestamps
+        const step = Math.max(1, Math.floor(equity.length / 5));
+        const xTicks = equity.filter((_, i) => i % step === 0 || i === equity.length - 1).map(p => ({
+            x: sx(equity.indexOf(p)).toFixed(1),
+            label: (() => { const d = new Date(p.ts); return `${d.getUTCMonth()+1}/${d.getUTCDate()}`; })()
+        }));
+
+        return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:160px;display:block;">
+            <line x1="${PAD.l}" y1="${baseY}" x2="${W-PAD.r}" y2="${baseY}" stroke="#e2e8f0" stroke-dasharray="4,3" stroke-width="1"/>
+            <path d="${areaD}" fill="${areaC}"/>
+            <path d="${pathD}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round"/>
+            ${ticks.map(t => `
+                <line x1="${PAD.l-4}" y1="${t.y}" x2="${PAD.l}" y2="${t.y}" stroke="#d1d4dc" stroke-width="1"/>
+                <text x="${PAD.l-7}" y="${t.y}" text-anchor="end" font-size="9" fill="#94a3b8" dominant-baseline="middle">${t.label}</text>
+            `).join('')}
+            ${xTicks.map(t => `
+                <line x1="${t.x}" y1="${PAD.t+ch}" x2="${t.x}" y2="${PAD.t+ch+3}" stroke="#d1d4dc" stroke-width="1"/>
+                <text x="${t.x}" y="${H-4}" text-anchor="middle" font-size="9" fill="#94a3b8">${t.label}</text>
+            `).join('')}
+            <line x1="${PAD.l}" y1="${PAD.t}" x2="${PAD.l}" y2="${PAD.t+ch}" stroke="#d1d4dc" stroke-width="1"/>
+            <line x1="${PAD.l}" y1="${PAD.t+ch}" x2="${W-PAD.r}" y2="${PAD.t+ch}" stroke="#d1d4dc" stroke-width="1"/>
+        </svg>`;
+    }
+</script>
+
+</body>
+</html>
