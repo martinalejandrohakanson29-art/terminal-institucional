@@ -230,6 +230,40 @@
             </div>
         </div>
 
+        <div class="form-section">
+            <h3>Delta de Volumen</h3>
+            <div class="form-row">
+                <label>Activar filtro</label>
+                <input type="checkbox" id="p-delta" class="form-check">
+            </div>
+            <div class="form-row">
+                <label>Velas a acumular</label>
+                <input type="number" id="p-delta-velas" class="form-input" value="3" min="1" max="50">
+            </div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                Long si suma delta N velas > 0<br>Short si suma delta N velas &lt; 0
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>Confirmación Ballenas</h3>
+            <div class="form-row">
+                <label>Activar filtro</label>
+                <input type="checkbox" id="p-whale" class="form-check">
+            </div>
+            <div class="form-row">
+                <label>Ventana (min)</label>
+                <input type="number" id="p-whale-window" class="form-input" value="30" min="1">
+            </div>
+            <div class="form-row">
+                <label>Mínimo BTC</label>
+                <input type="number" id="p-whale-min-btc" class="form-input" value="5" min="0.1" step="0.5">
+            </div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                Long si delta ballenas en ventana > 0<br>Short si delta ballenas en ventana &lt; 0
+            </div>
+        </div>
+
         <button class="btn-run" id="btn-run" onclick="ejecutar()">▶ Ejecutar Backtest</button>
     </div>
 
@@ -272,6 +306,11 @@
             maxTradeMinutes:   parseInt(document.getElementById('p-max-minutes').value) || 15,
             useCooldown:       document.getElementById('p-cooldown').checked,
             cooldownMinutes:   parseInt(document.getElementById('p-cooldown-min').value) || 45,
+            useDeltaFilter:    document.getElementById('p-delta').checked,
+            deltaVelas:        parseInt(document.getElementById('p-delta-velas').value) || 3,
+            useWhaleFilter:    document.getElementById('p-whale').checked,
+            whaleWindow:       parseInt(document.getElementById('p-whale-window').value) || 30,
+            whaleMinBTC:       parseFloat(document.getElementById('p-whale-min-btc').value) || 5,
         };
     }
 
@@ -291,7 +330,7 @@
             });
             if (!res.ok) { const e = await res.json(); throw new Error(e.error || `HTTP ${res.status}`); }
             const data = await res.json();
-            renderResults(data, getParams().initialCapital);
+            renderResults(data, getParams());
         } catch (err) {
             document.getElementById('results').innerHTML = `<div class="loading-msg" style="color:#ef5350;">Error: ${err.message}</div>`;
         } finally {
@@ -307,8 +346,32 @@
         return `${d.getUTCMonth()+1}/${d.getUTCDate()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
     }
 
-    function renderResults({ stats: s, trades, equity }, initialCapital) {
+    function renderResults({ stats: s, trades, equity }, params) {
+        const initialCapital = params.initialCapital;
         const pClass = s.netProfit >= 0 ? 'positive' : 'negative';
+
+        // ── Filtros activos ──
+        const filtros = [
+            { label: 'RSI 15m',       activo: true,                  desc: '≥60 L / ≤40 S' },
+            { label: 'MACD 5m',       activo: true,                  desc: 'bull/bear' },
+            { label: 'Pullback EMAs', activo: params.usePullbackFilter, desc: `≤${params.pullbackPerc}%` },
+            { label: 'Alineamiento',  activo: params.useEmaAlignment,   desc: 'EMA ordenadas' },
+            { label: 'Cooldown',      activo: params.useCooldown,        desc: `${params.cooldownMinutes}m` },
+            { label: 'Tiempo máx.',   activo: params.useMaxTradeTime,    desc: `${params.maxTradeMinutes}m` },
+            { label: 'Delta Vol.',    activo: params.useDeltaFilter,     desc: `${params.deltaVelas} velas` },
+            { label: 'Ballenas',      activo: params.useWhaleFilter,     desc: `${params.whaleWindow}m / ≥${params.whaleMinBTC}BTC` },
+        ];
+        const filtrosHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center;">
+            <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;">Filtros:</span>
+            ${filtros.map(f => `<span style="
+                display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:4px;font-size:11px;
+                background:${f.activo ? 'rgba(41,98,255,0.08)' : '#f0f2f5'};
+                border:1px solid ${f.activo ? '#2962FF' : '#d1d4dc'};
+                color:${f.activo ? '#2962FF' : '#94a3b8'};">
+                ${f.activo ? '●' : '○'} ${f.label}
+                ${f.activo ? `<span style="color:#64748b;font-size:10px;">${f.desc}</span>` : ''}
+            </span>`).join('')}
+        </div>`;
 
         // ── Stats Cards ──
         const statsHTML = `<div class="stats-grid">
@@ -401,7 +464,7 @@
         </div>`;
 
         if (s.totalTrades === 0) {
-            document.getElementById('results').innerHTML = statsHTML + `
+            document.getElementById('results').innerHTML = filtrosHTML + statsHTML + `
                 <div class="loading-msg" style="flex-direction:column;gap:6px;">
                     <span style="font-size:24px;">🔍</span>
                     <span>Sin trades en el período. Probá relajar los filtros o aumentar los días.</span>
@@ -409,7 +472,7 @@
             return;
         }
 
-        document.getElementById('results').innerHTML = statsHTML + equityHTML + reasonHTML + tradesHTML;
+        document.getElementById('results').innerHTML = filtrosHTML + statsHTML + equityHTML + reasonHTML + tradesHTML;
     }
 
     function buildEquitySVG(equity, initialCapital) {

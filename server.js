@@ -544,7 +544,7 @@ function lookupHTF(sortedTs, byTs, target) {
     return found >= 0 ? byTs.get(sortedTs[found]) : null;
 }
 
-function runBacktest(bars1m, bars5m, bars15m, p) {
+function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     const c1m = bars1m.map(b => parseFloat(b[4]));
     const e50 = calcEMA(c1m, 50), e100 = calcEMA(c1m, 100),
           e200 = calcEMA(c1m, 200), e500 = calcEMA(c1m, 500);
@@ -558,6 +558,21 @@ function runBacktest(bars1m, bars5m, bars15m, p) {
     const { macd: macdArr, signal: sigArr } = calcMACDArr(c5m);
     const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[0]), { macd: macdArr[i], signal: sigArr[i] }]));
     const ts5m = bars5m.map(b => parseInt(b[0])).sort((a, b) => a - b);
+
+    // Delta de volumen — prefix sum para rolling sum O(1) por barra
+    const deltaPfx = new Array(bars1m.length + 1).fill(0);
+    for (let i = 0; i < bars1m.length; i++) {
+        const bv = parseFloat(bars1m[i][9]); // takerBuyBaseAssetVolume
+        const tv = parseFloat(bars1m[i][5]); // total volume
+        deltaPfx[i + 1] = deltaPfx[i] + (bv - (tv - bv));
+    }
+
+    // Ballenas — ordenadas por tiempo para sliding window O(n)
+    const whaleTrades = (whalesArr || [])
+        .map(w => ({ ts: parseFloat(w.ts_sec) * 1000, btc: parseFloat(w.cantidad), isSell: w.es_venta }))
+        .sort((a, b) => a.ts - b.ts);
+    const whaleWindowMs = p.whaleWindow * 60000;
+    let wLeft = 0, wRight = -1, wBuys = 0, wSells = 0;
 
     let capital = p.initialCapital, position = 0, entryPrice = 0;
     let entryBarIdx = null, lastClosedBarIdx = null;
@@ -621,6 +636,17 @@ function runBacktest(bars1m, bars5m, bars15m, p) {
             }
         }
 
+        // Actualizar sliding window de ballenas (se hace siempre, no solo en entrada)
+        while (wRight + 1 < whaleTrades.length && whaleTrades[wRight + 1].ts <= ts) {
+            wRight++;
+            if (whaleTrades[wRight].isSell) wSells += whaleTrades[wRight].btc; else wBuys += whaleTrades[wRight].btc;
+        }
+        while (wLeft <= wRight && whaleTrades[wLeft].ts < ts - whaleWindowMs) {
+            if (whaleTrades[wLeft].isSell) wSells -= whaleTrades[wLeft].btc; else wBuys -= whaleTrades[wLeft].btc;
+            wLeft++;
+        }
+        const whaleDelta = wBuys - wSells;
+
         // ENTRADAS
         if (position === 0) {
             const barHour = new Date(ts).getUTCHours();
@@ -635,12 +661,22 @@ function runBacktest(bars1m, bars5m, bars15m, p) {
             const d50 = Math.abs(close - E50) / close * 100, d100 = Math.abs(close - E100) / close * 100,
                   d200 = Math.abs(close - E200) / close * 100, d500 = Math.abs(close - E500) / close * 100;
             const nearEMA = d50 <= p.pullbackPerc || d100 <= p.pullbackPerc || d200 <= p.pullbackPerc || d500 <= p.pullbackPerc;
-            const pullOK  = !p.usePullbackFilter || nearEMA;
+            const pullOK     = !p.usePullbackFilter || nearEMA;
             const alignLong  = !p.useEmaAlignment || bullAlign;
             const alignShort = !p.useEmaAlignment || bearAlign;
 
-            if      (p.enableLongs  && above && alignLong  && rsi15 >= 60 && macd5 > sig5 && pullOK) { position = 1;  entryPrice = close; entryBarIdx = i; }
-            else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK) { position = -1; entryPrice = close; entryBarIdx = i; }
+            // Delta de volumen rolling (últimas N velas)
+            const dStart       = Math.max(0, i - p.deltaVelas + 1);
+            const deltaRolling = deltaPfx[i + 1] - deltaPfx[dStart];
+            const deltaOkLong  = !p.useDeltaFilter || deltaRolling > 0;
+            const deltaOkShort = !p.useDeltaFilter || deltaRolling < 0;
+
+            // Ballenas: delta en ventana reciente
+            const whaleOkLong  = !p.useWhaleFilter || whaleDelta > 0;
+            const whaleOkShort = !p.useWhaleFilter || whaleDelta < 0;
+
+            if      (p.enableLongs  && above && alignLong  && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong  && whaleOkLong)  { position = 1;  entryPrice = close; entryBarIdx = i; }
+            else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort) { position = -1; entryPrice = close; entryBarIdx = i; }
         }
     }
 
@@ -692,16 +728,27 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             maxTradeMinutes:   parseInt(req.body.maxTradeMinutes) || 15,
             useCooldown:       req.body.useCooldown !== false,
             cooldownMinutes:   parseInt(req.body.cooldownMinutes) || 45,
+            useDeltaFilter:    req.body.useDeltaFilter === true,
+            deltaVelas:        parseInt(req.body.deltaVelas) || 3,
+            useWhaleFilter:    req.body.useWhaleFilter === true,
+            whaleWindow:       parseInt(req.body.whaleWindow) || 30,
+            whaleMinBTC:       parseFloat(req.body.whaleMinBTC) || 5,
             commission:        0.04,
             initialCapital:    parseFloat(req.body.initialCapital) || 1000,
         };
         const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 30);
-        const [bars1m, bars5m, bars15m] = await Promise.all([
+        const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
             fetchKlinesBatch('1m',  Math.min(days * 1440, 10000)),
             fetchKlinesBatch('5m',  Math.min(days * 288,  2000)),
             fetchKlinesBatch('15m', Math.min(days * 96,   1000)),
+            pool.query(
+                `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
+                 FROM ballenas WHERE fecha >= $1 AND cantidad >= $2 ORDER BY fecha ASC`,
+                [periodStart.toISOString(), p.whaleMinBTC]
+            ),
         ]);
-        res.json(runBacktest(bars1m, bars5m, bars15m, p));
+        res.json(runBacktest(bars1m, bars5m, bars15m, whaleRes.rows, p));
     } catch (err) {
         console.error('Error backtest:', err);
         res.status(500).json({ error: 'Error al ejecutar backtest' });
