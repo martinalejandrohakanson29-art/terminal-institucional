@@ -142,6 +142,25 @@
             display: flex; align-items: center; justify-content: center;
             height: 220px; color: #64748b; font-size: 13px; gap: 10px;
         }
+
+        /* ─── Filtros de trades ─── */
+        .filter-bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+        .filter-group { display: flex; gap: 4px; align-items: center; }
+        .filter-label { font-size: 10px; color: #94a3b8; text-transform: uppercase; letter-spacing: .4px; margin-right: 2px; white-space: nowrap; }
+        .filter-btn {
+            padding: 3px 9px; border-radius: 4px; font-size: 11px; cursor: pointer;
+            border: 1px solid #d1d4dc; background: #f8fafc; color: #64748b;
+            transition: background .15s, color .15s, border-color .15s;
+        }
+        .filter-btn:hover { background: #e2e8f0; }
+        .filter-btn.active { background: #2962FF; color: #fff; border-color: #2962FF; }
+        .filter-btn.active-tp { background: rgba(38,166,154,0.12); color: #26a69a; border-color: #26a69a; }
+        .filter-btn.active-sl { background: rgba(239,83,80,0.12); color: #ef5350; border-color: #ef5350; }
+        .filter-btn.active-ema { background: rgba(255,152,0,0.12); color: #ff9800; border-color: #ff9800; }
+        .filter-btn.active-time { background: rgba(100,116,139,0.12); color: #64748b; border-color: #64748b; }
+        .filter-btn.active-long { background: rgba(38,166,154,0.12); color: #26a69a; border-color: #26a69a; }
+        .filter-btn.active-short { background: rgba(239,83,80,0.12); color: #ef5350; border-color: #ef5350; }
+        .cnt { font-size: 10px; opacity: .7; margin-left: 2px; }
     </style>
 </head>
 <body>
@@ -382,10 +401,122 @@
 
     function f2(v) { return v.toFixed(2); }
     function fUSD(v) { return `${v >= 0 ? '+' : ''}$${Math.abs(v).toFixed(2)}`; }
+    // Argentina = UTC-3 (sin DST)
     function fTs(ts) {
-        const d = new Date(ts);
+        const d = new Date(ts - 3 * 3600 * 1000);
         const pad = n => String(n).padStart(2, '0');
         return `${d.getUTCMonth()+1}/${d.getUTCDate()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+    }
+
+    // ── Estado de filtros de trades ─────────────────────────────────
+    let tradesActuales = [];
+    let filtroTipo  = 'Todos';
+    let filtroRazon = 'Todos';
+
+    const RAZON_CLASS = { TP: 'active-tp', SL: 'active-sl', EMA: 'active-ema', Tiempo: 'active-time' };
+    const RAZON_BADGE = { TP: 'badge-tp',  SL: 'badge-sl',  EMA: 'badge-ema', Tiempo: 'badge-time' };
+
+    function setFiltroTipo(v) {
+        filtroTipo = v;
+        renderTradesTable();
+    }
+    function setFiltroRazon(v) {
+        filtroRazon = v;
+        renderTradesTable();
+    }
+
+    function renderTradesTable() {
+        const container = document.getElementById('trades-section');
+        if (!container || tradesActuales.length === 0) return;
+
+        const all = tradesActuales;
+        const filtrado = all.filter(t =>
+            (filtroTipo  === 'Todos' || t.type   === filtroTipo)  &&
+            (filtroRazon === 'Todos' || t.reason === filtroRazon)
+        );
+        const mostrados = [...filtrado].reverse().slice(0, 200);
+
+        // Conteos para cada botón
+        const cntLong  = all.filter(t => t.type   === 'Long').length;
+        const cntShort = all.filter(t => t.type   === 'Short').length;
+        const razonesAll = {};
+        all.forEach(t => { razonesAll[t.reason] = (razonesAll[t.reason] || 0) + 1; });
+
+        const btnTipo = (v, label, cls) => {
+            const active = filtroTipo === v ? (cls || 'active') : '';
+            return `<button class="filter-btn ${active}" onclick="setFiltroTipo('${v}')">${label}</button>`;
+        };
+        const btnRazon = (v) => {
+            const cnt = razonesAll[v] || 0;
+            if (cnt === 0) return '';
+            const isActive = filtroRazon === v;
+            const cls = isActive ? (RAZON_CLASS[v] || 'active') : '';
+            return `<button class="filter-btn ${cls}" onclick="setFiltroRazon('${v}')">${v} <span class="cnt">${cnt}</span></button>`;
+        };
+
+        const filterBar = `
+        <div class="filter-bar">
+            <div class="filter-group">
+                <span class="filter-label">Tipo:</span>
+                ${btnTipo('Todos', 'Todos')}
+                ${btnTipo('Long',  `Long <span class="cnt">${cntLong}</span>`,  'active-long')}
+                ${btnTipo('Short', `Short <span class="cnt">${cntShort}</span>`, 'active-short')}
+            </div>
+            <div class="filter-group">
+                <span class="filter-label">Razón:</span>
+                <button class="filter-btn ${filtroRazon === 'Todos' ? 'active' : ''}" onclick="setFiltroRazon('Todos')">Todos</button>
+                ${btnRazon('TP')}
+                ${btnRazon('SL')}
+                ${btnRazon('EMA')}
+                ${btnRazon('Tiempo')}
+            </div>
+            <span style="font-size:11px;color:#94a3b8;margin-left:auto;">${filtrado.length} de ${all.length} operaciones</span>
+        </div>`;
+
+        const rows = mostrados.map((t, idx) => {
+            const pc     = t.pnlPerc >= 0 ? '#26a69a' : '#ef5350';
+            const rBadge = RAZON_BADGE[t.reason] || 'badge-time';
+            const num    = filtrado.length - idx;
+            return `<tr>
+                <td style="color:#94a3b8;font-size:11px;">${num}</td>
+                <td><span class="badge ${t.type === 'Long' ? 'badge-long' : 'badge-short'}">${t.type}</span></td>
+                <td style="font-family:monospace;font-size:11px;color:#374151;">
+                    ${fTs(t.entryTs)}<br>
+                    <span style="color:#94a3b8;">$${Math.round(t.entryPrice).toLocaleString()}</span>
+                </td>
+                <td style="font-family:monospace;font-size:11px;color:#374151;">
+                    ${fTs(t.exitTs)}<br>
+                    <span style="color:#94a3b8;">$${Math.round(t.exitPrice).toLocaleString()}</span>
+                </td>
+                <td style="color:${pc};font-weight:bold;">${t.pnlPerc >= 0 ? '+' : ''}${f2(t.pnlPerc)}%</td>
+                <td style="color:${pc};">${t.pnlAbs >= 0 ? '+' : ''}$${Math.abs(t.pnlAbs).toFixed(2)}</td>
+                <td style="font-family:monospace;font-size:11px;">$${t.capital.toFixed(2)}</td>
+                <td><span class="badge ${rBadge}">${t.reason}</span></td>
+            </tr>`;
+        }).join('');
+
+        const emptyMsg = filtrado.length === 0
+            ? `<tr><td colspan="8" style="text-align:center;padding:20px;color:#94a3b8;font-size:12px;">Sin operaciones con los filtros seleccionados</td></tr>`
+            : '';
+
+        container.innerHTML = `
+        <div class="table-box">
+            <div style="padding:11px 13px;border-bottom:1px solid #f0f2f5;">
+                <div style="font-size:12px;font-weight:bold;color:#374151;margin-bottom:8px;">
+                    Operaciones ${mostrados.length < filtrado.length ? `(mostrando ${mostrados.length} de ${filtrado.length})` : `(${filtrado.length})`}
+                </div>
+                ${filterBar}
+            </div>
+            <div style="max-height:420px;overflow-y:auto;">
+                <table class="trades-table">
+                    <thead><tr>
+                        <th>#</th><th>Tipo</th><th>Entrada ARG</th><th>Salida ARG</th>
+                        <th>PnL %</th><th>PnL $</th><th>Capital</th><th>Razón</th>
+                    </tr></thead>
+                    <tbody>${rows}${emptyMsg}</tbody>
+                </table>
+            </div>
+        </div>`;
     }
 
     function renderResults({ stats: s, trades, equity }, params) {
@@ -469,42 +600,6 @@
                 </div>`).join('')}
         </div>`;
 
-        // ── Trades Table ──
-        const shown = [...trades].reverse().slice(0, 150);
-        const tradesHTML = `<div class="table-box">
-            <h3>Últimos ${shown.length} trades (de ${trades.length} total)</h3>
-            <div style="max-height:380px;overflow-y:auto;">
-                <table class="trades-table">
-                    <thead><tr>
-                        <th>#</th><th>Tipo</th><th>Entrada UTC</th><th>Salida UTC</th>
-                        <th>PnL %</th><th>PnL $</th><th>Capital</th><th>Razón</th>
-                    </tr></thead>
-                    <tbody>
-                    ${shown.map((t, idx) => {
-                        const pc = t.pnlPerc >= 0 ? '#26a69a' : '#ef5350';
-                        const rBadge = { TP:'badge-tp', SL:'badge-sl', EMA:'badge-ema', Tiempo:'badge-time' }[t.reason] || 'badge-time';
-                        return `<tr>
-                            <td style="color:#94a3b8;font-size:11px;">${trades.length - idx}</td>
-                            <td><span class="badge ${t.type === 'Long' ? 'badge-long' : 'badge-short'}">${t.type}</span></td>
-                            <td style="font-family:monospace;font-size:11px;color:#374151;">
-                                ${fTs(t.entryTs)}<br>
-                                <span style="color:#94a3b8;">$${Math.round(t.entryPrice).toLocaleString()}</span>
-                            </td>
-                            <td style="font-family:monospace;font-size:11px;color:#374151;">
-                                ${fTs(t.exitTs)}<br>
-                                <span style="color:#94a3b8;">$${Math.round(t.exitPrice).toLocaleString()}</span>
-                            </td>
-                            <td style="color:${pc};font-weight:bold;">${t.pnlPerc >= 0 ? '+' : ''}${f2(t.pnlPerc)}%</td>
-                            <td style="color:${pc};">${t.pnlAbs >= 0 ? '+' : ''}$${Math.abs(t.pnlAbs).toFixed(2)}</td>
-                            <td style="font-family:monospace;font-size:11px;">$${t.capital.toFixed(2)}</td>
-                            <td><span class="badge ${rBadge}">${t.reason}</span></td>
-                        </tr>`;
-                    }).join('')}
-                    </tbody>
-                </table>
-            </div>
-        </div>`;
-
         if (s.totalTrades === 0) {
             document.getElementById('results').innerHTML = filtrosHTML + statsHTML + `
                 <div class="loading-msg" style="flex-direction:column;gap:6px;">
@@ -514,7 +609,16 @@
             return;
         }
 
-        document.getElementById('results').innerHTML = filtrosHTML + statsHTML + equityHTML + reasonHTML + tradesHTML;
+        // Guardar trades, resetear filtros y renderizar
+        tradesActuales = trades;
+        filtroTipo  = 'Todos';
+        filtroRazon = 'Todos';
+
+        document.getElementById('results').innerHTML =
+            filtrosHTML + statsHTML + equityHTML + reasonHTML +
+            '<div id="trades-section"></div>';
+
+        renderTradesTable();
     }
 
     // ── Estrategias Guardadas ─────────────────────────────────────
