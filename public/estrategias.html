@@ -50,6 +50,29 @@
         .btn-run:hover:not(:disabled) { background: #1a4fd6; }
         .btn-run:disabled { background: #94a3b8; cursor: not-allowed; }
 
+        /* ─── Estrategias guardadas ─── */
+        .strat-select {
+            flex: 1; padding: 4px 6px; border: 1px solid #d1d4dc;
+            border-radius: 4px; font-size: 12px; background: #f8fafc; color: #1e1e1e; min-width: 0;
+        }
+        .btn-sm {
+            padding: 4px 9px; border: 1px solid #d1d4dc; border-radius: 4px;
+            font-size: 11px; background: #f8fafc; color: #374151; cursor: pointer; white-space: nowrap;
+            flex-shrink: 0;
+        }
+        .btn-sm:hover { background: #e2e8f0; }
+        .btn-sm-primary { background: #2962FF; color: white; border-color: #2962FF; }
+        .btn-sm-primary:hover { background: #1a4fd6; }
+        .btn-sm-danger { color: #ef5350; border-color: #ef5350; }
+        .btn-sm-danger:hover { background: rgba(239,83,80,0.08); }
+        .strat-name-input {
+            flex: 1; padding: 4px 6px; border: 1px solid #d1d4dc;
+            border-radius: 4px; font-size: 12px; background: #fff; color: #1e1e1e; min-width: 0;
+        }
+        .strat-msg { font-size: 10px; margin-top: 5px; min-height: 14px; }
+        .strat-msg.ok  { color: #26a69a; }
+        .strat-msg.err { color: #ef5350; }
+
         /* ─── Right: Results ─── */
         #results-panel { flex: 1; overflow-y: auto; padding: 16px; min-width: 0; }
 
@@ -134,6 +157,23 @@
     <!-- ═══════════ FORM ═══════════ -->
     <div id="form-panel">
 
+        <!-- ═══ Estrategias Guardadas ═══ -->
+        <div class="form-section">
+            <h3>Estrategias Guardadas</h3>
+            <div style="display:flex;gap:5px;margin-bottom:6px;">
+                <select id="strat-select" class="strat-select">
+                    <option value="">— Sin estrategias guardadas —</option>
+                </select>
+                <button class="btn-sm" onclick="cargarEstrategia()">Cargar</button>
+            </div>
+            <div style="display:flex;gap:5px;align-items:center;">
+                <input type="text" id="strat-name" class="strat-name-input" placeholder="Nombre de la estrategia" maxlength="100">
+                <button class="btn-sm btn-sm-primary" onclick="guardarEstrategia()">Guardar</button>
+                <button class="btn-sm btn-sm-danger" onclick="eliminarEstrategia()">✕</button>
+            </div>
+            <div id="strat-msg" class="strat-msg"></div>
+        </div>
+
         <div class="form-section">
             <h3>General</h3>
             <div class="form-row">
@@ -142,7 +182,7 @@
             </div>
             <div class="form-row">
                 <label>Días de historial</label>
-                <input type="number" id="p-days" class="form-input" value="7" min="1" max="30">
+                <input type="number" id="p-days" class="form-input" value="7" min="1" max="60">
             </div>
         </div>
 
@@ -319,7 +359,9 @@
         btn.disabled = true; btn.textContent = '⏳ Descargando velas...';
         document.getElementById('placeholder').style.display = 'none';
         document.getElementById('results').style.display = 'block';
-        document.getElementById('results').innerHTML = '<div class="loading-msg"><span>Ejecutando backtest — descargando 3 temporalidades de Binance...</span></div>';
+        const dias = parseInt(document.getElementById('p-days').value) || 7;
+        const aviso = dias > 20 ? ` (${dias} días — puede tardar hasta 30s)` : '';
+        document.getElementById('results').innerHTML = `<div class="loading-msg"><span>Ejecutando backtest — descargando 3 temporalidades de Binance...${aviso}</span></div>`;
 
         try {
             const res = await fetch('/api/backtest', {
@@ -474,6 +516,114 @@
 
         document.getElementById('results').innerHTML = filtrosHTML + statsHTML + equityHTML + reasonHTML + tradesHTML;
     }
+
+    // ── Estrategias Guardadas ─────────────────────────────────────
+    let estrategiasCache = [];
+
+    async function inicializarEstrategias() {
+        try {
+            const res = await fetch('/api/estrategias', { credentials: 'same-origin' });
+            if (!res.ok) return;
+            estrategiasCache = await res.json();
+            actualizarSelectEstrategias();
+        } catch (_) {}
+    }
+
+    function actualizarSelectEstrategias() {
+        const sel = document.getElementById('strat-select');
+        sel.innerHTML = estrategiasCache.length === 0
+            ? '<option value="">— Sin estrategias guardadas —</option>'
+            : '<option value="">Seleccionar estrategia...</option>' +
+              estrategiasCache.map(e =>
+                  `<option value="${escHtml(e.nombre)}">${escHtml(e.nombre)}</option>`
+              ).join('');
+    }
+
+    function escHtml(s) {
+        return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function mostrarMsg(texto, tipo) {
+        const el = document.getElementById('strat-msg');
+        el.textContent = texto;
+        el.className = 'strat-msg ' + tipo;
+        setTimeout(() => { el.textContent = ''; el.className = 'strat-msg'; }, 3000);
+    }
+
+    function aplicarParams(p) {
+        document.getElementById('p-capital').value       = p.initialCapital ?? 1000;
+        document.getElementById('p-days').value          = p.lookbackDays ?? 7;
+        document.getElementById('p-longs').checked       = p.enableLongs !== false;
+        document.getElementById('p-shorts').checked      = p.enableShorts !== false;
+        document.getElementById('p-tp').value            = p.tpPerc ?? 0.5;
+        document.getElementById('p-stop-type').value     = p.stopType ?? 'Porcentaje';
+        document.getElementById('p-sl').value            = p.slPerc ?? 1.0;
+        document.getElementById('p-start-hour').value    = p.startHour ?? 9;
+        document.getElementById('p-end-hour').value      = p.endHour ?? 20;
+        document.getElementById('p-pullback').checked    = p.usePullbackFilter !== false;
+        document.getElementById('p-pullback-perc').value = p.pullbackPerc ?? 0.20;
+        document.getElementById('p-ema-align').checked   = p.useEmaAlignment !== false;
+        document.getElementById('p-max-time').checked    = p.useMaxTradeTime !== false;
+        document.getElementById('p-max-minutes').value   = p.maxTradeMinutes ?? 15;
+        document.getElementById('p-cooldown').checked    = p.useCooldown !== false;
+        document.getElementById('p-cooldown-min').value  = p.cooldownMinutes ?? 45;
+        document.getElementById('p-delta').checked       = !!p.useDeltaFilter;
+        document.getElementById('p-delta-velas').value   = p.deltaVelas ?? 3;
+        document.getElementById('p-whale').checked       = !!p.useWhaleFilter;
+        document.getElementById('p-whale-window').value  = p.whaleWindow ?? 30;
+        document.getElementById('p-whale-min-btc').value = p.whaleMinBTC ?? 5;
+        document.getElementById('row-sl').style.display  = p.stopType === 'Porcentaje' ? 'flex' : 'none';
+    }
+
+    function cargarEstrategia() {
+        const nombre = document.getElementById('strat-select').value;
+        if (!nombre) return mostrarMsg('Seleccioná una estrategia primero', 'err');
+        const estrategia = estrategiasCache.find(e => e.nombre === nombre);
+        if (!estrategia) return mostrarMsg('Estrategia no encontrada', 'err');
+        aplicarParams(estrategia.params);
+        document.getElementById('strat-name').value = nombre;
+        mostrarMsg(`"${nombre}" cargada`, 'ok');
+    }
+
+    async function guardarEstrategia() {
+        const nombre = document.getElementById('strat-name').value.trim();
+        if (!nombre) return mostrarMsg('Ingresá un nombre para guardar', 'err');
+        const params = getParams();
+        try {
+            const res = await fetch('/api/estrategias', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ nombre, params })
+            });
+            if (!res.ok) { const e = await res.json(); throw new Error(e.error); }
+            await inicializarEstrategias();
+            document.getElementById('strat-select').value = nombre;
+            mostrarMsg(`"${nombre}" guardada`, 'ok');
+        } catch (err) {
+            mostrarMsg('Error: ' + err.message, 'err');
+        }
+    }
+
+    async function eliminarEstrategia() {
+        const nombre = document.getElementById('strat-select').value || document.getElementById('strat-name').value.trim();
+        if (!nombre) return mostrarMsg('Seleccioná o escribí el nombre a eliminar', 'err');
+        if (!confirm(`¿Eliminar la estrategia "${nombre}"?`)) return;
+        try {
+            const res = await fetch(`/api/estrategias/${encodeURIComponent(nombre)}`, {
+                method: 'DELETE',
+                credentials: 'same-origin'
+            });
+            if (!res.ok) { const e = await res.json(); throw new Error(e.error); }
+            await inicializarEstrategias();
+            document.getElementById('strat-name').value = '';
+            mostrarMsg(`"${nombre}" eliminada`, 'ok');
+        } catch (err) {
+            mostrarMsg('Error: ' + err.message, 'err');
+        }
+    }
+
+    inicializarEstrategias();
 
     function buildEquitySVG(equity, initialCapital) {
         const W = 900, H = 160;

@@ -63,6 +63,16 @@ async function inicializarBaseDeDatos() {
             UNIQUE(usuario_id, clave)
         );
     `;
+    const queryTablaEstrategias = `
+        CREATE TABLE IF NOT EXISTS estrategias_guardadas (
+            id SERIAL PRIMARY KEY,
+            usuario_id INTEGER REFERENCES usuarios(id) ON DELETE CASCADE,
+            nombre VARCHAR(100) NOT NULL,
+            params JSONB NOT NULL,
+            actualizado_en TIMESTAMP DEFAULT NOW(),
+            UNIQUE(usuario_id, nombre)
+        );
+    `;
 
     try {
         await pool.query(queryTablaBallenas);
@@ -70,6 +80,7 @@ async function inicializarBaseDeDatos() {
         await pool.query(queryTablaOI);
         await pool.query(queryTablaUsuarios);
         await pool.query(queryTablaConfigUsuario);
+        await pool.query(queryTablaEstrategias);
 
         await pool.query(`
             DO $$ BEGIN
@@ -519,14 +530,24 @@ function calcMACDArr(closes, fast = 12, slow = 26, signal = 9) {
 
 async function fetchKlinesBatch(interval, totalBars) {
     const perReq = 1000;
+    const CHUNK = 10; // requests en paralelo por tanda
     const dur = { '1m': 60000, '5m': 300000, '15m': 900000 }[interval] || 60000;
     const n = Math.ceil(totalBars / perReq);
     const now = Date.now();
-    const reqs = Array.from({ length: n }, (_, i) => {
-        const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${perReq}${i > 0 ? `&endTime=${now - i * perReq * dur}` : ''}`;
-        return fetch(url).then(r => r.json()).catch(() => []);
-    });
-    const results = await Promise.all(reqs);
+
+    const urls = Array.from({ length: n }, (_, i) =>
+        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${perReq}${i > 0 ? `&endTime=${now - i * perReq * dur}` : ''}`
+    );
+
+    const results = [];
+    for (let i = 0; i < urls.length; i += CHUNK) {
+        const batch = urls.slice(i, i + CHUNK).map(url =>
+            fetch(url).then(r => r.json()).catch(() => [])
+        );
+        const batchResults = await Promise.all(batch);
+        results.push(...batchResults);
+    }
+
     const seen = new Set();
     const all = [];
     results.flat().forEach(v => {
@@ -711,6 +732,51 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     };
 }
 
+// ── Estrategias guardadas ──────────────────────────────────────
+app.get('/api/estrategias', autenticar, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT nombre, params, actualizado_en FROM estrategias_guardadas
+             WHERE usuario_id = $1 ORDER BY nombre ASC`,
+            [req.usuario.id]
+        );
+        res.json(result.rows);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/estrategias', autenticar, async (req, res) => {
+    const { nombre, params } = req.body;
+    if (!nombre || !nombre.trim()) return res.status(400).json({ error: 'Nombre requerido' });
+    if (!params || typeof params !== 'object') return res.status(400).json({ error: 'Parámetros inválidos' });
+    const nombreLimpio = nombre.trim().slice(0, 100);
+    try {
+        await pool.query(
+            `INSERT INTO estrategias_guardadas (usuario_id, nombre, params, actualizado_en)
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (usuario_id, nombre) DO UPDATE SET params = EXCLUDED.params, actualizado_en = NOW()`,
+            [req.usuario.id, nombreLimpio, params]
+        );
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/api/estrategias/:nombre', autenticar, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `DELETE FROM estrategias_guardadas WHERE usuario_id = $1 AND nombre = $2`,
+            [req.usuario.id, req.params.nombre]
+        );
+        if (result.rowCount === 0) return res.status(404).json({ error: 'No encontrada' });
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/backtest', autenticar, async (req, res) => {
     try {
         const p = {
@@ -736,12 +802,12 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             commission:        0.04,
             initialCapital:    parseFloat(req.body.initialCapital) || 1000,
         };
-        const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 30);
+        const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 60);
         const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
         const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
-            fetchKlinesBatch('1m',  Math.min(days * 1440, 10000)),
-            fetchKlinesBatch('5m',  Math.min(days * 288,  2000)),
-            fetchKlinesBatch('15m', Math.min(days * 96,   1000)),
+            fetchKlinesBatch('1m',  days * 1440),
+            fetchKlinesBatch('5m',  days * 288),
+            fetchKlinesBatch('15m', days * 96),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
                  FROM ballenas WHERE fecha >= $1 AND cantidad >= $2 ORDER BY fecha ASC`,
