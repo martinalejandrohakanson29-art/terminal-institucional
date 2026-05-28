@@ -179,6 +179,18 @@
 
             <button class="btn-tiempo" id="btn-guardar" onclick="guardarTodo()" style="margin-left: 8px; border-color: #26a69a; color: #26a69a;" title="Guardar toda la configuración: filtros, dibujos, indicadores, temporalidad">Guardar</button>
 
+            <!-- Estrategia en Vivo -->
+            <div style="border-left:2px solid #d1d4dc; margin-left:5px; padding-left:8px; display:flex; gap:5px; align-items:center;">
+                <select id="strat-live-sel" style="height:28px; padding:0 5px; border:1px solid #d1d4dc; border-radius:4px; font-size:11px; background:#f8fafc; color:#374151; max-width:130px; cursor:pointer;" title="Estrategia a monitorear en vivo">
+                    <option value="">— Estrategia —</option>
+                </select>
+                <button id="btn-strat-live" onclick="toggleEstrategiaLive()"
+                    style="height:28px; padding:0 9px; border:1px solid #d1d4dc; border-radius:4px; font-size:11px; background:#f8fafc; color:#374151; cursor:pointer; white-space:nowrap;">
+                    Activar
+                </button>
+                <span id="strat-live-badge" style="font-size:11px; font-weight:bold; color:#94a3b8; white-space:nowrap;"></span>
+            </div>
+
             <div style="border-left: 2px solid #d1d4dc; margin-left: 5px; padding-left: 6px; display: flex; gap: 4px; align-items: center;">
                 <a href="/estrategias" class="btn-tiempo" style="font-size:12px; text-decoration:none; padding: 6px 10px;">Backtest</a>
                 <a id="btn-admin-link" href="/admin" class="btn-tiempo" style="display:none; font-size:12px; text-decoration:none; padding: 6px 10px;">Admin</a>
@@ -468,6 +480,64 @@
                 const dy = coordinates[1].y - coordinates[0].y;
                 const p4 = { x: coordinates[2].x + dx, y: coordinates[2].y + dy };
                 return [{ type: 'polygon', attrs: { coordinates: [coordinates[0], coordinates[1], p4, coordinates[2]] }, styles: { style: 'stroke_fill', color: 'rgba(41,98,255,0.07)', borderColor: '#2962FF', borderSize: 1 } }];
+            }
+        });
+
+        klinecharts.registerOverlay({
+            name: 'senalEstrategia',
+            needDefaultPointFigure: false,
+            needDefaultXAxisFigure: false,
+            needDefaultYAxisFigure: false,
+            totalStep: 3,
+            createPointFigures: ({ overlay, coordinates, bounding }) => {
+                if (!coordinates || coordinates.length < 3) return [];
+                const { signal } = overlay.extendData || {};
+                const isLong = signal === 'long';
+                const xSig   = coordinates[0].x;
+                const yEntry = coordinates[0].y;
+                const yTP    = coordinates[1].y;
+                const ySL    = coordinates[2].y;
+                const W      = bounding.width;
+                const entryC = '#2962FF';
+                const tpC    = '#26a69a';
+                const slC    = '#ef5350';
+                const sz     = 9;
+                const arrowY = isLong ? yEntry + sz * 2.8 : yEntry - sz * 2.8;
+                const triCoords = isLong
+                    ? [{ x: xSig - sz, y: arrowY }, { x: xSig + sz, y: arrowY }, { x: xSig, y: yEntry }]
+                    : [{ x: xSig - sz, y: arrowY }, { x: xSig + sz, y: arrowY }, { x: xSig, y: yEntry }];
+                return [
+                    // Triángulo de entrada
+                    { type: 'polygon', ignoreEvent: true, attrs: { coordinates: triCoords },
+                      styles: { style: 'fill', color: entryC, borderColor: entryC } },
+                    // Etiqueta LONG / SHORT
+                    { type: 'text', ignoreEvent: true,
+                      attrs: { x: xSig, y: isLong ? arrowY + 13 : arrowY - 13, text: isLong ? '▲ LONG' : '▼ SHORT', align: 'center', baseline: 'middle' },
+                      styles: { color: entryC, size: 11, weight: 'bold', family: 'Arial' } },
+                    // Línea TP
+                    { type: 'line', ignoreEvent: true,
+                      attrs: { coordinates: [{ x: xSig, y: yTP }, { x: W, y: yTP }] },
+                      styles: { color: tpC, size: 1, style: 'dashed', dashedValue: [6, 3] } },
+                    // Etiqueta TP
+                    { type: 'text', ignoreEvent: true,
+                      attrs: { x: W - 4, y: yTP - 4, text: `TP ${Math.round(overlay.points[1].value).toLocaleString()}`, align: 'right', baseline: 'bottom' },
+                      styles: { color: tpC, size: 10, weight: 'bold', family: 'Arial',
+                                backgroundColor: 'rgba(38,166,154,0.12)', borderRadius: 3, paddingLeft: 3, paddingRight: 3, paddingTop: 1, paddingBottom: 1 } },
+                    // Línea SL
+                    { type: 'line', ignoreEvent: true,
+                      attrs: { coordinates: [{ x: xSig, y: ySL }, { x: W, y: ySL }] },
+                      styles: { color: slC, size: 1, style: 'dashed', dashedValue: [6, 3] } },
+                    // Etiqueta SL
+                    { type: 'text', ignoreEvent: true,
+                      attrs: { x: W - 4, y: ySL - 4, text: `SL ${Math.round(overlay.points[2].value).toLocaleString()}`, align: 'right', baseline: 'bottom' },
+                      styles: { color: slC, size: 10, weight: 'bold', family: 'Arial',
+                                backgroundColor: 'rgba(239,83,80,0.12)', borderRadius: 3, paddingLeft: 3, paddingRight: 3, paddingTop: 1, paddingBottom: 1 } },
+                    // Etiqueta Entrada
+                    { type: 'text', ignoreEvent: true,
+                      attrs: { x: W - 4, y: yEntry - 4, text: `ENT ${Math.round(overlay.points[0].value).toLocaleString()}`, align: 'right', baseline: 'bottom' },
+                      styles: { color: entryC, size: 10, weight: 'bold', family: 'Arial',
+                                backgroundColor: 'rgba(41,98,255,0.12)', borderRadius: 3, paddingLeft: 3, paddingRight: 3, paddingTop: 1, paddingBottom: 1 } },
+                ];
             }
         });
 
@@ -1101,6 +1171,84 @@
             socket15m.onerror = (e) => console.error('Error socket 15m RSI:', e);
         }
 
+        // ── Estrategia en Vivo ────────────────────────────────────────
+        let estrategiaLiveActiva = false;
+        let estrategiaLiveInterval = null;
+
+        async function cargarEstrategiasLive() {
+            try {
+                const res = await fetch('/api/estrategias', { credentials: 'same-origin' });
+                if (!res.ok) return;
+                const lista = await res.json();
+                const sel = document.getElementById('strat-live-sel');
+                sel.innerHTML = lista.length === 0
+                    ? '<option value="">— Sin estrategias —</option>'
+                    : '<option value="">— Estrategia —</option>' +
+                      lista.map(e => `<option value="${e.nombre.replace(/&/g,'&amp;').replace(/"/g,'&quot;')}">${e.nombre.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</option>`).join('');
+            } catch (_) {}
+        }
+
+        function setLiveBadge(texto, color) {
+            const el = document.getElementById('strat-live-badge');
+            el.textContent = texto;
+            el.style.color = color || '#94a3b8';
+        }
+
+        async function checkSenalEstrategia() {
+            const nombre = document.getElementById('strat-live-sel').value;
+            if (!nombre || !estrategiaLiveActiva) return;
+            try {
+                const res = await fetch(`/api/estrategia/signal?nombre=${encodeURIComponent(nombre)}`, { credentials: 'same-origin' });
+                const data = await res.json();
+                chart.removeOverlay({ groupId: 'senal_live' });
+                if (data.signal) {
+                    chart.createOverlay({
+                        name: 'senalEstrategia',
+                        groupId: 'senal_live',
+                        lock: true,
+                        points: [
+                            { timestamp: data.timestamp, value: data.entry },
+                            { timestamp: data.timestamp, value: data.tp   },
+                            { timestamp: data.timestamp, value: data.sl   }
+                        ],
+                        extendData: { signal: data.signal }
+                    });
+                    const dir   = data.signal === 'long' ? '▲ LONG' : '▼ SHORT';
+                    const color = data.signal === 'long' ? '#26a69a' : '#ef5350';
+                    setLiveBadge(
+                        `${dir}  ENT $${Math.round(data.entry).toLocaleString()}  TP $${Math.round(data.tp).toLocaleString()}  SL $${Math.round(data.sl).toLocaleString()}`,
+                        color
+                    );
+                } else {
+                    setLiveBadge('Sin señal', '#94a3b8');
+                }
+            } catch (_) {
+                setLiveBadge('Error al evaluar', '#ef5350');
+            }
+        }
+
+        async function toggleEstrategiaLive() {
+            const btn = document.getElementById('btn-strat-live');
+            if (estrategiaLiveActiva) {
+                estrategiaLiveActiva = false;
+                clearInterval(estrategiaLiveInterval);
+                estrategiaLiveInterval = null;
+                chart.removeOverlay({ groupId: 'senal_live' });
+                btn.textContent = 'Activar';
+                btn.style.cssText = 'height:28px;padding:0 9px;border:1px solid #d1d4dc;border-radius:4px;font-size:11px;background:#f8fafc;color:#374151;cursor:pointer;white-space:nowrap;';
+                setLiveBadge('', '#94a3b8');
+            } else {
+                const nombre = document.getElementById('strat-live-sel').value;
+                if (!nombre) { setLiveBadge('Seleccioná una estrategia', '#ef5350'); return; }
+                estrategiaLiveActiva = true;
+                btn.textContent = 'Desactivar';
+                btn.style.cssText = 'height:28px;padding:0 9px;border:1px solid #2962FF;border-radius:4px;font-size:11px;background:#2962FF;color:#fff;cursor:pointer;white-space:nowrap;';
+                setLiveBadge('Evaluando...', '#94a3b8');
+                await checkSenalEstrategia();
+                estrategiaLiveInterval = setInterval(checkSenalEstrategia, 30000);
+            }
+        }
+
         (async function arrancar() {
             await verificarSesion();
             await cargarConfigServidor();
@@ -1181,6 +1329,9 @@
                 if (vwapReset) document.getElementById('select-vwap').value = String(vwapReset);
                 cambiarTemporalidad('1m');
             }
+
+            // Estrategias guardadas para el live
+            await cargarEstrategiasLive();
 
             // RSI 15m: carga inicial + websocket
             await cargarVelas15m();

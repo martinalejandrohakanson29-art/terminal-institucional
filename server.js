@@ -732,6 +732,126 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     };
 }
 
+// ── Evaluación de señal en tiempo real ────────────────────────
+function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
+    if (bars1m.length < 510) return { signal: null, reason: 'datos_insuficientes' };
+
+    const c1m  = bars1m.map(b => parseFloat(b[4]));
+    const e50  = calcEMA(c1m, 50);
+    const e100 = calcEMA(c1m, 100);
+    const e200 = calcEMA(c1m, 200);
+    const e500 = calcEMA(c1m, 500);
+
+    const c15m   = bars15m.map(b => parseFloat(b[4]));
+    const rsiArr = calcRSI14(c15m);
+    const rsi15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[0]), rsiArr[i]]));
+    const rsi15mTs   = [...rsi15mByTs.keys()].sort((a, b) => a - b);
+
+    const { macdArr, sigArr } = calcMACD(bars5m.map(b => parseFloat(b[4])));
+    const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[0]), { macd: macdArr[i], sig: sigArr[i] }]));
+    const macd5mTs   = [...macd5mByTs.keys()].sort((a, b) => a - b);
+
+    const i     = bars1m.length - 1;
+    const bar   = bars1m[i];
+    const ts    = parseInt(bar[0]);
+    const close = parseFloat(bar[4]);
+
+    const E50 = e50[i], E100 = e100[i], E200 = e200[i], E500 = e500[i];
+
+    const rsiLookup  = lookupHTF(rsi15mTs, rsi15mByTs, ts);
+    const macdLookup = lookupHTF(macd5mTs, macd5mByTs, ts);
+    const rsi15 = rsiLookup  ?? 50;
+    const macd5 = macdLookup?.macd ?? 0;
+    const sig5  = macdLookup?.sig  ?? 0;
+
+    const barHour  = new Date(ts).getUTCHours();
+    const horarioOk = barHour >= (p.startHour ?? 9) && barHour < (p.endHour ?? 20);
+
+    const above     = close > E50 && close > E100 && close > E200 && close > E500;
+    const below     = close < E50 && close < E100 && close < E200 && close < E500;
+    const bullAlign = E50 > E100 && E100 > E200 && E200 > E500;
+    const bearAlign = E50 < E100 && E100 < E200 && E200 < E500;
+
+    const nearEMA = !p.usePullbackFilter || [E50, E100, E200, E500].some(e =>
+        Math.abs(close - e) / close * 100 <= (p.pullbackPerc ?? 0.2)
+    );
+
+    const deltaSlice   = bars1m.slice(-(p.deltaVelas ?? 3));
+    const deltaRolling = deltaSlice.reduce((s, b) => {
+        const totalVol = parseFloat(b[5]);
+        const buyVol   = parseFloat(b[9]);
+        return s + (2 * buyVol - totalVol);
+    }, 0);
+    const deltaOkLong  = !p.useDeltaFilter || deltaRolling > 0;
+    const deltaOkShort = !p.useDeltaFilter || deltaRolling < 0;
+
+    const nowMs    = Date.now();
+    const windowMs = (p.whaleWindow ?? 30) * 60000;
+    const whaleDelta = whalesArr
+        .filter(w => parseFloat(w.ts_sec) * 1000 >= nowMs - windowMs)
+        .reduce((s, w) => s + (w.es_venta ? -parseFloat(w.cantidad) : parseFloat(w.cantidad)), 0);
+    const whaleOkLong  = !p.useWhaleFilter || whaleDelta > 0;
+    const whaleOkShort = !p.useWhaleFilter || whaleDelta < 0;
+
+    const alignLong  = !p.useEmaAlignment || bullAlign;
+    const alignShort = !p.useEmaAlignment || bearAlign;
+
+    let signal = null;
+    if (horarioOk && above && alignLong && rsi15 >= 60 && macd5 > sig5 && nearEMA && deltaOkLong && whaleOkLong)
+        signal = 'long';
+    else if (horarioOk && below && alignShort && rsi15 <= 40 && macd5 < sig5 && nearEMA && deltaOkShort && whaleOkShort)
+        signal = 'short';
+
+    const tpPerc = p.tpPerc ?? 0.5;
+    const slPerc = p.slPerc ?? 1.0;
+    const stopType = p.stopType ?? 'Porcentaje';
+
+    const tp = signal === 'long'  ? close * (1 + tpPerc / 100) :
+               signal === 'short' ? close * (1 - tpPerc / 100) : null;
+
+    let sl = null;
+    if (signal) {
+        if (stopType === 'Porcentaje')
+            sl = signal === 'long' ? close * (1 - slPerc / 100) : close * (1 + slPerc / 100);
+        else
+            sl = stopType === 'Ruptura EMA 200' ? E200 : E500;
+    }
+
+    return {
+        signal, timestamp: ts, entry: close, tp, sl,
+        indicadores: { rsi15, macd5, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
+    };
+}
+
+app.get('/api/estrategia/signal', autenticar, async (req, res) => {
+    const { nombre } = req.query;
+    if (!nombre) return res.status(400).json({ error: 'nombre requerido' });
+    try {
+        const stratRes = await pool.query(
+            'SELECT params FROM estrategias_guardadas WHERE usuario_id = $1 AND nombre = $2',
+            [req.usuario.id, nombre]
+        );
+        if (stratRes.rows.length === 0) return res.status(404).json({ error: 'Estrategia no encontrada' });
+        const p = stratRes.rows[0].params;
+
+        const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
+            fetchKlinesBatch('1m',  520),
+            fetchKlinesBatch('5m',  50),
+            fetchKlinesBatch('15m', 30),
+            pool.query(
+                `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
+                 FROM ballenas WHERE fecha >= NOW() - INTERVAL '2 hours' AND cantidad >= $1 ORDER BY fecha ASC`,
+                [p.whaleMinBTC || 5]
+            ),
+        ]);
+
+        res.json(evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p));
+    } catch (e) {
+        console.error('Error signal:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ── Estrategias guardadas ──────────────────────────────────────
 app.get('/api/estrategias', autenticar, async (req, res) => {
     try {
