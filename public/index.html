@@ -197,6 +197,7 @@
                 <span id="at-dot" style="width:8px;height:8px;border-radius:50%;background:#94a3b8;flex-shrink:0;"></span>
                 <span id="at-label" style="font-size:11px;font-weight:bold;color:#94a3b8;white-space:nowrap;">Inactivo</span>
                 <button onclick="abrirConfigAutoTrading()" style="height:24px;padding:0 7px;border:1px solid #d1d4dc;border-radius:4px;font-size:10px;background:#f8fafc;color:#64748b;cursor:pointer;">⚙ Config</button>
+                <button id="btn-at-test" onclick="probarAutoTrading()" style="height:24px;padding:0 7px;border:1px solid #ff9800;border-radius:4px;font-size:10px;background:#fff8f0;color:#ff9800;cursor:pointer;font-weight:bold;">▶ Prueba</button>
             </div>
 
             <div style="border-left: 2px solid #d1d4dc; margin-left: 5px; padding-left: 6px; display: flex; gap: 4px; align-items: center;">
@@ -1373,6 +1374,60 @@
                     label.textContent = 'Inactivo';
                 }
             } catch (_) {}
+        }
+
+        async function probarAutoTrading() {
+            const btn = document.getElementById('btn-at-test');
+            btn.textContent = '⏳';
+            btn.disabled = true;
+            try {
+                // Precio actual del gráfico
+                const precioActual = velasActuales.length
+                    ? velasActuales[velasActuales.length - 1].close
+                    : 95000;
+
+                // Config de auto-trading para obtener estrategia y positionUsdt
+                const cfgRes = await fetch('/api/autotrading', { credentials: 'same-origin' });
+                const cfg = cfgRes.ok ? await cfgRes.json() : {};
+                const positionUsdt = cfg.position_usdt || 100;
+
+                // Params de la estrategia para calcular TP/SL reales
+                let tpPerc = 0.5, slPerc = 1.0;
+                if (cfg.estrategia_nombre) {
+                    const estratRes = await fetch('/api/estrategias', { credentials: 'same-origin' });
+                    if (estratRes.ok) {
+                        const lista = await estratRes.json();
+                        const est = lista.find(e => e.nombre === cfg.estrategia_nombre);
+                        if (est) {
+                            tpPerc = est.params.tpPerc ?? 0.5;
+                            slPerc = est.params.slPerc ?? 1.0;
+                        }
+                    }
+                }
+
+                const entry = precioActual;
+                const tp    = entry * (1 + tpPerc / 100);
+                const sl    = entry * (1 - slPerc / 100);
+
+                const res = await fetch('/api/autotrading/test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ signal: 'long', entry, tp, sl, positionUsdt })
+                });
+                const data = await res.json();
+
+                if (data.ok) {
+                    alert(`✅ Test enviado a n8n\n\nSeñal: LONG\nEntrada: $${Math.round(entry).toLocaleString()}\nTP: $${Math.round(tp).toLocaleString()} (+${tpPerc}%)\nSL: $${Math.round(sl).toLocaleString()} (-${slPerc}%)\nCapital: $${positionUsdt} USDT\n\nRespuesta n8n: ${data.n8n}`);
+                } else {
+                    alert(`❌ Error al enviar a n8n\nStatus: ${data.status}\n${data.n8n || data.error}`);
+                }
+            } catch (e) {
+                alert(`❌ Error: ${e.message}`);
+            } finally {
+                btn.textContent = '▶ Prueba';
+                btn.disabled = false;
+            }
         }
 
         async function abrirConfigAutoTrading() {
