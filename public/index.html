@@ -1248,14 +1248,14 @@
                 estrategiaLiveInterval = null;
                 chart.removeOverlay({ groupId: 'senal_live' });
                 btn.textContent = 'Activar';
-                btn.style.cssText = 'height:28px;padding:0 9px;border:1px solid #d1d4dc;border-radius:4px;font-size:11px;background:#f8fafc;color:#374151;cursor:pointer;white-space:nowrap;';
+                btn.style.cssText = 'height:24px;padding:0 8px;border:1px solid #d1d4dc;border-radius:4px;font-size:11px;background:#f8fafc;color:#374151;cursor:pointer;white-space:nowrap;';
                 setLiveBadge('', '#94a3b8');
             } else {
                 const nombre = document.getElementById('strat-live-sel').value;
                 if (!nombre) { setLiveBadge('Seleccioná una estrategia', '#ef5350'); return; }
                 estrategiaLiveActiva = true;
                 btn.textContent = 'Desactivar';
-                btn.style.cssText = 'height:28px;padding:0 9px;border:1px solid #2962FF;border-radius:4px;font-size:11px;background:#2962FF;color:#fff;cursor:pointer;white-space:nowrap;';
+                btn.style.cssText = 'height:24px;padding:0 8px;border:1px solid #2962FF;border-radius:4px;font-size:11px;background:#2962FF;color:#fff;cursor:pointer;white-space:nowrap;';
                 setLiveBadge('Evaluando...', '#94a3b8');
                 await checkSenalEstrategia();
                 estrategiaLiveInterval = setInterval(checkSenalEstrategia, 30000);

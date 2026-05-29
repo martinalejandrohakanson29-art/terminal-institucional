@@ -920,7 +920,7 @@ async function ejecutarAutoTrading() {
         const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
             fetchKlinesBatch('1m',  520),
             fetchKlinesBatch('5m',  50),
-            fetchKlinesBatch('15m', 30),
+            fetchKlinesBatch('15m', 60),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
                  FROM ballenas WHERE fecha >= NOW() - INTERVAL '2 hours' AND cantidad >= $1 ORDER BY fecha ASC`,
@@ -1185,7 +1185,7 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
         const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
             fetchKlinesBatch('1m',  520),
             fetchKlinesBatch('5m',  50),
-            fetchKlinesBatch('15m', 30),
+            fetchKlinesBatch('15m', 60),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
                  FROM ballenas WHERE fecha >= NOW() - INTERVAL '2 hours' AND cantidad >= $1 ORDER BY fecha ASC`,
