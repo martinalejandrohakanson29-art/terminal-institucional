@@ -112,6 +112,20 @@
         </div>
     </div>
 
+    <div id="deltasum-config-panel" style="display:none; position:absolute; top:65px; left:340px; background:white; border:1px solid #d1d4dc; padding:14px; border-radius:8px; z-index:2000; box-shadow:0 4px 12px rgba(0,0,0,0.15); width:190px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h4 style="margin:0; font-size:13px;">Delta Sum — Config</h4>
+            <span onclick="toggleDeltaSumConfig()" style="cursor:pointer; color:#64748b; font-size:18px; font-weight:bold;">&times;</span>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; white-space:nowrap;">Velas (N):</span>
+                <input type="number" id="input-deltasum" class="input-rango" value="20" min="1" max="999" style="width:60px; font-size:13px;">
+            </div>
+            <button class="btn-tiempo" onclick="aplicarDeltaSum(); toggleDeltaSumConfig();" style="background:#2962FF; color:white; border:none; width:100%; height:30px; font-size:12px;">Aplicar</button>
+        </div>
+    </div>
+
     <div id="header">
         <!-- Fila 1: título + temporalidades + controles de usuario -->
         <div class="header-row" style="justify-content: space-between;">
@@ -183,7 +197,9 @@
                     <button id="btn-vwap" class="btn-dibujo btn-activo" onclick="toggleIndicator('VWAP')" title="Mostrar/Ocultar VWAP" style="width: auto; padding: 0 5px;">VWAP</button>
                     <button id="btn-delta" class="btn-dibujo btn-activo" onclick="toggleIndicator('DELTA')" title="Mostrar/Ocultar Delta" style="width: auto; padding: 0 5px;">DELTA</button>
                     <button id="btn-deltasum" class="btn-dibujo btn-activo" onclick="toggleIndicator('DELTASUM')" title="Mostrar/Ocultar Delta Acumulado" style="width: auto; padding: 0 5px;">ΔSum</button>
-                    <input type="number" id="input-deltasum" class="input-rango" value="20" min="1" max="999" style="width:38px;" title="Velas para suma de delta" onchange="aplicarDeltaSum()">
+                    <button class="btn-dibujo" onclick="toggleDeltaSumConfig()" title="Configurar Delta Sum">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                    </button>
                     <button id="btn-oi" class="btn-dibujo btn-activo" onclick="toggleIndicator('OI')" title="Mostrar/Ocultar Open Interest" style="width: auto; padding: 0 5px;">OI</button>
                     <button id="btn-macd" class="btn-dibujo btn-activo" onclick="toggleIndicator('MACD')" title="Mostrar/Ocultar MACD 15m" style="width: auto; padding: 0 5px;">MACD</button>
                     <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 EMAs" style="width: auto; padding: 0 5px;">3EMA</button>
@@ -695,6 +711,11 @@
                 overlaySeleccionado = null;
             }
         });
+        function toggleDeltaSumConfig() {
+            const p = document.getElementById('deltasum-config-panel');
+            p.style.display = p.style.display === 'none' ? 'block' : 'none';
+        }
+
         function aplicarDeltaSum() {
             const p = Math.max(1, parseInt(document.getElementById('input-deltasum').value) || 20);
             chart.overrideIndicator({ name: 'DELTA_ACUM', calcParams: [p] }, 'pane_deltasum');
