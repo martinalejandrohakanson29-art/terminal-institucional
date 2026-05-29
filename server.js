@@ -82,6 +82,11 @@ async function inicializarBaseDeDatos() {
             position_usdt NUMERIC DEFAULT 100,
             ultima_senal VARCHAR(10),
             ultima_senal_ts BIGINT,
+            posicion_lado VARCHAR(10),
+            posicion_qty NUMERIC,
+            posicion_entry NUMERIC,
+            posicion_tp NUMERIC,
+            posicion_sl NUMERIC,
             CONSTRAINT solo_una_fila CHECK (id = 1)
         );
         INSERT INTO auto_trading_config (id) VALUES (1) ON CONFLICT DO NOTHING;
@@ -110,6 +115,16 @@ async function inicializarBaseDeDatos() {
         `);
 
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_ballenas_fecha ON ballenas(fecha DESC)`);
+
+        // Migración: columnas de posición activa en auto_trading_config
+        await pool.query(`
+            ALTER TABLE auto_trading_config
+                ADD COLUMN IF NOT EXISTS posicion_lado   VARCHAR(10),
+                ADD COLUMN IF NOT EXISTS posicion_qty    NUMERIC,
+                ADD COLUMN IF NOT EXISTS posicion_entry  NUMERIC,
+                ADD COLUMN IF NOT EXISTS posicion_tp     NUMERIC,
+                ADD COLUMN IF NOT EXISTS posicion_sl     NUMERIC
+        `);
         await pool.query(`INSERT INTO configuracion (clave, valor) VALUES ('limite_bd', 1.0) ON CONFLICT (clave) DO NOTHING`);
 
         const configRes = await pool.query(`SELECT valor FROM configuracion WHERE clave = 'limite_bd'`);
@@ -752,6 +767,90 @@ const AUTO_POSITION_USDT = parseFloat(process.env.AUTO_POSITION_USDT) || 100;
 const BINANCE_API_KEY    = process.env.Clave_API_Binance;
 const BINANCE_SECRET     = process.env.Clave_secreta_Binance;
 const BINANCE_BASE       = 'https://testnet.binancefuture.com';
+const BINANCE_WS_PRECIO  = BINANCE_BASE.includes('testnet')
+    ? 'wss://stream.binancefuture.com/ws/btcusdt@aggTrade'
+    : 'wss://fstream.binance.com/ws/btcusdt@aggTrade';
+
+// Estado de posición activa (memoria + BD)
+let posicionActiva = null; // { lado, qty, entry, tp, sl }
+
+async function guardarPosicionBD(pos) {
+    await pool.query(
+        `UPDATE auto_trading_config
+         SET posicion_lado=$1, posicion_qty=$2, posicion_entry=$3, posicion_tp=$4, posicion_sl=$5
+         WHERE id=1`,
+        [pos.lado, pos.qty, pos.entry, pos.tp, pos.sl]
+    );
+}
+
+async function limpiarPosicionBD() {
+    await pool.query(
+        `UPDATE auto_trading_config
+         SET posicion_lado=NULL, posicion_qty=NULL, posicion_entry=NULL, posicion_tp=NULL, posicion_sl=NULL
+         WHERE id=1`
+    );
+}
+
+function buildCloseUrl(lado, qty) {
+    const side = lado === 'long' ? 'SELL' : 'BUY';
+    const ts   = Date.now();
+    const p    = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&timestamp=${ts}`;
+    return `${BINANCE_BASE}/fapi/v1/order?${p}&signature=${binanceSign(p)}`;
+}
+
+async function chequearSalida(precio) {
+    if (!posicionActiva) return;
+    const { lado, qty, tp, sl } = posicionActiva;
+
+    const golpeTP = lado === 'long' ? precio >= tp : precio <= tp;
+    const golpeSL = lado === 'long' ? precio <= sl : precio >= sl;
+    if (!golpeTP && !golpeSL) return;
+
+    const razon = golpeTP ? 'TP' : 'SL';
+    console.log(`[AutoTrading] ${razon} alcanzado @ $${precio.toFixed(1)} — cerrando posición`);
+
+    // Limpiar antes de ejecutar para evitar doble cierre
+    const pos = posicionActiva;
+    posicionActiva = null;
+    await limpiarPosicionBD();
+    await pool.query(`UPDATE auto_trading_config SET ultima_senal = NULL WHERE id = 1`);
+
+    await ejecutarOrdenBinance(buildCloseUrl(pos.lado, pos.qty), BINANCE_API_KEY, `CIERRE-${razon}`);
+}
+
+// WebSocket de precio futuros para monitoreo TP/SL en tiempo real
+let wsPrecioConectando = false;
+
+function iniciarMonitorPrecio() {
+    if (wsPrecioConectando) return;
+    wsPrecioConectando = true;
+
+    const ws = new WebSocket(BINANCE_WS_PRECIO);
+
+    ws.on('open', () => {
+        wsPrecioConectando = false;
+        console.log('✅ Monitor de precio futuros conectado.');
+    });
+
+    ws.on('message', async (data) => {
+        try {
+            const evento = JSON.parse(data);
+            await chequearSalida(parseFloat(evento.p));
+        } catch (e) {
+            console.error('Error en monitor de precio:', e.message);
+        }
+    });
+
+    ws.on('error', (err) => {
+        console.error('Error WebSocket precio:', err.message);
+        ws.terminate();
+    });
+
+    ws.on('close', () => {
+        wsPrecioConectando = false;
+        setTimeout(iniciarMonitorPrecio, 5000);
+    });
+}
 
 // Log de estado al arrancar
 setTimeout(() => {
@@ -805,6 +904,7 @@ function buildBinanceUrls(signal, entry, tp, sl, positionUsdt) {
 
 async function ejecutarAutoTrading() {
     if (!N8N_WEBHOOK_URL) return;
+    if (posicionActiva) return; // ya hay posición abierta, el WS gestiona la salida
     try {
         const cfgRes = await pool.query('SELECT * FROM auto_trading_config WHERE id = 1');
         const cfg = cfgRes.rows[0];
@@ -849,8 +949,12 @@ async function ejecutarAutoTrading() {
 
         console.log(`[AutoTrading] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${urls.qty} BTC`);
 
-        // Ejecutar orden de entrada (TP/SL pendiente de implementar)
         const ordenEntrada = await ejecutarOrdenBinance(urls.entryUrl, urls.apiKey, 'ENTRADA');
+        if (ordenEntrada.ok) {
+            posicionActiva = { lado: nuevaSenal, qty: urls.qty, entry: resultado.entry, tp: resultado.tp, sl: resultado.sl };
+            await guardarPosicionBD(posicionActiva);
+            console.log(`[AutoTrading] Posición guardada — TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)}`);
+        }
 
         // Notificar a n8n (opcional, solo logging)
         if (N8N_WEBHOOK_URL) {
@@ -872,7 +976,28 @@ async function ejecutarAutoTrading() {
 }
 
 // Arrancar loop después de que la BD esté lista
-setTimeout(() => {
+setTimeout(async () => {
+    // Recuperar posición activa si el servidor se reinició con una posición abierta
+    try {
+        const r = await pool.query(
+            'SELECT posicion_lado, posicion_qty, posicion_entry, posicion_tp, posicion_sl FROM auto_trading_config WHERE id = 1'
+        );
+        const pos = r.rows[0];
+        if (pos && pos.posicion_lado) {
+            posicionActiva = {
+                lado:  pos.posicion_lado,
+                qty:   parseFloat(pos.posicion_qty),
+                entry: parseFloat(pos.posicion_entry),
+                tp:    parseFloat(pos.posicion_tp),
+                sl:    parseFloat(pos.posicion_sl),
+            };
+            console.log(`[AutoTrading] Posición activa recuperada: ${posicionActiva.lado.toUpperCase()} @ $${posicionActiva.entry} | TP $${posicionActiva.tp?.toFixed(0)} | SL $${posicionActiva.sl?.toFixed(0)}`);
+        }
+    } catch (e) {
+        console.error('[AutoTrading] Error cargando posición desde BD:', e.message);
+    }
+
+    iniciarMonitorPrecio();
     ejecutarAutoTrading();
     setInterval(ejecutarAutoTrading, 60 * 1000);
 }, 5000);
@@ -928,8 +1053,12 @@ app.post('/api/autotrading/test', autenticar, soloAdmin, async (req, res) => {
         const urls = buildBinanceUrls(signal, entry, tp, sl, positionUsdt);
 
         const resEntrada = await ejecutarOrdenBinance(urls.entryUrl, urls.apiKey, 'ENTRADA');
-        const resTp = { ok: false, body: { msg: 'pendiente de implementar' } };
-        const resSl = { ok: false, body: { msg: 'pendiente de implementar' } };
+        if (resEntrada.ok) {
+            posicionActiva = { lado: signal, qty: urls.qty, entry, tp, sl };
+            await guardarPosicionBD(posicionActiva);
+        }
+        const resTp = { ok: false, body: { msg: 'gestionado por monitor WebSocket' } };
+        const resSl = { ok: false, body: { msg: 'gestionado por monitor WebSocket' } };
 
         // Notificar n8n si está configurado
         if (N8N_WEBHOOK_URL) {
