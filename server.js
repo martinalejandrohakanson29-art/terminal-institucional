@@ -765,6 +765,25 @@ function binanceSign(params) {
     return crypto.createHmac('sha256', BINANCE_SECRET).update(params).digest('hex');
 }
 
+async function ejecutarOrdenBinance(url, apiKey, etiqueta) {
+    try {
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'X-MBX-APIKEY': apiKey, 'Content-Type': 'application/x-www-form-urlencoded' },
+        });
+        const body = await resp.json();
+        if (resp.ok) {
+            console.log(`[AutoTrading] ✅ Orden ${etiqueta} ejecutada — orderId: ${body.orderId}`);
+        } else {
+            console.error(`[AutoTrading] ❌ Orden ${etiqueta} rechazada — ${body.code}: ${body.msg}`);
+        }
+        return { ok: resp.ok, body };
+    } catch (e) {
+        console.error(`[AutoTrading] ❌ Error red orden ${etiqueta}: ${e.message}`);
+        return { ok: false, error: e.message };
+    }
+}
+
 function buildBinanceUrls(signal, entry, tp, sl, positionUsdt) {
     const side   = signal === 'long' ? 'BUY' : 'SELL';
     const tpSide = signal === 'long' ? 'SELL' : 'BUY';
@@ -826,23 +845,32 @@ async function ejecutarAutoTrading() {
         }
 
         const positionUsdt = parseFloat(cfg.position_usdt) || AUTO_POSITION_USDT;
-        const urls  = buildBinanceUrls(nuevaSenal, resultado.entry, resultado.tp, resultado.sl, positionUsdt);
-        const payload = {
-            ...urls,
-            signal:     nuevaSenal,
-            estrategia: cfg.estrategia_nombre,
-            timestamp:  resultado.timestamp,
-        };
+        const urls = buildBinanceUrls(nuevaSenal, resultado.entry, resultado.tp, resultado.sl, positionUsdt);
 
         console.log(`[AutoTrading] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${urls.qty} BTC`);
 
-        const resp = await fetch(N8N_WEBHOOK_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        if (!resp.ok) console.error(`[AutoTrading] Error n8n: ${resp.status} ${await resp.text()}`);
-        else console.log(`[AutoTrading] Señal enviada a n8n correctamente`);
+        // Ejecutar órdenes directamente en Binance
+        const ordenEntrada = await ejecutarOrdenBinance(urls.entryUrl, urls.apiKey, 'ENTRADA');
+        if (!ordenEntrada.ok) {
+            console.error(`[AutoTrading] Orden de entrada fallida, abortando TP/SL`);
+        } else {
+            await ejecutarOrdenBinance(urls.tpUrl, urls.apiKey, 'TP');
+            await ejecutarOrdenBinance(urls.slUrl, urls.apiKey, 'SL');
+        }
+
+        // Notificar a n8n (opcional, solo logging)
+        if (N8N_WEBHOOK_URL) {
+            fetch(N8N_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    signal: nuevaSenal, entry: resultado.entry,
+                    tp: resultado.tp, sl: resultado.sl,
+                    qty: urls.qty, estrategia: cfg.estrategia_nombre,
+                    ordenOk: ordenEntrada.ok,
+                }),
+            }).catch(() => {});
+        }
 
     } catch (e) {
         console.error('[AutoTrading] Error en loop:', e.message);
@@ -895,24 +923,38 @@ app.get('/api/autotrading/status', autenticar, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Endpoint de test: dispara el webhook con una señal simulada (solo admin)
+// Endpoint de test: ejecuta órdenes reales en Binance Testnet (solo admin)
 app.post('/api/autotrading/test', autenticar, soloAdmin, async (req, res) => {
-    if (!N8N_WEBHOOK_URL) return res.status(500).json({ error: 'N8N_WEBHOOK_URL no configurado' });
-    const signal       = req.body.signal       || 'long';
-    const entry        = parseFloat(req.body.entry)        || 95000;
-    const tp           = parseFloat(req.body.tp)           || 95475;
-    const sl           = parseFloat(req.body.sl)           || 94050;
-    const positionUsdt = parseFloat(req.body.positionUsdt) || 100;
-    const urls = buildBinanceUrls(signal, entry, tp, sl, positionUsdt);
-    const payload = { ...urls, signal, estrategia: 'TEST', timestamp: Date.now() };
+    const signal       = req.body.signal                    || 'long';
+    const entry        = parseFloat(req.body.entry)         || 95000;
+    const tp           = parseFloat(req.body.tp)            || 95475;
+    const sl           = parseFloat(req.body.sl)            || 94050;
+    const positionUsdt = parseFloat(req.body.positionUsdt)  || 100;
     try {
-        const resp = await fetch(N8N_WEBHOOK_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+        const urls = buildBinanceUrls(signal, entry, tp, sl, positionUsdt);
+
+        const resEntrada = await ejecutarOrdenBinance(urls.entryUrl, urls.apiKey, 'ENTRADA');
+        let resTp = { ok: false }, resSl = { ok: false };
+        if (resEntrada.ok) {
+            resTp = await ejecutarOrdenBinance(urls.tpUrl, urls.apiKey, 'TP');
+            resSl = await ejecutarOrdenBinance(urls.slUrl, urls.apiKey, 'SL');
+        }
+
+        // Notificar n8n si está configurado
+        if (N8N_WEBHOOK_URL) {
+            fetch(N8N_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ signal, entry, tp, sl, qty: urls.qty, estrategia: 'TEST', ordenOk: resEntrada.ok }),
+            }).catch(() => {});
+        }
+
+        res.json({
+            entrada: { ok: resEntrada.ok, orderId: resEntrada.body?.orderId, msg: resEntrada.body?.msg },
+            tp:      { ok: resTp.ok,      orderId: resTp.body?.orderId,      msg: resTp.body?.msg },
+            sl:      { ok: resSl.ok,      orderId: resSl.body?.orderId,      msg: resSl.body?.msg },
+            qty: urls.qty, signal, entry, tp, sl,
         });
-        const texto = await resp.text();
-        res.json({ ok: resp.ok, status: resp.status, n8n: texto, payload });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
