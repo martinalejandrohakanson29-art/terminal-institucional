@@ -1,0 +1,101 @@
+{
+  "name": "binance",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "binance-signal",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "id": "2e61a1e4-e7bb-47ba-ab15-c7cb5cc4918e",
+      "name": "Webhook",
+      "webhookId": "9b5c9900-a6e5-4f8f-948f-db056e86bfaa"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.body.entryUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-MBX-APIKEY",
+              "value": "={{ $json.body.apiKey }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [220, 0],
+      "id": "02020dbf-78aa-4b2c-9410-282c1dd8bd08",
+      "name": "entrada"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Webhook').first().json.body.tpUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-MBX-APIKEY",
+              "value": "={{ $('Webhook').first().json.body.apiKey }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [440, 0],
+      "id": "bb580a31-2bf2-4f80-a5a9-db11350b643e",
+      "name": "tp"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Webhook').first().json.body.slUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-MBX-APIKEY",
+              "value": "={{ $('Webhook').first().json.body.apiKey }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [660, 0],
+      "id": "d342e460-6b13-4c27-813e-c0d6142b74b0",
+      "name": "sl"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "entrada", "type": "main", "index": 0 }]]
+    },
+    "entrada": {
+      "main": [[{ "node": "tp", "type": "main", "index": 0 }]]
+    },
+    "tp": {
+      "main": [[{ "node": "sl", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  }
+}

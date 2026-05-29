@@ -3,6 +3,7 @@ const express = require('express');
 const path = require('path');
 const { Pool } = require('pg');
 const WebSocket = require('ws');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
@@ -746,8 +747,34 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
 }
 
 // ── Auto-Trading Loop ─────────────────────────────────────────
-const N8N_WEBHOOK_URL   = process.env.N8N_WEBHOOK_URL;
+const N8N_WEBHOOK_URL    = process.env.N8N_WEBHOOK_URL;
 const AUTO_POSITION_USDT = parseFloat(process.env.AUTO_POSITION_USDT) || 100;
+const BINANCE_API_KEY    = process.env.Clave_API_Binance;
+const BINANCE_SECRET     = process.env.Clave_secreta_Binance;
+const BINANCE_BASE       = 'https://testnet.binancefuture.com';
+
+function binanceSign(params) {
+    return crypto.createHmac('sha256', BINANCE_SECRET).update(params).digest('hex');
+}
+
+function buildBinanceUrls(signal, entry, tp, sl, positionUsdt) {
+    const side   = signal === 'long' ? 'BUY' : 'SELL';
+    const tpSide = signal === 'long' ? 'SELL' : 'BUY';
+    const qty    = Math.floor((positionUsdt / entry) * 1000) / 1000;
+    const ts     = Date.now();
+
+    const entryP = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&timestamp=${ts}`;
+    const tpP    = `symbol=BTCUSDT&side=${tpSide}&type=TAKE_PROFIT_MARKET&stopPrice=${tp.toFixed(1)}&closePosition=true&recvWindow=10000&timestamp=${ts + 1}`;
+    const slP    = `symbol=BTCUSDT&side=${tpSide}&type=STOP_MARKET&stopPrice=${sl.toFixed(1)}&closePosition=true&recvWindow=10000&timestamp=${ts + 2}`;
+
+    return {
+        entryUrl: `${BINANCE_BASE}/fapi/v1/order?${entryP}&signature=${binanceSign(entryP)}`,
+        tpUrl:    `${BINANCE_BASE}/fapi/v1/order?${tpP}&signature=${binanceSign(tpP)}`,
+        slUrl:    `${BINANCE_BASE}/fapi/v1/order?${slP}&signature=${binanceSign(slP)}`,
+        apiKey:   BINANCE_API_KEY,
+        qty, side, entry, tp, sl,
+    };
+}
 
 async function ejecutarAutoTrading() {
     if (!N8N_WEBHOOK_URL) return;
@@ -791,17 +818,15 @@ async function ejecutarAutoTrading() {
         }
 
         const positionUsdt = parseFloat(cfg.position_usdt) || AUTO_POSITION_USDT;
+        const urls  = buildBinanceUrls(nuevaSenal, resultado.entry, resultado.tp, resultado.sl, positionUsdt);
         const payload = {
-            signal:       nuevaSenal,
-            entry:        resultado.entry,
-            tp:           resultado.tp,
-            sl:           resultado.sl,
-            positionUsdt,
-            estrategia:   cfg.estrategia_nombre,
-            timestamp:    resultado.timestamp,
+            ...urls,
+            signal:     nuevaSenal,
+            estrategia: cfg.estrategia_nombre,
+            timestamp:  resultado.timestamp,
         };
 
-        console.log(`[AutoTrading] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)}`);
+        console.log(`[AutoTrading] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${urls.qty} BTC`);
 
         const resp = await fetch(N8N_WEBHOOK_URL, {
             method: 'POST',
@@ -865,15 +890,13 @@ app.get('/api/autotrading/status', autenticar, async (req, res) => {
 // Endpoint de test: dispara el webhook con una señal simulada (solo admin)
 app.post('/api/autotrading/test', autenticar, soloAdmin, async (req, res) => {
     if (!N8N_WEBHOOK_URL) return res.status(500).json({ error: 'N8N_WEBHOOK_URL no configurado' });
-    const payload = {
-        signal:       req.body.signal       || 'long',
-        entry:        req.body.entry        || 95000,
-        tp:           req.body.tp           || 95475,
-        sl:           req.body.sl           || 94050,
-        positionUsdt: req.body.positionUsdt || 100,
-        estrategia:   'TEST',
-        timestamp:    Date.now(),
-    };
+    const signal       = req.body.signal       || 'long';
+    const entry        = parseFloat(req.body.entry)        || 95000;
+    const tp           = parseFloat(req.body.tp)           || 95475;
+    const sl           = parseFloat(req.body.sl)           || 94050;
+    const positionUsdt = parseFloat(req.body.positionUsdt) || 100;
+    const urls = buildBinanceUrls(signal, entry, tp, sl, positionUsdt);
+    const payload = { ...urls, signal, estrategia: 'TEST', timestamp: Date.now() };
     try {
         const resp = await fetch(N8N_WEBHOOK_URL, {
             method: 'POST',
