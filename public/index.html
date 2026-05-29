@@ -12,35 +12,36 @@
     <style>
         * { box-sizing: border-box; }
         body { margin: 0; padding: 0; background-color: #f0f2f5; color: #1e1e1e; font-family: Arial, sans-serif; overflow: hidden; width: 100vw; height: 100vh; display: flex; flex-direction: column; }
-        #header { padding: 5px 10px; display: flex; justify-content: space-between; align-items: center; background-color: #ffffff; border-bottom: 1px solid #d1d4dc; flex-shrink: 0; gap: 6px; min-height: 48px; }
-        h2 { margin: 0; font-size: 1rem; white-space: nowrap; }
+        #header { padding: 4px 10px; display: flex; flex-direction: column; align-items: stretch; background-color: #ffffff; border-bottom: 1px solid #d1d4dc; flex-shrink: 0; gap: 3px; }
+        .header-row { display: flex; align-items: center; gap: 5px; }
+        h2 { margin: 0; font-size: 0.88rem; white-space: nowrap; }
 
         .botonera { display: flex; gap: 3px; align-items: center; }
         .btn-tiempo, .btn-dibujo {
             background-color: #f0f2f5;
             color: #1e1e1e;
             border: 1px solid #d1d4dc;
-            padding: 5px 8px;
+            padding: 3px 7px;
             border-radius: 4px;
             cursor: pointer;
             font-weight: bold;
-            font-size: 12px;
+            font-size: 11px;
             transition: all 0.2s;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            gap: 4px;
+            gap: 3px;
             white-space: nowrap;
         }
         .btn-dibujo {
-            padding: 5px;
-            min-width: 30px;
-            height: 30px;
+            padding: 3px;
+            min-width: 26px;
+            height: 26px;
         }
         .btn-tiempo:hover, .btn-dibujo:hover { background-color: #e2e8f0; }
         .btn-activo { background-color: #2962FF; color: white; border-color: #2962FF; }
 
-        .herramientas-dibujo { border-left: 2px solid #d1d4dc; padding-left: 8px; margin-left: 4px; display: flex; gap: 3px; align-items: center; }
+        .herramientas-dibujo { border-left: 2px solid #d1d4dc; padding-left: 6px; margin-left: 2px; display: flex; gap: 3px; align-items: center; }
 
         #main-content { display: flex; flex: 1; min-height: 0; }
         #chart-container { flex-grow: 1; position: relative; overflow: hidden; background-color: #f0f2f5; }
@@ -112,26 +113,79 @@
     </div>
 
     <div id="header">
-        <div style="display:flex; align-items:center; gap:8px;">
-            <h2>Terminal Institucional</h2>
-            <div id="status-dot" style="width:10px;height:10px;border-radius:50%;background-color:#ff9800;flex-shrink:0;" title="Estado de conexiones: esperando..."></div>
+        <!-- Fila 1: título + temporalidades + controles de usuario -->
+        <div class="header-row" style="justify-content: space-between;">
+            <div style="display:flex; align-items:center; gap:6px;">
+                <h2>Terminal Institucional</h2>
+                <div id="status-dot" style="width:9px;height:9px;border-radius:50%;background-color:#ff9800;flex-shrink:0;" title="Estado de conexiones: esperando..."></div>
+                <div id="whale-delta-display" style="font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px;"></div>
+            </div>
+            <div class="botonera">
+                <button class="btn-tiempo" id="btn-panel" onclick="togglePanel()" style="border-color: #64748b; color: #64748b;">Ocultar Panel</button>
+
+                <button class="btn-tiempo btn-activo" id="btn-1m" onclick="cambiarTemporalidad('1m')">1m</button>
+                <button class="btn-tiempo" id="btn-5m" onclick="cambiarTemporalidad('5m')">5m</button>
+                <button class="btn-tiempo" id="btn-15m" onclick="cambiarTemporalidad('15m')">15m</button>
+                <button class="btn-tiempo" id="btn-1h" onclick="cambiarTemporalidad('1h')">1H</button>
+                <button class="btn-tiempo" id="btn-4h" onclick="cambiarTemporalidad('4h')">4H</button>
+                <button class="btn-tiempo" id="btn-1d" onclick="cambiarTemporalidad('1d')">1D</button>
+
+                <button class="btn-tiempo" id="btn-guardar" onclick="guardarTodo()" style="margin-left: 4px; border-color: #26a69a; color: #26a69a;" title="Guardar toda la configuración: filtros, dibujos, indicadores, temporalidad">Guardar</button>
+
+                <!-- Estrategia en Vivo -->
+                <div style="border-left:2px solid #d1d4dc; margin-left:3px; padding-left:6px; display:flex; gap:4px; align-items:center;">
+                    <select id="strat-live-sel" style="height:24px; padding:0 4px; border:1px solid #d1d4dc; border-radius:4px; font-size:11px; background:#f8fafc; color:#374151; max-width:110px; cursor:pointer;" title="Estrategia a monitorear en vivo">
+                        <option value="">— Estrategia —</option>
+                    </select>
+                    <button id="btn-strat-live" onclick="toggleEstrategiaLive()"
+                        style="height:24px; padding:0 8px; border:1px solid #d1d4dc; border-radius:4px; font-size:11px; background:#f8fafc; color:#374151; cursor:pointer; white-space:nowrap;">
+                        Activar
+                    </button>
+                    <span id="strat-live-badge" style="font-size:11px; font-weight:bold; color:#94a3b8; white-space:nowrap;"></span>
+                </div>
+
+                <!-- Auto-Trading status (solo admin) -->
+                <div id="at-status-bar" style="display:none; border-left:2px solid #d1d4dc; margin-left:3px; padding-left:6px; align-items:center; gap:4px;">
+                    <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;">AutoBot</span>
+                    <span id="at-dot" style="width:7px;height:7px;border-radius:50%;background:#94a3b8;flex-shrink:0;"></span>
+                    <span id="at-label" style="font-size:11px;font-weight:bold;color:#94a3b8;white-space:nowrap;">Inactivo</span>
+                    <button onclick="abrirConfigAutoTrading()" style="height:22px;padding:0 6px;border:1px solid #d1d4dc;border-radius:4px;font-size:10px;background:#f8fafc;color:#64748b;cursor:pointer;">⚙ Config</button>
+                    <button id="btn-at-test" onclick="probarAutoTrading()" style="height:22px;padding:0 6px;border:1px solid #ff9800;border-radius:4px;font-size:10px;background:#fff8f0;color:#ff9800;cursor:pointer;font-weight:bold;">▶ Prueba</button>
+                </div>
+
+                <div style="border-left: 2px solid #d1d4dc; margin-left: 3px; padding-left: 5px; display: flex; gap: 3px; align-items: center;">
+                    <a href="/estrategias" class="btn-tiempo" style="text-decoration:none;">Backtest</a>
+                    <a id="btn-admin-link" href="/admin" class="btn-tiempo" style="display:none; text-decoration:none;">Admin</a>
+                    <div style="position:relative;">
+                        <button class="btn-tiempo" id="btn-user-menu" onclick="toggleUserMenu()" style="display:flex; align-items:center; gap:4px;">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+                            <span id="user-info-name">—</span>
+                        </button>
+                        <div id="user-menu-dropdown" style="display:none; position:absolute; right:0; top:36px; background:#fff; border:1px solid #d1d4dc; border-radius:6px; box-shadow:0 4px 16px rgba(0,0,0,0.12); z-index:3000; min-width:160px; overflow:hidden;">
+                            <div style="padding:8px 14px; font-size:11px; color:#64748b; border-bottom:1px solid #f0f2f5;">Sesión activa</div>
+                            <button onclick="abrirCambiarPassword()" style="display:block; width:100%; text-align:left; padding:10px 14px; font-size:13px; border:none; background:none; cursor:pointer; color:#1e1e1e;">Cambiar contraseña</button>
+                            <button onclick="logout()" style="display:block; width:100%; text-align:left; padding:10px 14px; font-size:13px; border:none; background:none; cursor:pointer; color:#ef5350; border-top:1px solid #f0f2f5;">Cerrar sesión</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
-        <div id="whale-delta-display" style="font-size: 12px; color: #64748b; white-space: nowrap; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; max-width: 220px;"></div>
-        
-        <div class="botonera" style="margin-right: auto; margin-left: 10px;">
-            <input type="number" id="filtro-grafico" class="input-rango" value="5" min="1" step="1" title="Filtrar gráfico: mostrar ballenas > X BTC">
-            <div class="herramientas-dibujo" style="border-left: none; padding-left: 0; margin-left: 2px;">
-                <div style="gap: 2px; display: flex;">
-                    <button id="btn-vwap" class="btn-dibujo btn-activo" onclick="toggleIndicator('VWAP')" title="Mostrar/Ocultar VWAP" style="width: auto; padding: 0 6px; font-size: 11px;">VWAP</button>
-                    <button id="btn-delta" class="btn-dibujo btn-activo" onclick="toggleIndicator('DELTA')" title="Mostrar/Ocultar Delta" style="width: auto; padding: 0 6px; font-size: 11px;">DELTA</button>
-                    <button id="btn-oi" class="btn-dibujo btn-activo" onclick="toggleIndicator('OI')" title="Mostrar/Ocultar Open Interest" style="width: auto; padding: 0 6px; font-size: 11px;">OI</button>
-                    <button id="btn-macd" class="btn-dibujo btn-activo" onclick="toggleIndicator('MACD')" title="Mostrar/Ocultar MACD 15m" style="width: auto; padding: 0 6px; font-size: 11px;">MACD</button>
-                    <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 EMAs" style="width: auto; padding: 0 6px; font-size: 11px;">3EMA</button>
+
+        <!-- Fila 2: filtro + indicadores + herramientas de dibujo -->
+        <div class="header-row">
+            <div class="botonera">
+                <input type="number" id="filtro-grafico" class="input-rango" value="5" min="1" step="1" title="Filtrar gráfico: mostrar ballenas > X BTC">
+                <div style="gap: 2px; display: flex; margin-left: 3px;">
+                    <button id="btn-vwap" class="btn-dibujo btn-activo" onclick="toggleIndicator('VWAP')" title="Mostrar/Ocultar VWAP" style="width: auto; padding: 0 5px;">VWAP</button>
+                    <button id="btn-delta" class="btn-dibujo btn-activo" onclick="toggleIndicator('DELTA')" title="Mostrar/Ocultar Delta" style="width: auto; padding: 0 5px;">DELTA</button>
+                    <button id="btn-oi" class="btn-dibujo btn-activo" onclick="toggleIndicator('OI')" title="Mostrar/Ocultar Open Interest" style="width: auto; padding: 0 5px;">OI</button>
+                    <button id="btn-macd" class="btn-dibujo btn-activo" onclick="toggleIndicator('MACD')" title="Mostrar/Ocultar MACD 15m" style="width: auto; padding: 0 5px;">MACD</button>
+                    <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 EMAs" style="width: auto; padding: 0 5px;">3EMA</button>
                     <button class="btn-dibujo" onclick="toggleMAConfig()" title="Configurar Medias Móviles">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
                     </button>
                 </div>
-                <select id="select-vwap" class="input-rango" style="width: 52px; cursor: pointer;" title="Reset VWAP">
+                <select id="select-vwap" class="input-rango" style="width: 48px; cursor: pointer;" title="Reset VWAP">
                     <option value="15">15m</option>
                     <option value="60" selected>1H</option>
                     <option value="240">4H</option>
@@ -141,79 +195,29 @@
 
             <div class="herramientas-dibujo">
                 <button class="btn-dibujo" onclick="activarDibujo('segment')" title="Línea de Tendencia">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="19" x2="19" y2="5"></line></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="19" x2="19" y2="5"></line></svg>
                 </button>
                 <button class="btn-dibujo" onclick="activarDibujo('rayLine')" title="Rayo">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="19" x2="19" y2="5"></line><circle cx="5" cy="19" r="1.5" fill="currentColor"></circle><polyline points="15 5 19 5 19 9"></polyline></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="19" x2="19" y2="5"></line><circle cx="5" cy="19" r="1.5" fill="currentColor"></circle><polyline points="15 5 19 5 19 9"></polyline></svg>
                 </button>
                 <button class="btn-dibujo" onclick="activarDibujo('cajaCustom')" title="Rectángulo">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect></svg>
                 </button>
                 <button class="btn-dibujo" onclick="activarDibujo('canalParalelo')" title="Canal Paralelo (3 clics)">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="13" x2="19" y2="5"></line><line x1="5" y1="19" x2="19" y2="11"></line></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="13" x2="19" y2="5"></line><line x1="5" y1="19" x2="19" y2="11"></line></svg>
                 </button>
                 <button class="btn-dibujo" onclick="activarDibujo('fibonacciLine')" title="Retroceso Fibonacci">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"></line><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="14" x2="21" y2="14"></line><line x1="3" y1="19" x2="21" y2="19"></line></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"></line><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="14" x2="21" y2="14"></line><line x1="3" y1="19" x2="21" y2="19"></line></svg>
                 </button>
                 <button class="btn-dibujo" onclick="activarDibujo('rangoVolumen')" title="Calcular Compras y Ventas en un rango" style="color: #2962FF; border-color: #2962FF;">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 20V10M12 20V4M18 20v-7"></path><path d="M3 20h18"></path></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 20V10M12 20V4M18 20v-7"></path><path d="M3 20h18"></path></svg>
                 </button>
                 <button class="btn-dibujo" id="btn-toggle-ballenas" onclick="toggleBallenas()" title="Mostrar/Ocultar marcadores de ballenas" style="color: #26a69a; border-color: #26a69a;">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16c0-2.2 1.8-4 4-4 1.4 0 2.6.7 3.4 1.8.8-1.1 2-1.8 3.4-1.8 1.4 0 2.6.7 3.4 1.8.8-1.1 2-1.8 3.4-1.8 2.2 0 4 1.8 4 4v2H2v-2z"></path></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16c0-2.2 1.8-4 4-4 1.4 0 2.6.7 3.4 1.8.8-1.1 2-1.8 3.4-1.8 1.4 0 2.6.7 3.4 1.8.8-1.1 2-1.8 3.4-1.8 2.2 0 4 1.8 4 4v2H2v-2z"></path></svg>
                 </button>
                 <button class="btn-dibujo" onclick="borrarDibujos()" style="color: #ef5350;" title="Eliminar todos los dibujos">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
                 </button>
-            </div>
-        </div>
-
-        <div class="botonera">
-            <button class="btn-tiempo" id="btn-panel" onclick="togglePanel()" style="margin-right: 8px; border-color: #64748b; color: #64748b;">Ocultar Panel</button>
-
-            <button class="btn-tiempo btn-activo" id="btn-1m" onclick="cambiarTemporalidad('1m')">1m</button>
-            <button class="btn-tiempo" id="btn-5m" onclick="cambiarTemporalidad('5m')">5m</button>
-            <button class="btn-tiempo" id="btn-15m" onclick="cambiarTemporalidad('15m')">15m</button>
-            <button class="btn-tiempo" id="btn-1h" onclick="cambiarTemporalidad('1h')">1H</button>
-            <button class="btn-tiempo" id="btn-4h" onclick="cambiarTemporalidad('4h')">4H</button>
-            <button class="btn-tiempo" id="btn-1d" onclick="cambiarTemporalidad('1d')">1D</button>
-
-            <button class="btn-tiempo" id="btn-guardar" onclick="guardarTodo()" style="margin-left: 8px; border-color: #26a69a; color: #26a69a;" title="Guardar toda la configuración: filtros, dibujos, indicadores, temporalidad">Guardar</button>
-
-            <!-- Estrategia en Vivo -->
-            <div style="border-left:2px solid #d1d4dc; margin-left:5px; padding-left:8px; display:flex; gap:5px; align-items:center;">
-                <select id="strat-live-sel" style="height:28px; padding:0 5px; border:1px solid #d1d4dc; border-radius:4px; font-size:11px; background:#f8fafc; color:#374151; max-width:130px; cursor:pointer;" title="Estrategia a monitorear en vivo">
-                    <option value="">— Estrategia —</option>
-                </select>
-                <button id="btn-strat-live" onclick="toggleEstrategiaLive()"
-                    style="height:28px; padding:0 9px; border:1px solid #d1d4dc; border-radius:4px; font-size:11px; background:#f8fafc; color:#374151; cursor:pointer; white-space:nowrap;">
-                    Activar
-                </button>
-                <span id="strat-live-badge" style="font-size:11px; font-weight:bold; color:#94a3b8; white-space:nowrap;"></span>
-            </div>
-
-            <!-- Auto-Trading status (solo admin) -->
-            <div id="at-status-bar" style="display:none; border-left:2px solid #d1d4dc; margin-left:5px; padding-left:8px; align-items:center; gap:6px;">
-                <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;">AutoBot</span>
-                <span id="at-dot" style="width:8px;height:8px;border-radius:50%;background:#94a3b8;flex-shrink:0;"></span>
-                <span id="at-label" style="font-size:11px;font-weight:bold;color:#94a3b8;white-space:nowrap;">Inactivo</span>
-                <button onclick="abrirConfigAutoTrading()" style="height:24px;padding:0 7px;border:1px solid #d1d4dc;border-radius:4px;font-size:10px;background:#f8fafc;color:#64748b;cursor:pointer;">⚙ Config</button>
-                <button id="btn-at-test" onclick="probarAutoTrading()" style="height:24px;padding:0 7px;border:1px solid #ff9800;border-radius:4px;font-size:10px;background:#fff8f0;color:#ff9800;cursor:pointer;font-weight:bold;">▶ Prueba</button>
-            </div>
-
-            <div style="border-left: 2px solid #d1d4dc; margin-left: 5px; padding-left: 6px; display: flex; gap: 4px; align-items: center;">
-                <a href="/estrategias" class="btn-tiempo" style="font-size:12px; text-decoration:none; padding: 6px 10px;">Backtest</a>
-                <a id="btn-admin-link" href="/admin" class="btn-tiempo" style="display:none; font-size:12px; text-decoration:none; padding: 6px 10px;">Admin</a>
-                <div style="position:relative;">
-                    <button class="btn-tiempo" id="btn-user-menu" onclick="toggleUserMenu()" style="font-size:12px; padding: 6px 10px; display:flex; align-items:center; gap:5px;">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
-                        <span id="user-info-name">—</span>
-                    </button>
-                    <div id="user-menu-dropdown" style="display:none; position:absolute; right:0; top:42px; background:#fff; border:1px solid #d1d4dc; border-radius:6px; box-shadow:0 4px 16px rgba(0,0,0,0.12); z-index:3000; min-width:160px; overflow:hidden;">
-                        <div style="padding:8px 14px; font-size:11px; color:#64748b; border-bottom:1px solid #f0f2f5;">Sesión activa</div>
-                        <button onclick="abrirCambiarPassword()" style="display:block; width:100%; text-align:left; padding:10px 14px; font-size:13px; border:none; background:none; cursor:pointer; color:#1e1e1e;">Cambiar contraseña</button>
-                        <button onclick="logout()" style="display:block; width:100%; text-align:left; padding:10px 14px; font-size:13px; border:none; background:none; cursor:pointer; color:#ef5350; border-top:1px solid #f0f2f5;">Cerrar sesión</button>
-                    </div>
-                </div>
             </div>
         </div>
     </div>
