@@ -849,14 +849,8 @@ async function ejecutarAutoTrading() {
 
         console.log(`[AutoTrading] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${urls.qty} BTC`);
 
-        // Ejecutar órdenes directamente en Binance
+        // Ejecutar orden de entrada (TP/SL pendiente de implementar)
         const ordenEntrada = await ejecutarOrdenBinance(urls.entryUrl, urls.apiKey, 'ENTRADA');
-        if (!ordenEntrada.ok) {
-            console.error(`[AutoTrading] Orden de entrada fallida, abortando TP/SL`);
-        } else {
-            await ejecutarOrdenBinance(urls.tpUrl, urls.apiKey, 'TP');
-            await ejecutarOrdenBinance(urls.slUrl, urls.apiKey, 'SL');
-        }
 
         // Notificar a n8n (opcional, solo logging)
         if (N8N_WEBHOOK_URL) {
@@ -934,11 +928,8 @@ app.post('/api/autotrading/test', autenticar, soloAdmin, async (req, res) => {
         const urls = buildBinanceUrls(signal, entry, tp, sl, positionUsdt);
 
         const resEntrada = await ejecutarOrdenBinance(urls.entryUrl, urls.apiKey, 'ENTRADA');
-        let resTp = { ok: false }, resSl = { ok: false };
-        if (resEntrada.ok) {
-            resTp = await ejecutarOrdenBinance(urls.tpUrl, urls.apiKey, 'TP');
-            resSl = await ejecutarOrdenBinance(urls.slUrl, urls.apiKey, 'SL');
-        }
+        const resTp = { ok: false, body: { msg: 'pendiente de implementar' } };
+        const resSl = { ok: false, body: { msg: 'pendiente de implementar' } };
 
         // Notificar n8n si está configurado
         if (N8N_WEBHOOK_URL) {
