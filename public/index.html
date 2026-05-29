@@ -182,6 +182,8 @@
                 <div style="gap: 2px; display: flex; margin-left: 3px;">
                     <button id="btn-vwap" class="btn-dibujo btn-activo" onclick="toggleIndicator('VWAP')" title="Mostrar/Ocultar VWAP" style="width: auto; padding: 0 5px;">VWAP</button>
                     <button id="btn-delta" class="btn-dibujo btn-activo" onclick="toggleIndicator('DELTA')" title="Mostrar/Ocultar Delta" style="width: auto; padding: 0 5px;">DELTA</button>
+                    <button id="btn-deltasum" class="btn-dibujo btn-activo" onclick="toggleIndicator('DELTASUM')" title="Mostrar/Ocultar Delta Acumulado" style="width: auto; padding: 0 5px;">ΔSum</button>
+                    <input type="number" id="input-deltasum" class="input-rango" value="20" min="1" max="999" style="width:38px;" title="Velas para suma de delta" onchange="aplicarDeltaSum()">
                     <button id="btn-oi" class="btn-dibujo btn-activo" onclick="toggleIndicator('OI')" title="Mostrar/Ocultar Open Interest" style="width: auto; padding: 0 5px;">OI</button>
                     <button id="btn-macd" class="btn-dibujo btn-activo" onclick="toggleIndicator('MACD')" title="Mostrar/Ocultar MACD 15m" style="width: auto; padding: 0 5px;">MACD</button>
                     <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 EMAs" style="width: auto; padding: 0 5px;">3EMA</button>
@@ -409,6 +411,31 @@
         });
 
         klinecharts.registerIndicator({
+            name: 'DELTA_ACUM',
+            shortName: 'ΔAcum',
+            calcParams: [20],
+            figures: [{
+                key: 'deltaAcum', title: 'ΔAcum: ', type: 'bar', baseValue: 0,
+                styles: ({ indicatorData }) => ({
+                    color: (indicatorData && indicatorData.deltaAcum !== undefined && indicatorData.deltaAcum >= 0)
+                        ? 'rgba(38,166,154,0.8)' : 'rgba(239,83,80,0.8)'
+                })
+            }],
+            calc: (dataList, indicator) => {
+                const period = indicator.calcParams[0] || 20;
+                let windowSum = 0;
+                const buf = [];
+                return dataList.map(k => {
+                    const d = k.delta || 0;
+                    buf.push(d);
+                    windowSum += d;
+                    if (buf.length > period) windowSum -= buf.shift();
+                    return { deltaAcum: windowSum };
+                });
+            }
+        });
+
+        klinecharts.registerIndicator({
             name: 'VWAP_CUSTOM',
             shortName: 'VWAP',
             calcParams: [60],
@@ -618,6 +645,7 @@
         window.addEventListener('resize', () => { chart.resize(); });
 
         chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 });
+        chart.createIndicator('DELTA_ACUM', false, { id: 'pane_deltasum', height: 100 });
         chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 });
         chart.createIndicator('MACD_CUSTOM', false, { id: 'pane_macd', height: 120 });
         chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' });
@@ -667,13 +695,18 @@
                 overlaySeleccionado = null;
             }
         });
+        function aplicarDeltaSum() {
+            const p = Math.max(1, parseInt(document.getElementById('input-deltasum').value) || 20);
+            chart.overrideIndicator({ name: 'DELTA_ACUM', calcParams: [p] }, 'pane_deltasum');
+        }
+
         function cambiarVwap() {
             if (!vwapVisible) return;
             chart.overrideIndicator({ name: 'VWAP_CUSTOM', calcParams: [parseInt(document.getElementById('select-vwap').value)] }, 'candle_pane');
         }
 
         // --- TOGGLE INDICADORES ---
-        let vwapVisible = true, deltaVisible = true, oiVisible = true, macdVisible = true;
+        let vwapVisible = true, deltaVisible = true, deltaSumVisible = true, oiVisible = true, macdVisible = true;
 
         function toggleIndicator(tipo) {
             if (tipo === 'VWAP') {
@@ -686,6 +719,11 @@
                 const btn = document.getElementById('btn-delta');
                 if (deltaVisible) { btn.classList.add('btn-activo'); chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 }); }
                 else { btn.classList.remove('btn-activo'); chart.removeIndicator('pane_delta', 'VOL_DELTA'); }
+            } else if (tipo === 'DELTASUM') {
+                deltaSumVisible = !deltaSumVisible;
+                const btn = document.getElementById('btn-deltasum');
+                if (deltaSumVisible) { btn.classList.add('btn-activo'); chart.createIndicator('DELTA_ACUM', false, { id: 'pane_deltasum', height: 100 }); aplicarDeltaSum(); }
+                else { btn.classList.remove('btn-activo'); chart.removeIndicator('pane_deltasum', 'DELTA_ACUM'); }
             } else if (tipo === 'OI') {
                 oiVisible = !oiVisible;
                 const btn = document.getElementById('btn-oi');
@@ -1172,9 +1210,10 @@
                 temporalidad:   temporalidadActual,
                 panelVisible:   document.getElementById('orderbook-container').style.display !== 'none',
                 ballenasVisibles,
-                vwapVisible, deltaVisible, oiVisible, maVisible, macdVisible,
+                vwapVisible, deltaVisible, deltaSumVisible, oiVisible, maVisible, macdVisible,
                 configMA:       { ...configMA },
                 vwapReset:      parseInt(document.getElementById('select-vwap').value),
+                deltaSumPeriod: parseInt(document.getElementById('input-deltasum').value),
                 dibujos:        registroDibujos
             };
 
@@ -1400,6 +1439,15 @@
                     deltaVisible = false;
                     document.getElementById('btn-delta').classList.remove('btn-activo');
                     chart.removeIndicator('pane_delta', 'VOL_DELTA');
+                }
+                if (cfg.deltaSumVisible === false) {
+                    deltaSumVisible = false;
+                    document.getElementById('btn-deltasum').classList.remove('btn-activo');
+                    chart.removeIndicator('pane_deltasum', 'DELTA_ACUM');
+                }
+                if (cfg.deltaSumPeriod) {
+                    document.getElementById('input-deltasum').value = cfg.deltaSumPeriod;
+                    aplicarDeltaSum();
                 }
                 if (cfg.oiVisible === false) {
                     oiVisible = false;
