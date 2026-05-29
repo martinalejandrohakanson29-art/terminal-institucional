@@ -791,8 +791,8 @@ function buildBinanceUrls(signal, entry, tp, sl, positionUsdt) {
     const ts     = Date.now();
 
     const entryP = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&timestamp=${ts}`;
-    const tpP    = `symbol=BTCUSDT&side=${tpSide}&type=TAKE_PROFIT_MARKET&stopPrice=${tp.toFixed(1)}&closePosition=true&recvWindow=10000&timestamp=${ts + 1}`;
-    const slP    = `symbol=BTCUSDT&side=${tpSide}&type=STOP_MARKET&stopPrice=${sl.toFixed(1)}&closePosition=true&recvWindow=10000&timestamp=${ts + 2}`;
+    const tpP    = `symbol=BTCUSDT&side=${tpSide}&type=TAKE_PROFIT_MARKET&stopPrice=${tp.toFixed(1)}&quantity=${qty}&reduceOnly=true&recvWindow=10000&timestamp=${ts + 1}`;
+    const slP    = `symbol=BTCUSDT&side=${tpSide}&type=STOP_MARKET&stopPrice=${sl.toFixed(1)}&quantity=${qty}&reduceOnly=true&recvWindow=10000&timestamp=${ts + 2}`;
 
     return {
         entryUrl: `${BINANCE_BASE}/fapi/v1/order?${entryP}&signature=${binanceSign(entryP)}`,
