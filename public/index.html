@@ -505,40 +505,46 @@
             needDefaultPointFigure: false,
             needDefaultXAxisFigure: false,
             needDefaultYAxisFigure: false,
-            totalStep: 2,
+            totalStep: 4,
             createPointFigures: ({ overlay, coordinates }) => {
-                if (!coordinates || coordinates.length < 2) return [];
+                if (!coordinates || coordinates.length < 4) return [];
                 const { type, reason } = overlay.extendData || {};
                 const isLong = type === 'Long';
-                const entryFill   = isLong ? 'rgba(38,166,154,0.85)' : 'rgba(239,83,80,0.85)';
-                const entryBorder = isLong ? '#26a69a' : '#ef5350';
-                const exitFill    = reason === 'TP'     ? 'rgba(38,166,154,0.85)'
-                                  : reason === 'SL'     ? 'rgba(239,83,80,0.85)'
-                                  : reason === 'EMA'    ? 'rgba(255,152,0,0.85)'
-                                  : 'rgba(148,163,184,0.85)';
-                const exitBorder  = reason === 'TP'  ? '#26a69a'
-                                  : reason === 'SL'  ? '#ef5350'
-                                  : reason === 'EMA' ? '#ff9800' : '#94a3b8';
-                const lineColor   = reason === 'TP'  ? 'rgba(38,166,154,0.2)'
-                                  : reason === 'SL'  ? 'rgba(239,83,80,0.2)'
-                                  : reason === 'EMA' ? 'rgba(255,152,0,0.2)' : 'rgba(148,163,184,0.2)';
-                const x0 = coordinates[0].x, y0 = coordinates[0].y;
-                const x1 = coordinates[1].x, y1 = coordinates[1].y;
-                const sz = 5, ds = 4;
+                // Puntos: 0=entrada, 1=salida, 2=TP, 3=SL
+                const x0 = coordinates[0].x, y0 = coordinates[0].y; // entrada
+                const x1 = coordinates[1].x;                         // salida (solo X)
+                const yTP = coordinates[2].y;                         // nivel TP
+                const ySL = coordinates[3].y;                         // nivel SL
+                // Triángulo de entrada violeta
+                const sz = 5;
                 const triBase = isLong ? y0 + sz * 2.2 : y0 - sz * 2.2;
                 const tri = [{ x: x0 - sz, y: triBase }, { x: x0 + sz, y: triBase }, { x: x0, y: y0 }];
-                const diamond = [
-                    { x: x1, y: y1 - ds }, { x: x1 + ds, y: y1 },
-                    { x: x1, y: y1 + ds }, { x: x1 - ds, y: y1 }
-                ];
+                // Líneas horizontales cortas TP/SL (40px centradas en X entrada)
+                const hw = 40;
+                const exitDot = 3;
+                const exitC = reason === 'TP'  ? '#26a69a'
+                            : reason === 'SL'  ? '#ef5350'
+                            : reason === 'EMA' ? '#ff9800' : '#94a3b8';
+                const exitY = reason === 'TP' ? yTP : reason === 'SL' ? ySL : coordinates[1].y;
                 return [
-                    { type: 'line', ignoreEvent: true,
-                      attrs: { coordinates: [{ x: x0, y: y0 }, { x: x1, y: y1 }] },
-                      styles: { color: lineColor, size: 1, style: 'dashed', dashedValue: [3, 3] } },
+                    // Triángulo entrada — violeta
                     { type: 'polygon', ignoreEvent: true, attrs: { coordinates: tri },
-                      styles: { style: 'fill', color: entryFill, borderColor: entryBorder } },
-                    { type: 'polygon', ignoreEvent: true, attrs: { coordinates: diamond },
-                      styles: { style: 'fill', color: exitFill, borderColor: exitBorder } },
+                      styles: { style: 'fill', color: 'rgba(149,76,233,0.9)', borderColor: '#9546e9' } },
+                    // Línea horizontal TP — verde
+                    { type: 'line', ignoreEvent: true,
+                      attrs: { coordinates: [{ x: x0 - hw, y: yTP }, { x: x0 + hw, y: yTP }] },
+                      styles: { color: '#26a69a', size: 2 } },
+                    // Línea horizontal SL — roja
+                    { type: 'line', ignoreEvent: true,
+                      attrs: { coordinates: [{ x: x0 - hw, y: ySL }, { x: x0 + hw, y: ySL }] },
+                      styles: { color: '#ef5350', size: 2 } },
+                    // Pequeño diamante en salida — color por razón
+                    { type: 'polygon', ignoreEvent: true,
+                      attrs: { coordinates: [
+                          { x: x1, y: exitY - exitDot }, { x: x1 + exitDot, y: exitY },
+                          { x: x1, y: exitY + exitDot }, { x: x1 - exitDot, y: exitY }
+                      ]},
+                      styles: { style: 'fill', color: exitC, borderColor: exitC } },
                 ];
             }
         });
@@ -1121,13 +1127,16 @@
                 if (!trades || trades.length === 0) return;
                 chart.removeOverlay({ groupId: 'backtest_trades' });
                 trades.forEach(t => {
+                    if (!t.tp || !t.sl) return; // trades viejos sin TP/SL guardado
                     chart.createOverlay({
                         name: 'operacionBacktest',
                         groupId: 'backtest_trades',
                         lock: true,
                         points: [
                             { timestamp: t.entryTs, value: t.entryPrice },
-                            { timestamp: t.exitTs,  value: t.exitPrice  }
+                            { timestamp: t.exitTs,  value: t.exitPrice  },
+                            { timestamp: t.entryTs, value: t.tp         },
+                            { timestamp: t.entryTs, value: t.sl         }
                         ],
                         extendData: { type: t.type, reason: t.reason }
                     });

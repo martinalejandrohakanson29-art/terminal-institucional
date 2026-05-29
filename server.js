@@ -625,7 +625,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     let wLeft = 0, wRight = -1, wBuys = 0, wSells = 0;
 
     let capital = p.initialCapital, position = 0, entryPrice = 0;
-    let entryBarIdx = null, lastClosedBarIdx = null;
+    let entryBarIdx = null, lastClosedBarIdx = null, openTP = null, openSL = null;
     const trades = [];
     const equity = [{ ts: parseInt(bars1m[0][0]), v: capital }];
     const WARMUP = 500;
@@ -680,9 +680,9 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                 const net = raw - (p.commission / 100) * 2;
                 const pnlAbs = capital * net;
                 capital += pnlAbs;
-                trades.push({ type: position === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[entryBarIdx][0]), exitTs: ts, entryPrice, exitPrice, pnlPerc: net * 100, pnlAbs, reason: exitReason, capital });
+                trades.push({ type: position === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[entryBarIdx][0]), exitTs: ts, entryPrice, exitPrice, tp: openTP, sl: openSL, pnlPerc: net * 100, pnlAbs, reason: exitReason, capital });
                 equity.push({ ts, v: capital });
-                position = 0; lastClosedBarIdx = i; entryBarIdx = null;
+                position = 0; lastClosedBarIdx = i; entryBarIdx = null; openTP = null; openSL = null;
             }
         }
 
@@ -725,8 +725,15 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
             const whaleOkLong  = !p.useWhaleFilter || whaleDelta > 0;
             const whaleOkShort = !p.useWhaleFilter || whaleDelta < 0;
 
-            if      (p.enableLongs  && above && alignLong  && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong  && whaleOkLong)  { position = 1;  entryPrice = close; entryBarIdx = i; }
-            else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort) { position = -1; entryPrice = close; entryBarIdx = i; }
+            if (p.enableLongs && above && alignLong && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong) {
+                position = 1; entryPrice = close; entryBarIdx = i;
+                openTP = close * (1 + p.tpPerc / 100);
+                openSL = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
+            } else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort) {
+                position = -1; entryPrice = close; entryBarIdx = i;
+                openTP = close * (1 - p.tpPerc / 100);
+                openSL = p.stopType === 'Porcentaje' ? close * (1 + p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
+            }
         }
     }
 
