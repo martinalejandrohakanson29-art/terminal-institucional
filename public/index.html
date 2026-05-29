@@ -1417,10 +1417,29 @@
                 });
                 const data = await res.json();
 
-                if (data.ok) {
-                    alert(`✅ Test enviado a n8n\n\nSeñal: LONG\nEntrada: $${Math.round(entry).toLocaleString()}\nTP: $${Math.round(tp).toLocaleString()} (+${tpPerc}%)\nSL: $${Math.round(sl).toLocaleString()} (-${slPerc}%)\nCapital: $${positionUsdt} USDT\n\nRespuesta n8n: ${data.n8n}`);
+                if (data.error) {
+                    alert(`❌ Error del servidor\n\n${data.error}`);
+                    return;
+                }
+
+                const entradaOk = data.entrada?.ok;
+                const resumen = [
+                    `Señal:   LONG`,
+                    `Entrada: $${Math.round(entry).toLocaleString()}`,
+                    `TP:      $${Math.round(tp).toLocaleString()} (+${tpPerc}%)`,
+                    `SL:      $${Math.round(sl).toLocaleString()} (-${slPerc}%)`,
+                    `Capital: $${positionUsdt} USDT`,
+                    `Qty:     ${data.qty} BTC`,
+                    ``,
+                    `Orden entrada: ${entradaOk ? '✅ #' + data.entrada.orderId : '❌ ' + (data.entrada?.msg || 'Error')}`,
+                    `Orden TP:      ${data.tp?.ok   ? '✅ #' + data.tp.orderId   : '❌ ' + (data.tp?.msg   || 'No enviada')}`,
+                    `Orden SL:      ${data.sl?.ok   ? '✅ #' + data.sl.orderId   : '❌ ' + (data.sl?.msg   || 'No enviada')}`,
+                ].join('\n');
+
+                if (entradaOk) {
+                    alert(`✅ Órdenes ejecutadas en Binance Testnet\n\n${resumen}`);
                 } else {
-                    alert(`❌ Error al enviar a n8n\nStatus: ${data.status}\n${data.n8n || data.error}`);
+                    alert(`❌ Error al ejecutar órdenes\n\n${resumen}`);
                 }
             } catch (e) {
                 alert(`❌ Error: ${e.message}`);
