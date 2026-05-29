@@ -191,6 +191,14 @@
                 <span id="strat-live-badge" style="font-size:11px; font-weight:bold; color:#94a3b8; white-space:nowrap;"></span>
             </div>
 
+            <!-- Auto-Trading status (solo admin) -->
+            <div id="at-status-bar" style="display:none; border-left:2px solid #d1d4dc; margin-left:5px; padding-left:8px; align-items:center; gap:6px;">
+                <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;">AutoBot</span>
+                <span id="at-dot" style="width:8px;height:8px;border-radius:50%;background:#94a3b8;flex-shrink:0;"></span>
+                <span id="at-label" style="font-size:11px;font-weight:bold;color:#94a3b8;white-space:nowrap;">Inactivo</span>
+                <button onclick="abrirConfigAutoTrading()" style="height:24px;padding:0 7px;border:1px solid #d1d4dc;border-radius:4px;font-size:10px;background:#f8fafc;color:#64748b;cursor:pointer;">⚙ Config</button>
+            </div>
+
             <div style="border-left: 2px solid #d1d4dc; margin-left: 5px; padding-left: 6px; display: flex; gap: 4px; align-items: center;">
                 <a href="/estrategias" class="btn-tiempo" style="font-size:12px; text-decoration:none; padding: 6px 10px;">Backtest</a>
                 <a id="btn-admin-link" href="/admin" class="btn-tiempo" style="display:none; font-size:12px; text-decoration:none; padding: 6px 10px;">Admin</a>
@@ -1333,12 +1341,121 @@
             // Estrategias guardadas para el live
             await cargarEstrategiasLive();
 
+            // Auto-trading (solo admin)
+            if (usuarioActual && usuarioActual.rol === 'admin') {
+                document.getElementById('at-status-bar').style.display = 'flex';
+                await actualizarStatusAutoTrading();
+                setInterval(actualizarStatusAutoTrading, 30000);
+            }
+
             // RSI 15m: carga inicial + websocket
             await cargarVelas15m();
             iniciarSocket15m();
         })();
 
+        // ── Auto-Trading UI ───────────────────────────────────────────
+        async function actualizarStatusAutoTrading() {
+            try {
+                const res = await fetch('/api/autotrading/status', { credentials: 'same-origin' });
+                if (!res.ok) return;
+                const cfg = await res.json();
+                const dot   = document.getElementById('at-dot');
+                const label = document.getElementById('at-label');
+                if (cfg.habilitado) {
+                    dot.style.background = '#26a69a';
+                    const dir = cfg.ultima_senal === 'long'  ? ' · ▲ LONG'
+                              : cfg.ultima_senal === 'short' ? ' · ▼ SHORT' : '';
+                    label.style.color = cfg.ultima_senal ? (cfg.ultima_senal === 'long' ? '#26a69a' : '#ef5350') : '#374151';
+                    label.textContent = `${cfg.estrategia_nombre}${dir}`;
+                } else {
+                    dot.style.background = '#94a3b8';
+                    label.style.color = '#94a3b8';
+                    label.textContent = 'Inactivo';
+                }
+            } catch (_) {}
+        }
+
+        async function abrirConfigAutoTrading() {
+            // Cargar estrategias en el select
+            const res  = await fetch('/api/estrategias', { credentials: 'same-origin' });
+            const lista = res.ok ? await res.json() : [];
+            const sel  = document.getElementById('at-strat-sel');
+            sel.innerHTML = lista.length === 0
+                ? '<option value="">— Sin estrategias guardadas —</option>'
+                : lista.map(e => `<option value="${e.nombre.replace(/"/g,'&quot;')}">${e.nombre}</option>`).join('');
+
+            // Cargar config actual
+            const cfgRes = await fetch('/api/autotrading', { credentials: 'same-origin' });
+            if (cfgRes.ok) {
+                const cfg = await cfgRes.json();
+                if (cfg.estrategia_nombre) sel.value = cfg.estrategia_nombre;
+                if (cfg.position_usdt) document.getElementById('at-pos-usdt').value = cfg.position_usdt;
+            }
+
+            const overlay = document.getElementById('modal-at-overlay');
+            overlay.style.display = 'flex';
+            document.getElementById('at-msg').style.display = 'none';
+        }
+
+        function cerrarConfigAutoTrading() {
+            document.getElementById('modal-at-overlay').style.display = 'none';
+        }
+
+        async function guardarConfigAutoTrading(activar) {
+            const estrategia_nombre = document.getElementById('at-strat-sel').value;
+            const position_usdt     = parseFloat(document.getElementById('at-pos-usdt').value);
+            const msgEl = document.getElementById('at-msg');
+
+            if (activar && !estrategia_nombre) {
+                msgEl.style.display = 'block';
+                msgEl.style.background = '#fef2f2'; msgEl.style.border = '1px solid #fca5a5'; msgEl.style.color = '#dc2626';
+                msgEl.textContent = 'Seleccioná una estrategia primero';
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/autotrading', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ habilitado: activar, estrategia_nombre, position_usdt })
+                });
+                if (!res.ok) throw new Error((await res.json()).error);
+                await actualizarStatusAutoTrading();
+                cerrarConfigAutoTrading();
+            } catch (e) {
+                msgEl.style.display = 'block';
+                msgEl.style.background = '#fef2f2'; msgEl.style.border = '1px solid #fca5a5'; msgEl.style.color = '#dc2626';
+                msgEl.textContent = 'Error: ' + e.message;
+            }
+        }
+
     </script>
+
+    <!-- Modal Auto-Trading Config -->
+    <div id="modal-at-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:4000;align-items:center;justify-content:center;" onclick="if(event.target===this)cerrarConfigAutoTrading()">
+        <div style="background:#fff;border-radius:10px;padding:26px;width:360px;box-shadow:0 10px 40px rgba(0,0,0,0.2);" onclick="event.stopPropagation()">
+            <h3 style="margin-bottom:18px;font-size:15px;">AutoBot — Configuración</h3>
+            <div id="at-msg" style="display:none;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;"></div>
+
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Estrategia</label>
+            <select id="at-strat-sel" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;background:#f8fafc;"></select>
+
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Capital por operación (USDT)</label>
+            <input type="number" id="at-pos-usdt" min="10" step="10" value="100"
+                style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:18px;">
+
+            <div style="display:flex;gap:10px;">
+                <button onclick="guardarConfigAutoTrading(false)" style="flex:1;padding:10px;border:1px solid #ef5350;border-radius:6px;font-size:13px;background:#fff;color:#ef5350;cursor:pointer;font-weight:bold;">
+                    ⏹ Detener
+                </button>
+                <button onclick="guardarConfigAutoTrading(true)" style="flex:1;padding:10px;border:none;border-radius:6px;font-size:13px;background:#2962FF;color:#fff;cursor:pointer;font-weight:bold;">
+                    ▶ Activar
+                </button>
+            </div>
+            <div style="margin-top:12px;font-size:10px;color:#94a3b8;text-align:center;">Solo admin · Testnet Binance Futures · Evalúa cada 60s</div>
+        </div>
+    </div>
 
     <!-- Modal cambiar contraseña -->
     <div id="modal-password-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:4000; align-items:center; justify-content:center;">

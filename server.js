@@ -73,6 +73,18 @@ async function inicializarBaseDeDatos() {
             UNIQUE(usuario_id, nombre)
         );
     `;
+    const queryTablaAutoTrading = `
+        CREATE TABLE IF NOT EXISTS auto_trading_config (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            habilitado BOOLEAN DEFAULT false,
+            estrategia_nombre VARCHAR(100),
+            position_usdt NUMERIC DEFAULT 100,
+            ultima_senal VARCHAR(10),
+            ultima_senal_ts BIGINT,
+            CONSTRAINT solo_una_fila CHECK (id = 1)
+        );
+        INSERT INTO auto_trading_config (id) VALUES (1) ON CONFLICT DO NOTHING;
+    `;
 
     try {
         await pool.query(queryTablaBallenas);
@@ -81,6 +93,7 @@ async function inicializarBaseDeDatos() {
         await pool.query(queryTablaUsuarios);
         await pool.query(queryTablaConfigUsuario);
         await pool.query(queryTablaEstrategias);
+        await pool.query(queryTablaAutoTrading);
 
         await pool.query(`
             DO $$ BEGIN
@@ -731,6 +744,123 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
         equity
     };
 }
+
+// ── Auto-Trading Loop ─────────────────────────────────────────
+const N8N_WEBHOOK_URL   = process.env.N8N_WEBHOOK_URL;
+const AUTO_POSITION_USDT = parseFloat(process.env.AUTO_POSITION_USDT) || 100;
+
+async function ejecutarAutoTrading() {
+    if (!N8N_WEBHOOK_URL) return;
+    try {
+        const cfgRes = await pool.query('SELECT * FROM auto_trading_config WHERE id = 1');
+        const cfg = cfgRes.rows[0];
+        if (!cfg || !cfg.habilitado || !cfg.estrategia_nombre) return;
+
+        const stratRes = await pool.query(
+            `SELECT params FROM estrategias_guardadas WHERE nombre = $1 LIMIT 1`,
+            [cfg.estrategia_nombre]
+        );
+        if (!stratRes.rows.length) return;
+        const p = stratRes.rows[0].params;
+
+        const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
+            fetchKlinesBatch('1m',  520),
+            fetchKlinesBatch('5m',  50),
+            fetchKlinesBatch('15m', 30),
+            pool.query(
+                `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
+                 FROM ballenas WHERE fecha >= NOW() - INTERVAL '2 hours' AND cantidad >= $1 ORDER BY fecha ASC`,
+                [p.whaleMinBTC || 5]
+            ),
+        ]);
+
+        const resultado = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p);
+        const nuevaSenal = resultado.signal;
+
+        // Solo disparar si la señal cambia (evita órdenes duplicadas)
+        if (nuevaSenal === cfg.ultima_senal) return;
+
+        await pool.query(
+            `UPDATE auto_trading_config SET ultima_senal = $1, ultima_senal_ts = $2 WHERE id = 1`,
+            [nuevaSenal, Date.now()]
+        );
+
+        if (!nuevaSenal) {
+            console.log(`[AutoTrading] Señal cerrada — sin posición nueva`);
+            return;
+        }
+
+        const positionUsdt = parseFloat(cfg.position_usdt) || AUTO_POSITION_USDT;
+        const payload = {
+            signal:       nuevaSenal,
+            entry:        resultado.entry,
+            tp:           resultado.tp,
+            sl:           resultado.sl,
+            positionUsdt,
+            estrategia:   cfg.estrategia_nombre,
+            timestamp:    resultado.timestamp,
+        };
+
+        console.log(`[AutoTrading] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)}`);
+
+        const resp = await fetch(N8N_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) console.error(`[AutoTrading] Error n8n: ${resp.status} ${await resp.text()}`);
+        else console.log(`[AutoTrading] Señal enviada a n8n correctamente`);
+
+    } catch (e) {
+        console.error('[AutoTrading] Error en loop:', e.message);
+    }
+}
+
+// Arrancar loop después de que la BD esté lista
+setTimeout(() => {
+    ejecutarAutoTrading();
+    setInterval(ejecutarAutoTrading, 60 * 1000);
+}, 5000);
+
+// ── Endpoints de Auto-Trading ─────────────────────────────────
+app.get('/api/autotrading', autenticar, soloAdmin, async (req, res) => {
+    try {
+        const r = await pool.query('SELECT * FROM auto_trading_config WHERE id = 1');
+        res.json(r.rows[0] || {});
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/autotrading', autenticar, soloAdmin, async (req, res) => {
+    const { habilitado, estrategia_nombre, position_usdt } = req.body;
+    try {
+        await pool.query(
+            `UPDATE auto_trading_config
+             SET habilitado = COALESCE($1, habilitado),
+                 estrategia_nombre = COALESCE($2, estrategia_nombre),
+                 position_usdt = COALESCE($3, position_usdt)
+             WHERE id = 1`,
+            [
+                habilitado !== undefined ? habilitado : null,
+                estrategia_nombre !== undefined ? estrategia_nombre : null,
+                position_usdt     !== undefined ? parseFloat(position_usdt) : null,
+            ]
+        );
+        // Reset señal cuando se cambia config para re-evaluar
+        if (estrategia_nombre !== undefined || habilitado === true) {
+            await pool.query(`UPDATE auto_trading_config SET ultima_senal = NULL WHERE id = 1`);
+        }
+        res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/autotrading/status', autenticar, async (req, res) => {
+    try {
+        const r = await pool.query(
+            'SELECT habilitado, estrategia_nombre, ultima_senal, ultima_senal_ts, position_usdt FROM auto_trading_config WHERE id = 1'
+        );
+        res.json(r.rows[0] || { habilitado: false });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── Evaluación de señal en tiempo real ────────────────────────
 function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
