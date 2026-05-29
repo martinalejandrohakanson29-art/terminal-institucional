@@ -753,7 +753,15 @@ const BINANCE_API_KEY    = process.env.Clave_API_Binance;
 const BINANCE_SECRET     = process.env.Clave_secreta_Binance;
 const BINANCE_BASE       = 'https://testnet.binancefuture.com';
 
+// Log de estado al arrancar
+setTimeout(() => {
+    console.log(`[AutoTrading] N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL ? '✅ configurado' : '❌ falta'}`);
+    console.log(`[AutoTrading] Clave_API_Binance: ${BINANCE_API_KEY ? '✅ configurada' : '❌ falta'}`);
+    console.log(`[AutoTrading] Clave_secreta_Binance: ${BINANCE_SECRET ? '✅ configurada' : '❌ falta'}`);
+}, 3000);
+
 function binanceSign(params) {
+    if (!BINANCE_SECRET) throw new Error('Clave_secreta_Binance no configurada en el entorno del servidor');
     return crypto.createHmac('sha256', BINANCE_SECRET).update(params).digest('hex');
 }
 
@@ -925,7 +933,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const rsi15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[0]), rsiArr[i]]));
     const rsi15mTs   = [...rsi15mByTs.keys()].sort((a, b) => a - b);
 
-    const { macdArr, sigArr } = calcMACD(bars5m.map(b => parseFloat(b[4])));
+    const { macd: macdArr, signal: sigArr } = calcMACDArr(bars5m.map(b => parseFloat(b[4])));
     const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[0]), { macd: macdArr[i], sig: sigArr[i] }]));
     const macd5mTs   = [...macd5mByTs.keys()].sort((a, b) => a - b);
 
