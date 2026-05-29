@@ -862,6 +862,31 @@ app.get('/api/autotrading/status', autenticar, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Endpoint de test: dispara el webhook con una señal simulada (solo admin)
+app.post('/api/autotrading/test', autenticar, soloAdmin, async (req, res) => {
+    if (!N8N_WEBHOOK_URL) return res.status(500).json({ error: 'N8N_WEBHOOK_URL no configurado' });
+    const payload = {
+        signal:       req.body.signal       || 'long',
+        entry:        req.body.entry        || 95000,
+        tp:           req.body.tp           || 95475,
+        sl:           req.body.sl           || 94050,
+        positionUsdt: req.body.positionUsdt || 100,
+        estrategia:   'TEST',
+        timestamp:    Date.now(),
+    };
+    try {
+        const resp = await fetch(N8N_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const texto = await resp.text();
+        res.json({ ok: resp.ok, status: resp.status, n8n: texto, payload });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ── Evaluación de señal en tiempo real ────────────────────────
 function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     if (bars1m.length < 510) return { signal: null, reason: 'datos_insuficientes' };
