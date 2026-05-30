@@ -149,12 +149,14 @@
             <div class="botonera">
                 <button class="btn-tiempo" id="btn-panel" onclick="togglePanel()" style="border-color: #64748b; color: #64748b;">Ocultar Panel</button>
 
-                <button class="btn-tiempo btn-activo" id="btn-1m" onclick="cambiarTemporalidad('1m')">1m</button>
-                <button class="btn-tiempo" id="btn-5m" onclick="cambiarTemporalidad('5m')">5m</button>
-                <button class="btn-tiempo" id="btn-15m" onclick="cambiarTemporalidad('15m')">15m</button>
-                <button class="btn-tiempo" id="btn-1h" onclick="cambiarTemporalidad('1h')">1H</button>
-                <button class="btn-tiempo" id="btn-4h" onclick="cambiarTemporalidad('4h')">4H</button>
-                <button class="btn-tiempo" id="btn-1d" onclick="cambiarTemporalidad('1d')">1D</button>
+                <select id="sel-temporalidad" class="input-rango" onchange="cambiarTemporalidad(this.value)" style="width:52px;cursor:pointer;font-weight:bold;" title="Temporalidad">
+                    <option value="1m">1m</option>
+                    <option value="5m">5m</option>
+                    <option value="15m">15m</option>
+                    <option value="1h">1H</option>
+                    <option value="4h">4H</option>
+                    <option value="1d">1D</option>
+                </select>
 
                 <button class="btn-tiempo" id="btn-guardar" onclick="guardarTodo()" style="margin-left: 4px; border-color: #26a69a; color: #26a69a;" title="Guardar toda la configuración: filtros, dibujos, indicadores, temporalidad">Guardar</button>
 
@@ -176,7 +178,6 @@
                     <span id="at-dot" style="width:7px;height:7px;border-radius:50%;background:#94a3b8;flex-shrink:0;"></span>
                     <span id="at-label" style="font-size:11px;font-weight:bold;color:#94a3b8;white-space:nowrap;">Inactivo</span>
                     <button onclick="abrirConfigAutoTrading()" style="height:22px;padding:0 6px;border:1px solid #d1d4dc;border-radius:4px;font-size:10px;background:#f8fafc;color:#64748b;cursor:pointer;">⚙ Config</button>
-                    <button id="btn-at-test" onclick="probarAutoTrading()" style="height:22px;padding:0 6px;border:1px solid #ff9800;border-radius:4px;font-size:10px;background:#fff8f0;color:#ff9800;cursor:pointer;font-weight:bold;">▶ Prueba</button>
                 </div>
 
                 <div style="border-left: 2px solid #d1d4dc; margin-left: 3px; padding-left: 5px; display: flex; gap: 3px; align-items: center;">
@@ -1027,8 +1028,8 @@
         }
 
         function cambiarTemporalidad(t) {
-            document.querySelectorAll('.btn-tiempo').forEach(btn => btn.classList.remove('btn-activo'));
-            document.getElementById(`btn-${t}`).classList.add('btn-activo');
+            const sel = document.getElementById('sel-temporalidad');
+            if (sel) sel.value = t;
             temporalidadActual = t;
             cargarDatos(t);
             actualizarDisplayRSI15m();
@@ -1627,79 +1628,6 @@
                     label.textContent = 'Inactivo';
                 }
             } catch (_) {}
-        }
-
-        async function probarAutoTrading() {
-            const btn = document.getElementById('btn-at-test');
-            btn.textContent = '⏳';
-            btn.disabled = true;
-            try {
-                // Precio actual del gráfico
-                const precioActual = velasActuales.length
-                    ? velasActuales[velasActuales.length - 1].close
-                    : 95000;
-
-                // Config de auto-trading para obtener estrategia y positionUsdt
-                const cfgRes = await fetch('/api/autotrading', { credentials: 'same-origin' });
-                const cfg = cfgRes.ok ? await cfgRes.json() : {};
-                const positionUsdt = cfg.position_usdt || 100;
-
-                // Params de la estrategia para calcular TP/SL reales
-                let tpPerc = 0.5, slPerc = 1.0;
-                if (cfg.estrategia_nombre) {
-                    const estratRes = await fetch('/api/estrategias', { credentials: 'same-origin' });
-                    if (estratRes.ok) {
-                        const lista = await estratRes.json();
-                        const est = lista.find(e => e.nombre === cfg.estrategia_nombre);
-                        if (est) {
-                            tpPerc = est.params.tpPerc ?? 0.5;
-                            slPerc = est.params.slPerc ?? 1.0;
-                        }
-                    }
-                }
-
-                const entry = precioActual;
-                const tp    = entry * (1 + tpPerc / 100);
-                const sl    = entry * (1 - slPerc / 100);
-
-                const res = await fetch('/api/autotrading/test', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'same-origin',
-                    body: JSON.stringify({ signal: 'long', entry, tp, sl, positionUsdt })
-                });
-                const data = await res.json();
-
-                if (data.error) {
-                    alert(`❌ Error del servidor\n\n${data.error}`);
-                    return;
-                }
-
-                const entradaOk = data.entrada?.ok;
-                const resumen = [
-                    `Señal:   LONG`,
-                    `Entrada: $${Math.round(entry).toLocaleString()}`,
-                    `TP:      $${Math.round(tp).toLocaleString()} (+${tpPerc}%)`,
-                    `SL:      $${Math.round(sl).toLocaleString()} (-${slPerc}%)`,
-                    `Capital: $${positionUsdt} USDT`,
-                    `Qty:     ${data.qty} BTC`,
-                    ``,
-                    `Orden entrada: ${entradaOk ? '✅ #' + data.entrada.orderId : '❌ ' + (data.entrada?.msg || 'Error')}`,
-                    `Orden TP:      ${data.tp?.ok   ? '✅ #' + data.tp.orderId   : '❌ ' + (data.tp?.msg   || 'No enviada')}`,
-                    `Orden SL:      ${data.sl?.ok   ? '✅ #' + data.sl.orderId   : '❌ ' + (data.sl?.msg   || 'No enviada')}`,
-                ].join('\n');
-
-                if (entradaOk) {
-                    alert(`✅ Órdenes ejecutadas en Binance Testnet\n\n${resumen}`);
-                } else {
-                    alert(`❌ Error al ejecutar órdenes\n\n${resumen}`);
-                }
-            } catch (e) {
-                alert(`❌ Error: ${e.message}`);
-            } finally {
-                btn.textContent = '▶ Prueba';
-                btn.disabled = false;
-            }
         }
 
         async function abrirConfigAutoTrading() {
