@@ -261,6 +261,27 @@
                 <button class="btn-dibujo" onclick="activarDibujo('rangoVolumen')" title="Calcular compras y ventas en rango" style="color:#2962FF;border-color:#2962FF;">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 20V10M12 20V4M18 20v-7"></path><path d="M3 20h18"></path></svg>
                 </button>
+                <button class="btn-dibujo" onclick="activarDibujo('medidorPorcentaje')" title="Medir % y tiempo entre dos puntos">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="5" y1="19" x2="19" y2="5"/>
+                        <polyline points="5,11 5,19 13,19"/>
+                        <polyline points="11,5 19,5 19,13"/>
+                    </svg>
+                </button>
+                <button class="btn-dibujo" onclick="activarDibujo('entradaLong')" title="Entrada Long (3 clics: entrada → TP → SL)" style="color:#26a69a;border-color:#26a69a;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                        <polygon points="12,3 6,9 18,9" fill="#26a69a"/>
+                        <line x1="3" y1="13" x2="21" y2="13" stroke="#26a69a" stroke-width="1.5" stroke-dasharray="3,2"/>
+                        <line x1="3" y1="19" x2="21" y2="19" stroke="#ef5350" stroke-width="1.5" stroke-dasharray="3,2"/>
+                    </svg>
+                </button>
+                <button class="btn-dibujo" onclick="activarDibujo('entradaShort')" title="Entrada Short (3 clics: entrada → TP → SL)" style="color:#ef5350;border-color:#ef5350;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                        <polygon points="12,21 6,15 18,15" fill="#ef5350"/>
+                        <line x1="3" y1="11" x2="21" y2="11" stroke="#ef5350" stroke-width="1.5" stroke-dasharray="3,2"/>
+                        <line x1="3" y1="5" x2="21" y2="5" stroke="#26a69a" stroke-width="1.5" stroke-dasharray="3,2"/>
+                    </svg>
+                </button>
                 <button class="btn-dibujo" onclick="borrarDibujos()" style="color:#ef5350;" title="Eliminar todos los dibujos">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
                 </button>
@@ -674,6 +695,141 @@
             }
         });
 
+        klinecharts.registerOverlay({
+            name: 'medidorPorcentaje',
+            totalStep: 3,
+            needDefaultPointFigure: true,
+            needDefaultXAxisFigure: true,
+            needDefaultYAxisFigure: true,
+            createPointFigures: ({ overlay, coordinates }) => {
+                if (coordinates.length < 2) return [];
+                const p0 = overlay.points[0], p1 = overlay.points[1];
+                const { x: x0, y: y0 } = coordinates[0], { x: x1, y: y1 } = coordinates[1];
+                const isUp = (p1.value ?? 0) >= (p0.value ?? 0);
+                const color = isUp ? '#26a69a' : '#ef5350';
+                const pct = p0.value ? ((p1.value - p0.value) / p0.value * 100) : 0;
+                const pctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+                const dtMs = Math.abs((p1.timestamp ?? 0) - (p0.timestamp ?? 0));
+                const mins = Math.floor(dtMs / 60000);
+                const hrs  = Math.floor(mins / 60);
+                const days = Math.floor(hrs / 24);
+                const timeStr = days > 0 ? `${days}d ${hrs % 24}h` : hrs > 0 ? `${hrs}h ${mins % 60}m` : `${mins}m`;
+                const midX = (x0 + x1) / 2, midY = (y0 + y1) / 2;
+                return [
+                    // Rectángulo de medición
+                    { type: 'polygon', ignoreEvent: true,
+                      attrs: { coordinates: [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }] },
+                      styles: { style: 'stroke_fill', color: isUp ? 'rgba(38,166,154,0.08)' : 'rgba(239,83,80,0.08)',
+                                borderColor: color, borderSize: 1, borderStyle: 'dashed', borderDashedValue: [4, 2] } },
+                    // Diagonal
+                    { type: 'line', ignoreEvent: true, attrs: { coordinates: [coordinates[0], coordinates[1]] },
+                      styles: { color, size: 1.5 } },
+                    // Etiqueta %
+                    { type: 'text', ignoreEvent: true,
+                      attrs: { x: midX, y: midY - 6, text: pctStr, align: 'center', baseline: 'bottom' },
+                      styles: { color: '#fff', backgroundColor: color, borderRadius: 4,
+                                paddingLeft: 5, paddingRight: 5, paddingTop: 2, paddingBottom: 2, size: 12, weight: 'bold' } },
+                    // Etiqueta tiempo
+                    { type: 'text', ignoreEvent: true,
+                      attrs: { x: midX, y: Math.max(y0, y1) + 4, text: `⏱ ${timeStr}`, align: 'center', baseline: 'top' },
+                      styles: { color: '#64748b', size: 10 } },
+                ];
+            }
+        });
+
+        function _entradaFigures(overlay, coordinates, bounding, isLong) {
+            if (!coordinates || coordinates.length < 1) return [];
+            const W = bounding.width;
+            const xEnt = coordinates[0].x, yEnt = coordinates[0].y;
+            const pEnt = overlay.points[0]?.value;
+            const sz = 7;
+            const figs = [];
+            // Triángulo de entrada
+            const triY = isLong ? yEnt + sz * 2 : yEnt - sz * 2;
+            figs.push({
+                type: 'polygon', ignoreEvent: true,
+                attrs: { coordinates: isLong
+                    ? [{ x: xEnt - sz, y: triY }, { x: xEnt + sz, y: triY }, { x: xEnt, y: yEnt }]
+                    : [{ x: xEnt - sz, y: triY }, { x: xEnt + sz, y: triY }, { x: xEnt, y: yEnt }] },
+                styles: { style: 'fill', color: '#2962FF' }
+            });
+            // Línea de entrada
+            figs.push({ type: 'line', ignoreEvent: true,
+                attrs: { coordinates: [{ x: xEnt, y: yEnt }, { x: W, y: yEnt }] },
+                styles: { color: '#2962FF', size: 1.5, style: 'dashed', dashedValue: [6, 3] } });
+            // Label entrada
+            if (pEnt) {
+                figs.push({ type: 'text', ignoreEvent: true,
+                    attrs: { x: W - 4, y: yEnt - 3, text: `ENT ${Math.round(pEnt).toLocaleString()}`, align: 'right', baseline: 'bottom' },
+                    styles: { color: '#fff', backgroundColor: '#2962FF', borderRadius: 3,
+                              paddingLeft: 4, paddingRight: 4, paddingTop: 1, paddingBottom: 1, size: 10, weight: 'bold' } });
+            }
+            if (coordinates.length >= 2) {
+                const yTP = coordinates[1].y, pTP = overlay.points[1]?.value;
+                const pctTP = pEnt && pTP ? `${((pTP - pEnt) / pEnt * 100).toFixed(2)}%` : '';
+                const tpColor = '#26a69a';
+                // Zona TP
+                figs.push({ type: 'polygon', ignoreEvent: true,
+                    attrs: { coordinates: [{ x: xEnt, y: yEnt }, { x: W, y: yEnt }, { x: W, y: yTP }, { x: xEnt, y: yTP }] },
+                    styles: { style: 'fill', color: 'rgba(38,166,154,0.13)' } });
+                figs.push({ type: 'line', ignoreEvent: true,
+                    attrs: { coordinates: [{ x: xEnt, y: yTP }, { x: W, y: yTP }] },
+                    styles: { color: tpColor, size: 1.5, style: 'dashed', dashedValue: [6, 3] } });
+                if (pTP) {
+                    figs.push({ type: 'text', ignoreEvent: true,
+                        attrs: { x: W - 4, y: yTP - 3, text: `TP ${Math.round(pTP).toLocaleString()} (${pctTP})`, align: 'right', baseline: 'bottom' },
+                        styles: { color: '#fff', backgroundColor: tpColor, borderRadius: 3,
+                                  paddingLeft: 4, paddingRight: 4, paddingTop: 1, paddingBottom: 1, size: 10, weight: 'bold' } });
+                }
+            }
+            if (coordinates.length >= 3) {
+                const ySL = coordinates[2].y, pSL = overlay.points[2]?.value;
+                const pTP = overlay.points[1]?.value;
+                const pctSL = pEnt && pSL ? `${((pSL - pEnt) / pEnt * 100).toFixed(2)}%` : '';
+                const slColor = '#ef5350';
+                // Zona SL
+                figs.push({ type: 'polygon', ignoreEvent: true,
+                    attrs: { coordinates: [{ x: xEnt, y: yEnt }, { x: W, y: yEnt }, { x: W, y: ySL }, { x: xEnt, y: ySL }] },
+                    styles: { style: 'fill', color: 'rgba(239,83,80,0.13)' } });
+                figs.push({ type: 'line', ignoreEvent: true,
+                    attrs: { coordinates: [{ x: xEnt, y: ySL }, { x: W, y: ySL }] },
+                    styles: { color: slColor, size: 1.5, style: 'dashed', dashedValue: [6, 3] } });
+                if (pSL) {
+                    figs.push({ type: 'text', ignoreEvent: true,
+                        attrs: { x: W - 4, y: ySL - 3, text: `SL ${Math.round(pSL).toLocaleString()} (${pctSL})`, align: 'right', baseline: 'bottom' },
+                        styles: { color: '#fff', backgroundColor: slColor, borderRadius: 3,
+                                  paddingLeft: 4, paddingRight: 4, paddingTop: 1, paddingBottom: 1, size: 10, weight: 'bold' } });
+                }
+                // R:R y etiqueta
+                if (pEnt && pTP && pSL) {
+                    const reward = Math.abs(pTP - pEnt), risk = Math.abs(pSL - pEnt);
+                    const rr = risk > 0 ? (reward / risk).toFixed(2) : '∞';
+                    figs.push({ type: 'text', ignoreEvent: true,
+                        attrs: { x: xEnt + 8, y: yEnt - 3, text: `${isLong ? 'LONG ▲' : 'SHORT ▼'}  R:R ${rr}`, align: 'left', baseline: 'bottom' },
+                        styles: { color: '#2962FF', size: 11, weight: 'bold' } });
+                }
+            }
+            return figs;
+        }
+
+        klinecharts.registerOverlay({
+            name: 'entradaLong',
+            totalStep: 4,
+            needDefaultPointFigure: true,
+            needDefaultXAxisFigure: false,
+            needDefaultYAxisFigure: true,
+            createPointFigures: (args) => _entradaFigures(args.overlay, args.coordinates, args.bounding, true)
+        });
+
+        klinecharts.registerOverlay({
+            name: 'entradaShort',
+            totalStep: 4,
+            needDefaultPointFigure: true,
+            needDefaultXAxisFigure: false,
+            needDefaultYAxisFigure: true,
+            createPointFigures: (args) => _entradaFigures(args.overlay, args.coordinates, args.bounding, false)
+        });
+
         // --- INICIALIZACIÓN DE KLINECHART ---
         const chart = klinecharts.init('chart-container', {
             styles: {
@@ -719,7 +875,7 @@
         }
 
         function borrarDibujos() {
-            ['segment','rayLine','fibonacciLine','cajaCustom','canalParalelo','rangoVolumen'].forEach(t => chart.removeOverlay({ name: t }));
+            ['segment','rayLine','fibonacciLine','cajaCustom','canalParalelo','rangoVolumen','medidorPorcentaje','entradaLong','entradaShort'].forEach(t => chart.removeOverlay({ name: t }));
             overlaySeleccionado = null;
             registroDibujos[temporalidadActual] = [];
         }
