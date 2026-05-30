@@ -73,6 +73,18 @@
         .btn-histo:hover { background: #e2e8f0; }
         .btn-histo.btn-activo { background: #2962FF; color: white; border-color: #2962FF; }
 
+        .chip-ind { display:inline-flex; align-items:center; gap:3px; background:#2962FF; color:#fff; border-radius:12px; padding:2px 10px; font-size:11px; font-weight:bold; white-space:nowrap; }
+        .chip-ind select { background:transparent; border:none; color:#fff; font-size:10px; cursor:pointer; padding:0; max-width:38px; outline:none; }
+        .chip-ind select option { color:#1e1e1e; background:#fff; }
+        .chip-x { cursor:pointer; opacity:.7; font-size:14px; line-height:1; }
+        .chip-x:hover { opacity:1; }
+        .chip-gear { cursor:pointer; opacity:.7; font-size:11px; margin-left:1px; }
+        .chip-gear:hover { opacity:1; }
+        .ind-row { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:4px; cursor:pointer; font-size:12px; color:#374151; }
+        .ind-row:hover { background:#f0f2f5; }
+        .ind-row.activo { background:#eff6ff; color:#2962FF; font-weight:bold; }
+        .ind-check { width:14px; text-align:center; }
+
         .hist-row { display: flex; align-items: center; height: 20px; padding: 0 4px; border-bottom: 1px solid #f0f2f5; }
         .hist-row.current-price { background: rgba(41,98,255,0.08); border-top: 1px solid rgba(41,98,255,0.35); border-bottom: 1px solid rgba(41,98,255,0.35); }
         .hist-col-buy  { flex: 1; display: flex; justify-content: flex-end; align-items: center; overflow: hidden; }
@@ -189,30 +201,21 @@
             </div>
         </div>
 
-        <!-- Fila 2: filtro + indicadores + herramientas de dibujo -->
+        <!-- Fila 2: filtro + indicadores (dropdown) + herramientas de dibujo -->
         <div class="header-row">
             <div class="botonera">
                 <input type="number" id="filtro-grafico" class="input-rango" value="5" min="1" step="1" title="Filtrar gráfico: mostrar ballenas > X BTC">
-                <div style="gap: 2px; display: flex; margin-left: 3px;">
-                    <button id="btn-vwap" class="btn-dibujo btn-activo" onclick="toggleIndicator('VWAP')" title="Mostrar/Ocultar VWAP" style="width: auto; padding: 0 5px;">VWAP</button>
-                    <button id="btn-delta" class="btn-dibujo btn-activo" onclick="toggleIndicator('DELTA')" title="Mostrar/Ocultar Delta" style="width: auto; padding: 0 5px;">DELTA</button>
-                    <button id="btn-deltasum" class="btn-dibujo btn-activo" onclick="toggleIndicator('DELTASUM')" title="Mostrar/Ocultar Delta Acumulado" style="width: auto; padding: 0 5px;">ΔSum</button>
-                    <button class="btn-dibujo" onclick="toggleDeltaSumConfig()" title="Configurar Delta Sum">
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                <div style="position:relative; margin-left:3px;">
+                    <button id="btn-indicadores-menu" class="btn-tiempo" onclick="toggleIndicadorDropdown()" style="display:flex;align-items:center;gap:4px;">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        Indicadores
                     </button>
-                    <button id="btn-oi" class="btn-dibujo btn-activo" onclick="toggleIndicator('OI')" title="Mostrar/Ocultar Open Interest" style="width: auto; padding: 0 5px;">OI</button>
-                    <button id="btn-macd" class="btn-dibujo btn-activo" onclick="toggleIndicator('MACD')" title="Mostrar/Ocultar MACD 15m" style="width: auto; padding: 0 5px;">MACD</button>
-                    <button id="btn-ma" class="btn-dibujo" onclick="toggle3MA()" title="Activar/Desactivar 3 EMAs" style="width: auto; padding: 0 5px;">3EMA</button>
-                    <button class="btn-dibujo" onclick="toggleMAConfig()" title="Configurar Medias Móviles">
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-                    </button>
+                    <div id="indicador-dropdown" style="display:none; position:absolute; top:30px; left:0; background:#fff; border:1px solid #d1d4dc; border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,0.12); z-index:3000; width:210px; padding:8px;">
+                        <input type="text" id="indicador-search" oninput="filtrarIndicadores()" placeholder="Buscar indicador..." style="width:100%;padding:5px 8px;border:1px solid #d1d4dc;border-radius:4px;font-size:12px;margin-bottom:6px;outline:none;box-sizing:border-box;">
+                        <div id="indicador-list"></div>
+                    </div>
                 </div>
-                <select id="select-vwap" class="input-rango" style="width: 48px; cursor: pointer;" title="Reset VWAP">
-                    <option value="15">15m</option>
-                    <option value="60" selected>1H</option>
-                    <option value="240">4H</option>
-                    <option value="1440">1D</option>
-                </select>
+                <div id="chips-indicadores" style="display:flex;gap:3px;flex-wrap:wrap;align-items:center;"></div>
             </div>
 
             <div class="herramientas-dibujo">
@@ -723,39 +726,124 @@
 
         function cambiarVwap() {
             if (!vwapVisible) return;
-            chart.overrideIndicator({ name: 'VWAP_CUSTOM', calcParams: [parseInt(document.getElementById('select-vwap').value)] }, 'candle_pane');
+            chart.overrideIndicator({ name: 'VWAP_CUSTOM', calcParams: [vwapPeriod] }, 'candle_pane');
         }
 
         // --- TOGGLE INDICADORES ---
+        let vwapPeriod = 60;
         let vwapVisible = true, deltaVisible = true, deltaSumVisible = true, oiVisible = true, macdVisible = true;
+
+        // Definición de todos los indicadores disponibles
+        const INDICADORES_DEF = [
+            { id: 'VWAP',     label: 'VWAP',     config: 'vwap'     },
+            { id: 'DELTA',    label: 'Delta',    config: null        },
+            { id: 'DELTASUM', label: 'ΔSum',     config: 'deltasum' },
+            { id: 'OI',       label: 'OI',       config: null        },
+            { id: 'MACD',     label: 'MACD 15m', config: null        },
+            { id: '3EMA',     label: '3EMA',     config: 'ema'       },
+        ];
+
+        function indicadorEsVisible(id) {
+            if (id === 'VWAP')     return vwapVisible;
+            if (id === 'DELTA')    return deltaVisible;
+            if (id === 'DELTASUM') return deltaSumVisible;
+            if (id === 'OI')       return oiVisible;
+            if (id === 'MACD')     return macdVisible;
+            if (id === '3EMA')     return maVisible;
+            return false;
+        }
+
+        function renderChips() {
+            const container = document.getElementById('chips-indicadores');
+            if (!container) return;
+            const activos = INDICADORES_DEF.filter(d => indicadorEsVisible(d.id));
+            container.innerHTML = activos.map(d => {
+                const gearHtml = d.config
+                    ? `<span class="chip-gear" onclick="abrirConfigIndicador('${d.config}')" title="Configurar">⚙</span>`
+                    : '';
+                const vwapSelHtml = d.id === 'VWAP'
+                    ? `<select onchange="vwapPeriod=+this.value;cambiarVwap();renderChips();" title="Período VWAP">
+                           <option value="15"   ${vwapPeriod===15   ?'selected':''}>15m</option>
+                           <option value="60"   ${vwapPeriod===60   ?'selected':''}>1H</option>
+                           <option value="240"  ${vwapPeriod===240  ?'selected':''}>4H</option>
+                           <option value="1440" ${vwapPeriod===1440 ?'selected':''}>1D</option>
+                       </select>`
+                    : '';
+                return `<span class="chip-ind">${d.label}${vwapSelHtml}${gearHtml}<span class="chip-x" onclick="toggleDesdeChip('${d.id}')" title="Quitar">&times;</span></span>`;
+            }).join('');
+            renderIndicadorList();
+        }
+
+        function renderIndicadorList(filtro) {
+            const list = document.getElementById('indicador-list');
+            if (!list) return;
+            const term = (filtro || '').toLowerCase();
+            const items = INDICADORES_DEF.filter(d => !term || d.label.toLowerCase().includes(term));
+            list.innerHTML = items.map(d => {
+                const activo = indicadorEsVisible(d.id);
+                return `<div class="ind-row${activo?' activo':''}" onclick="toggleDesdeDropdown('${d.id}')"><span class="ind-check">${activo?'✓':''}</span>${d.label}</div>`;
+            }).join('') || '<div style="padding:6px 8px;font-size:12px;color:#94a3b8;">Sin resultados</div>';
+        }
+
+        function filtrarIndicadores() {
+            renderIndicadorList(document.getElementById('indicador-search').value);
+        }
+
+        function toggleIndicadorDropdown() {
+            const dd = document.getElementById('indicador-dropdown');
+            const abierto = dd.style.display !== 'none';
+            dd.style.display = abierto ? 'none' : 'block';
+            if (!abierto) {
+                const inp = document.getElementById('indicador-search');
+                inp.value = '';
+                renderIndicadorList();
+                inp.focus();
+            }
+        }
+
+        function toggleDesdeDropdown(id) {
+            if (id === '3EMA') toggle3MA(); else toggleIndicator(id);
+        }
+
+        function toggleDesdeChip(id) {
+            if (id === '3EMA') toggle3MA(); else toggleIndicator(id);
+        }
+
+        function abrirConfigIndicador(tipo) {
+            if (tipo === 'deltasum') toggleDeltaSumConfig();
+            else if (tipo === 'ema') toggleMAConfig();
+        }
+
+        // Cerrar dropdown al click fuera
+        document.addEventListener('click', e => {
+            const dd = document.getElementById('indicador-dropdown');
+            const btn = document.getElementById('btn-indicadores-menu');
+            if (dd && btn && !dd.contains(e.target) && !btn.contains(e.target)) dd.style.display = 'none';
+        });
 
         function toggleIndicator(tipo) {
             if (tipo === 'VWAP') {
                 vwapVisible = !vwapVisible;
-                const btn = document.getElementById('btn-vwap');
-                if (vwapVisible) { btn.classList.add('btn-activo'); chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' }); cambiarVwap(); }
-                else { btn.classList.remove('btn-activo'); chart.removeIndicator('candle_pane', 'VWAP_CUSTOM'); }
+                if (vwapVisible) { chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' }); cambiarVwap(); }
+                else { chart.removeIndicator('candle_pane', 'VWAP_CUSTOM'); }
             } else if (tipo === 'DELTA') {
                 deltaVisible = !deltaVisible;
-                const btn = document.getElementById('btn-delta');
-                if (deltaVisible) { btn.classList.add('btn-activo'); chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 }); }
-                else { btn.classList.remove('btn-activo'); chart.removeIndicator('pane_delta', 'VOL_DELTA'); }
+                if (deltaVisible) { chart.createIndicator('VOL_DELTA', false, { id: 'pane_delta', height: 100 }); }
+                else { chart.removeIndicator('pane_delta', 'VOL_DELTA'); }
             } else if (tipo === 'DELTASUM') {
                 deltaSumVisible = !deltaSumVisible;
-                const btn = document.getElementById('btn-deltasum');
-                if (deltaSumVisible) { btn.classList.add('btn-activo'); chart.createIndicator('DELTA_ACUM', false, { id: 'pane_deltasum', height: 100 }); aplicarDeltaSum(); }
-                else { btn.classList.remove('btn-activo'); chart.removeIndicator('pane_deltasum', 'DELTA_ACUM'); }
+                if (deltaSumVisible) { chart.createIndicator('DELTA_ACUM', false, { id: 'pane_deltasum', height: 100 }); aplicarDeltaSum(); }
+                else { chart.removeIndicator('pane_deltasum', 'DELTA_ACUM'); }
             } else if (tipo === 'OI') {
                 oiVisible = !oiVisible;
-                const btn = document.getElementById('btn-oi');
-                if (oiVisible) { btn.classList.add('btn-activo'); chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 }); }
-                else { btn.classList.remove('btn-activo'); chart.removeIndicator('pane_oi', 'OPEN_INTEREST'); }
+                if (oiVisible) { chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 }); }
+                else { chart.removeIndicator('pane_oi', 'OPEN_INTEREST'); }
             } else if (tipo === 'MACD') {
                 macdVisible = !macdVisible;
-                const btn = document.getElementById('btn-macd');
-                if (macdVisible) { btn.classList.add('btn-activo'); chart.createIndicator('MACD_CUSTOM', false, { id: 'pane_macd', height: 120 }); }
-                else { btn.classList.remove('btn-activo'); chart.removeIndicator('pane_macd', 'MACD_CUSTOM'); }
+                if (macdVisible) { chart.createIndicator('MACD_CUSTOM', false, { id: 'pane_macd', height: 120 }); }
+                else { chart.removeIndicator('pane_macd', 'MACD_CUSTOM'); }
             }
+            renderChips();
         }
 
         // --- 3MA CONFIG ---
@@ -770,9 +858,9 @@
 
         function toggle3MA() {
             maVisible = !maVisible;
-            const btn = document.getElementById('btn-ma');
-            if (maVisible) { btn.classList.add('btn-activo'); chart.createIndicator('EMA', true, { id: 'candle_pane' }); aplicarMA(); }
-            else { btn.classList.remove('btn-activo'); chart.removeIndicator('candle_pane', 'EMA'); }
+            if (maVisible) { chart.createIndicator('EMA', true, { id: 'candle_pane' }); aplicarMA(); }
+            else { chart.removeIndicator('candle_pane', 'EMA'); }
+            renderChips();
         }
 
         function toggleMAConfig() {
@@ -790,13 +878,15 @@
                 if (configMA.e1) { params.push(configMA.p1); linesStyles.push({ color: configMA.c1 }); }
                 if (configMA.e2) { params.push(configMA.p2); linesStyles.push({ color: configMA.c2 }); }
                 if (configMA.e3) { params.push(configMA.p3); linesStyles.push({ color: configMA.c3 }); }
-                if (params.length === 0) { chart.removeIndicator('candle_pane','EMA'); maVisible=false; document.getElementById('btn-ma').classList.remove('btn-activo'); }
+                if (params.length === 0) { chart.removeIndicator('candle_pane','EMA'); maVisible=false; }
                 else { chart.overrideIndicator({ name:'EMA', calcParams:params, styles:{ lines:linesStyles } }, 'candle_pane'); }
             }
             document.getElementById('ma-config-panel').style.display = 'none';
+            renderChips();
         }
 
         initMAUI();
+        renderChips();
 
         // --- TOGGLE BALLENAS ---
         let ballenasVisibles = true;
@@ -1233,7 +1323,7 @@
                 ballenasVisibles,
                 vwapVisible, deltaVisible, deltaSumVisible, oiVisible, maVisible, macdVisible,
                 configMA:       { ...configMA },
-                vwapReset:      parseInt(document.getElementById('select-vwap').value),
+                vwapReset:      vwapPeriod,
                 deltaSumPeriod: parseInt(document.getElementById('input-deltasum').value),
                 dibujos:        registroDibujos
             };
@@ -1421,8 +1511,6 @@
             await verificarSesion();
             await cargarConfigServidor();
 
-            document.getElementById('select-vwap').addEventListener('change', cambiarVwap);
-
             const cfg = cfgGet('userConfig', null);
 
             if (cfg) {
@@ -1435,7 +1523,7 @@
                 if (cfg.configMA) { Object.assign(configMA, cfg.configMA); initMAUI(); }
 
                 // VWAP reset
-                if (cfg.vwapReset) document.getElementById('select-vwap').value = String(cfg.vwapReset);
+                if (cfg.vwapReset) vwapPeriod = parseInt(cfg.vwapReset);
 
                 // Panel lateral
                 if (cfg.panelVisible === false) {
@@ -1453,17 +1541,14 @@
                 // Indicadores — se quitan del gráfico si estaban apagados
                 if (cfg.vwapVisible === false) {
                     vwapVisible = false;
-                    document.getElementById('btn-vwap').classList.remove('btn-activo');
                     chart.removeIndicator('candle_pane', 'VWAP_CUSTOM');
                 }
                 if (cfg.deltaVisible === false) {
                     deltaVisible = false;
-                    document.getElementById('btn-delta').classList.remove('btn-activo');
                     chart.removeIndicator('pane_delta', 'VOL_DELTA');
                 }
                 if (cfg.deltaSumVisible === false) {
                     deltaSumVisible = false;
-                    document.getElementById('btn-deltasum').classList.remove('btn-activo');
                     chart.removeIndicator('pane_deltasum', 'DELTA_ACUM');
                 }
                 if (cfg.deltaSumPeriod) {
@@ -1472,18 +1557,15 @@
                 }
                 if (cfg.oiVisible === false) {
                     oiVisible = false;
-                    document.getElementById('btn-oi').classList.remove('btn-activo');
                     chart.removeIndicator('pane_oi', 'OPEN_INTEREST');
                 }
                 if (cfg.macdVisible === false) {
                     macdVisible = false;
-                    document.getElementById('btn-macd').classList.remove('btn-activo');
                     chart.removeIndicator('pane_macd', 'MACD_CUSTOM');
                 }
 
                 if (cfg.maVisible === true) {
                     maVisible = true;
-                    document.getElementById('btn-ma').classList.add('btn-activo');
                     chart.createIndicator('EMA', true, { id: 'candle_pane' });
                     const params = [], linesStyles = [];
                     if (configMA.e1) { params.push(configMA.p1); linesStyles.push({ color: configMA.c1 }); }
@@ -1495,6 +1577,8 @@
                 // Dibujos: se pre-cargan en el registro; restaurarDibujos los pintará al cargar velas
                 if (cfg.dibujos) registroDibujos = cfg.dibujos;
 
+                if (cfg.vwapReset) vwapPeriod = parseInt(cfg.vwapReset);
+                renderChips();
                 cambiarTemporalidad(cfg.temporalidad || '1m');
 
             } else {
@@ -1503,7 +1587,8 @@
                 const cfgMA = cfgGet('configMA', null);
                 if (cfgMA) { Object.assign(configMA, cfgMA); initMAUI(); }
                 const vwapReset = cfgGet('vwapReset', null);
-                if (vwapReset) document.getElementById('select-vwap').value = String(vwapReset);
+                if (vwapReset) vwapPeriod = parseInt(vwapReset);
+                renderChips();
                 cambiarTemporalidad('1m');
             }
 
