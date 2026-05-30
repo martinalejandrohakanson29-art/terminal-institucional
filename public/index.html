@@ -739,74 +739,68 @@
 
         function _entradaFigures(overlay, coordinates, bounding, isLong) {
             if (!coordinates || coordinates.length < 1) return [];
-            const W = bounding.width;
             const xEnt = coordinates[0].x, yEnt = coordinates[0].y;
             const pEnt = overlay.points[0]?.value;
+            // El ancho lo define el 2° click (TP); mientras se arrastra, sigue al cursor
+            const rightX = coordinates.length >= 2 ? coordinates[1].x : xEnt + 160;
             const sz = 7;
             const figs = [];
             // Triángulo de entrada
             const triY = isLong ? yEnt + sz * 2 : yEnt - sz * 2;
             figs.push({
                 type: 'polygon', ignoreEvent: true,
-                attrs: { coordinates: isLong
-                    ? [{ x: xEnt - sz, y: triY }, { x: xEnt + sz, y: triY }, { x: xEnt, y: yEnt }]
-                    : [{ x: xEnt - sz, y: triY }, { x: xEnt + sz, y: triY }, { x: xEnt, y: yEnt }] },
+                attrs: { coordinates: [{ x: xEnt - sz, y: triY }, { x: xEnt + sz, y: triY }, { x: xEnt, y: yEnt }] },
                 styles: { style: 'fill', color: '#2962FF' }
             });
             // Línea de entrada
             figs.push({ type: 'line', ignoreEvent: true,
-                attrs: { coordinates: [{ x: xEnt, y: yEnt }, { x: W, y: yEnt }] },
+                attrs: { coordinates: [{ x: xEnt, y: yEnt }, { x: rightX, y: yEnt }] },
                 styles: { color: '#2962FF', size: 1.5, style: 'dashed', dashedValue: [6, 3] } });
             // Label entrada
             if (pEnt) {
                 figs.push({ type: 'text', ignoreEvent: true,
-                    attrs: { x: W - 4, y: yEnt - 3, text: `ENT ${Math.round(pEnt).toLocaleString()}`, align: 'right', baseline: 'bottom' },
-                    styles: { color: '#fff', backgroundColor: '#2962FF', borderRadius: 3,
-                              paddingLeft: 4, paddingRight: 4, paddingTop: 1, paddingBottom: 1, size: 10, weight: 'bold' } });
+                    attrs: { x: rightX - 4, y: yEnt - 3, text: `ENT ${Math.round(pEnt).toLocaleString()}`, align: 'right', baseline: 'bottom' },
+                    styles: { color: '#1e1e1e', size: 10, weight: 'bold' } });
             }
             if (coordinates.length >= 2) {
                 const yTP = coordinates[1].y, pTP = overlay.points[1]?.value;
                 const pctTP = pEnt && pTP ? `${((pTP - pEnt) / pEnt * 100).toFixed(2)}%` : '';
-                const tpColor = '#26a69a';
                 // Zona TP
                 figs.push({ type: 'polygon', ignoreEvent: true,
-                    attrs: { coordinates: [{ x: xEnt, y: yEnt }, { x: W, y: yEnt }, { x: W, y: yTP }, { x: xEnt, y: yTP }] },
+                    attrs: { coordinates: [{ x: xEnt, y: yEnt }, { x: rightX, y: yEnt }, { x: rightX, y: yTP }, { x: xEnt, y: yTP }] },
                     styles: { style: 'fill', color: 'rgba(38,166,154,0.13)' } });
                 figs.push({ type: 'line', ignoreEvent: true,
-                    attrs: { coordinates: [{ x: xEnt, y: yTP }, { x: W, y: yTP }] },
-                    styles: { color: tpColor, size: 1.5, style: 'dashed', dashedValue: [6, 3] } });
+                    attrs: { coordinates: [{ x: xEnt, y: yTP }, { x: rightX, y: yTP }] },
+                    styles: { color: '#26a69a', size: 1.5, style: 'dashed', dashedValue: [6, 3] } });
                 if (pTP) {
                     figs.push({ type: 'text', ignoreEvent: true,
-                        attrs: { x: W - 4, y: yTP - 3, text: `TP ${Math.round(pTP).toLocaleString()} (${pctTP})`, align: 'right', baseline: 'bottom' },
-                        styles: { color: '#fff', backgroundColor: tpColor, borderRadius: 3,
-                                  paddingLeft: 4, paddingRight: 4, paddingTop: 1, paddingBottom: 1, size: 10, weight: 'bold' } });
+                        attrs: { x: rightX - 4, y: yTP - 3, text: `TP ${Math.round(pTP).toLocaleString()} (${pctTP})`, align: 'right', baseline: 'bottom' },
+                        styles: { color: '#1e1e1e', size: 10, weight: 'bold' } });
                 }
             }
             if (coordinates.length >= 3) {
                 const ySL = coordinates[2].y, pSL = overlay.points[2]?.value;
                 const pTP = overlay.points[1]?.value;
                 const pctSL = pEnt && pSL ? `${((pSL - pEnt) / pEnt * 100).toFixed(2)}%` : '';
-                const slColor = '#ef5350';
                 // Zona SL
                 figs.push({ type: 'polygon', ignoreEvent: true,
-                    attrs: { coordinates: [{ x: xEnt, y: yEnt }, { x: W, y: yEnt }, { x: W, y: ySL }, { x: xEnt, y: ySL }] },
+                    attrs: { coordinates: [{ x: xEnt, y: yEnt }, { x: rightX, y: yEnt }, { x: rightX, y: ySL }, { x: xEnt, y: ySL }] },
                     styles: { style: 'fill', color: 'rgba(239,83,80,0.13)' } });
                 figs.push({ type: 'line', ignoreEvent: true,
-                    attrs: { coordinates: [{ x: xEnt, y: ySL }, { x: W, y: ySL }] },
-                    styles: { color: slColor, size: 1.5, style: 'dashed', dashedValue: [6, 3] } });
+                    attrs: { coordinates: [{ x: xEnt, y: ySL }, { x: rightX, y: ySL }] },
+                    styles: { color: '#ef5350', size: 1.5, style: 'dashed', dashedValue: [6, 3] } });
                 if (pSL) {
                     figs.push({ type: 'text', ignoreEvent: true,
-                        attrs: { x: W - 4, y: ySL - 3, text: `SL ${Math.round(pSL).toLocaleString()} (${pctSL})`, align: 'right', baseline: 'bottom' },
-                        styles: { color: '#fff', backgroundColor: slColor, borderRadius: 3,
-                                  paddingLeft: 4, paddingRight: 4, paddingTop: 1, paddingBottom: 1, size: 10, weight: 'bold' } });
+                        attrs: { x: rightX - 4, y: ySL - 3, text: `SL ${Math.round(pSL).toLocaleString()} (${pctSL})`, align: 'right', baseline: 'bottom' },
+                        styles: { color: '#1e1e1e', size: 10, weight: 'bold' } });
                 }
-                // R:R y etiqueta
+                // R:R y label de dirección
                 if (pEnt && pTP && pSL) {
                     const reward = Math.abs(pTP - pEnt), risk = Math.abs(pSL - pEnt);
                     const rr = risk > 0 ? (reward / risk).toFixed(2) : '∞';
                     figs.push({ type: 'text', ignoreEvent: true,
                         attrs: { x: xEnt + 8, y: yEnt - 3, text: `${isLong ? 'LONG ▲' : 'SHORT ▼'}  R:R ${rr}`, align: 'left', baseline: 'bottom' },
-                        styles: { color: '#2962FF', size: 11, weight: 'bold' } });
+                        styles: { color: '#1e1e1e', size: 11, weight: 'bold' } });
                 }
             }
             return figs;
