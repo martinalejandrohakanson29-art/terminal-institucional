@@ -123,7 +123,22 @@ async function inicializarBaseDeDatos() {
                 ADD COLUMN IF NOT EXISTS posicion_qty    NUMERIC,
                 ADD COLUMN IF NOT EXISTS posicion_entry  NUMERIC,
                 ADD COLUMN IF NOT EXISTS posicion_tp     NUMERIC,
-                ADD COLUMN IF NOT EXISTS posicion_sl     NUMERIC
+                ADD COLUMN IF NOT EXISTS posicion_sl     NUMERIC,
+                ADD COLUMN IF NOT EXISTS ultima_cierre_ts BIGINT
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS auto_trading_entradas (
+                id           SERIAL PRIMARY KEY,
+                ts           BIGINT  NOT NULL,
+                lado         VARCHAR(10) NOT NULL,
+                precio_entrada NUMERIC NOT NULL,
+                precio_tp    NUMERIC,
+                precio_sl    NUMERIC,
+                estado       VARCHAR(10) DEFAULT 'abierta',
+                precio_cierre NUMERIC,
+                razon_cierre VARCHAR(10),
+                ts_cierre    BIGINT
+            )
         `);
         await pool.query(`INSERT INTO configuracion (clave, valor) VALUES ('limite_bd', 1.0) ON CONFLICT (clave) DO NOTHING`);
 
@@ -606,7 +621,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
 
     const c5m = bars5m.map(b => parseFloat(b[4]));
     const { macd: macdArr, signal: sigArr } = calcMACDArr(c5m);
-    const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[0]), { macd: macdArr[i], signal: sigArr[i] }]));
+    const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[0]), { macd: macdArr[i], sig: sigArr[i] }]));
     const ts5m = bars5m.map(b => parseInt(b[0])).sort((a, b) => a - b);
 
     // Delta de volumen — prefix sum para rolling sum O(1) por barra
@@ -639,10 +654,10 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
 
         const rsiRaw  = lookupHTF(ts15m, rsi15mByTs, ts);
         const macdRaw = lookupHTF(ts5m, macd5mByTs, ts);
-        if (rsiRaw === null || rsiRaw === undefined || !macdRaw || macdRaw.macd === null || macdRaw.signal === null) continue;
+        if (rsiRaw === null || rsiRaw === undefined || !macdRaw || macdRaw.macd === null || macdRaw.sig === null) continue;
 
         const rsi15 = rsiRaw;
-        const { macd: macd5, signal: sig5 } = macdRaw;
+        const { macd: macd5, sig: sig5 } = macdRaw;
 
         // SALIDAS
         if (position !== 0) {
@@ -820,7 +835,18 @@ async function chequearSalida(precio) {
     const pos = posicionActiva;
     posicionActiva = null;
     await limpiarPosicionBD();
-    await pool.query(`UPDATE auto_trading_config SET ultima_senal = NULL WHERE id = 1`);
+    const ahoraMs = Date.now();
+    await pool.query(`UPDATE auto_trading_config SET ultima_senal = NULL, ultima_cierre_ts = $1 WHERE id = 1`, [ahoraMs]);
+    await pool.query(
+        `UPDATE auto_trading_entradas
+         SET estado = 'cerrada', precio_cierre = $1, razon_cierre = $2, ts_cierre = $3
+         WHERE id = (
+             SELECT id FROM auto_trading_entradas
+             WHERE estado = 'abierta' AND lado = $4
+             ORDER BY ts DESC LIMIT 1
+         )`,
+        [precio, razon, ahoraMs, pos.lado]
+    );
 
     await ejecutarOrdenBinance(buildCloseUrl(pos.lado, pos.qty), BINANCE_API_KEY, `CIERRE-${razon}`);
 }
@@ -935,6 +961,15 @@ async function ejecutarAutoTrading() {
             ),
         ]);
 
+        // Cooldown: no entrar si pasó menos tiempo del configurado desde el último cierre
+        if (p.useCooldown && cfg.ultima_cierre_ts) {
+            const minutosDescierre = (Date.now() - parseInt(cfg.ultima_cierre_ts)) / 60000;
+            if (minutosDescierre < (p.cooldownMinutes ?? 45)) {
+                console.log(`[AutoTrading] Cooldown activo — faltan ${((p.cooldownMinutes ?? 45) - minutosDescierre).toFixed(1)} min`);
+                return;
+            }
+        }
+
         const resultado = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p);
         const nuevaSenal = resultado.signal;
 
@@ -960,6 +995,11 @@ async function ejecutarAutoTrading() {
         if (ordenEntrada.ok) {
             posicionActiva = { lado: nuevaSenal, qty: urls.qty, entry: resultado.entry, tp: resultado.tp, sl: resultado.sl };
             await guardarPosicionBD(posicionActiva);
+            await pool.query(
+                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, estado)
+                 VALUES ($1, $2, $3, $4, $5, 'abierta')`,
+                [Date.now(), nuevaSenal, resultado.entry, resultado.tp, resultado.sl]
+            );
             console.log(`[AutoTrading] Posición guardada — TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)}`);
         }
 
@@ -1046,6 +1086,18 @@ app.get('/api/autotrading/status', autenticar, async (req, res) => {
             'SELECT habilitado, estrategia_nombre, ultima_senal, ultima_senal_ts, position_usdt FROM auto_trading_config WHERE id = 1'
         );
         res.json(r.rows[0] || { habilitado: false });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/autotrading/entradas', autenticar, async (req, res) => {
+    try {
+        const r = await pool.query(
+            `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl,
+                    estado, precio_cierre, razon_cierre, ts_cierre
+             FROM auto_trading_entradas
+             ORDER BY ts DESC LIMIT 200`
+        );
+        res.json(r.rows);
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1152,9 +1204,9 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const alignShort = !p.useEmaAlignment || bearAlign;
 
     let signal = null;
-    if (horarioOk && above && alignLong && rsi15 >= 60 && macd5 > sig5 && nearEMA && deltaOkLong && whaleOkLong)
+    if (p.enableLongs !== false && horarioOk && above && alignLong && rsi15 >= 60 && macd5 > sig5 && nearEMA && deltaOkLong && whaleOkLong)
         signal = 'long';
-    else if (horarioOk && below && alignShort && rsi15 <= 40 && macd5 < sig5 && nearEMA && deltaOkShort && whaleOkShort)
+    else if (p.enableShorts !== false && horarioOk && below && alignShort && rsi15 <= 40 && macd5 < sig5 && nearEMA && deltaOkShort && whaleOkShort)
         signal = 'short';
 
     const tpPerc = p.tpPerc ?? 0.5;

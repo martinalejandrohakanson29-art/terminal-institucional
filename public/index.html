@@ -46,9 +46,8 @@
         #main-content { display: flex; flex: 1; min-height: 0; }
         #chart-container { flex-grow: 1; position: relative; overflow: hidden; background-color: #f0f2f5; }
 
-        #rsi-15m-display {
+        #rsi-15m-display, #delta-vol-display {
             position: absolute;
-            top: 65px;
             left: 10px;
             z-index: 100;
             background: rgba(255,255,255,0.88);
@@ -61,6 +60,8 @@
             pointer-events: none;
             display: none;
         }
+        #rsi-15m-display  { top: 65px; }
+        #delta-vol-display { top: 100px; }
 
         #orderbook-container {
             width: 320px; min-width: 320px; flex-shrink: 0; background-color: #ffffff; border-left: 1px solid #d1d4dc; display: flex; flex-direction: column; font-size: 13px; overflow-y: auto;
@@ -292,6 +293,7 @@
     <div id="main-content">
         <div id="chart-container">
             <div id="rsi-15m-display">RSI 15m: —</div>
+            <div id="delta-vol-display">Δ Vol: —</div>
         </div>
         <div id="orderbook-container">
             <div style="padding: 8px 10px; border-bottom: 1px solid #d1d4dc; background: #ffffff; flex-shrink: 0;">
@@ -828,7 +830,11 @@
         const chart = klinecharts.init('chart-container', {
             styles: {
                 grid: { horizontal: { display: false }, vertical: { display: false } },
-                candle: { bar: { upColor: '#26a69a', downColor: '#ef5350', upBorderColor: '#000000', downBorderColor: '#000000', upWickColor: '#000000', downWickColor: '#000000' } }
+                candle: {
+                    bar: { upColor: '#26a69a', downColor: '#ef5350', upBorderColor: '#000000', downBorderColor: '#000000', upWickColor: '#000000', downWickColor: '#000000' },
+                    tooltip: { showRule: 'none' }
+                },
+                indicator: { tooltip: { showRule: 'none' } }
             }
         });
 
@@ -903,24 +909,40 @@
         // --- TOGGLE INDICADORES ---
         let vwapPeriod = 60;
         let vwapVisible = true, deltaVisible = true, deltaSumVisible = true, oiVisible = true, macdVisible = true;
+        let deltaVolVisible = false, deltaVolVelas = 20;
+
+        function actualizarDisplayDeltaVol() {
+            const el = document.getElementById('delta-vol-display');
+            if (!el) return;
+            if (!deltaVolVisible) { el.style.display = 'none'; return; }
+            if (velasActuales.length === 0) { el.style.display = 'block'; el.textContent = 'Δ Vol: —'; el.style.color = '#64748b'; return; }
+            const slice = velasActuales.slice(-deltaVolVelas);
+            const total = slice.reduce((s, v) => s + (v.delta || 0), 0);
+            const signo = total >= 0 ? '+' : '';
+            el.style.display = 'block';
+            el.style.color = total >= 0 ? '#26a69a' : '#ef5350';
+            el.textContent = `Δ Vol (${deltaVolVelas}v): ${signo}${total.toFixed(2)}`;
+        }
 
         // Definición de todos los indicadores disponibles
         const INDICADORES_DEF = [
-            { id: 'VWAP',     label: 'VWAP',     config: 'vwap'     },
-            { id: 'DELTA',    label: 'Delta',    config: null        },
-            { id: 'DELTASUM', label: 'ΔSum',     config: 'deltasum' },
-            { id: 'OI',       label: 'OI',       config: null        },
-            { id: 'MACD',     label: 'MACD 15m', config: null        },
-            { id: '3EMA',     label: '3EMA',     config: 'ema'       },
+            { id: 'VWAP',      label: 'VWAP',      config: 'vwap'     },
+            { id: 'DELTA',     label: 'Delta',     config: null        },
+            { id: 'DELTASUM',  label: 'ΔSum',      config: 'deltasum' },
+            { id: 'DELTA_VOL', label: 'Δ Vol',     config: null        },
+            { id: 'OI',        label: 'OI',        config: null        },
+            { id: 'MACD',      label: 'MACD 15m',  config: null        },
+            { id: '3EMA',      label: '3EMA',      config: 'ema'       },
         ];
 
         function indicadorEsVisible(id) {
-            if (id === 'VWAP')     return vwapVisible;
-            if (id === 'DELTA')    return deltaVisible;
-            if (id === 'DELTASUM') return deltaSumVisible;
-            if (id === 'OI')       return oiVisible;
-            if (id === 'MACD')     return macdVisible;
-            if (id === '3EMA')     return maVisible;
+            if (id === 'VWAP')      return vwapVisible;
+            if (id === 'DELTA')     return deltaVisible;
+            if (id === 'DELTASUM')  return deltaSumVisible;
+            if (id === 'DELTA_VOL') return deltaVolVisible;
+            if (id === 'OI')        return oiVisible;
+            if (id === 'MACD')      return macdVisible;
+            if (id === '3EMA')      return maVisible;
             return false;
         }
 
@@ -938,6 +960,14 @@
                            <option value="60"   ${vwapPeriod===60   ?'selected':''}>1H</option>
                            <option value="240"  ${vwapPeriod===240  ?'selected':''}>4H</option>
                            <option value="1440" ${vwapPeriod===1440 ?'selected':''}>1D</option>
+                       </select>`
+                    : d.id === 'DELTA_VOL'
+                    ? `<select onchange="deltaVolVelas=+this.value;actualizarDisplayDeltaVol();renderChips();" title="Velas">
+                           <option value="3"   ${deltaVolVelas===3   ?'selected':''}>3v</option>
+                           <option value="5"   ${deltaVolVelas===5   ?'selected':''}>5v</option>
+                           <option value="10"  ${deltaVolVelas===10  ?'selected':''}>10v</option>
+                           <option value="20"  ${deltaVolVelas===20  ?'selected':''}>20v</option>
+                           <option value="50"  ${deltaVolVelas===50  ?'selected':''}>50v</option>
                        </select>`
                     : '';
                 return `<span class="chip-ind">${d.label}${vwapSelHtml}${gearHtml}<span class="chip-x" onclick="toggleDesdeChip('${d.id}')" title="Quitar">&times;</span></span>`;
@@ -1005,6 +1035,9 @@
                 deltaSumVisible = !deltaSumVisible;
                 if (deltaSumVisible) { chart.createIndicator('DELTA_ACUM', false, { id: 'pane_deltasum', height: 100 }); aplicarDeltaSum(); }
                 else { chart.removeIndicator('pane_deltasum', 'DELTA_ACUM'); }
+            } else if (tipo === 'DELTA_VOL') {
+                deltaVolVisible = !deltaVolVisible;
+                actualizarDisplayDeltaVol();
             } else if (tipo === 'OI') {
                 oiVisible = !oiVisible;
                 if (oiVisible) { chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 }); }
@@ -1164,6 +1197,8 @@
                 restaurarDibujos(temporalidad);
                 dibujarMarcadores();
                 cargarBacktestEnGrafico();
+                cargarEntradasAutobot();
+                actualizarDisplayDeltaVol();
                 pedirHistorialBallenas(); // después de que las velas están listas
 
                 binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
@@ -1188,6 +1223,7 @@
                         if (ultima && ultima.timestamp === ts) velasActuales[velasActuales.length - 1] = kActualizada;
                         else { velasActuales.push(kActualizada); tiemposVelasActivas.push(ts); }
                         chart.updateData(kActualizada);
+                        actualizarDisplayDeltaVol();
                     } catch (err) {
                         console.error('Error procesando mensaje kline:', err);
                     }
@@ -1470,6 +1506,65 @@
             }
         }
 
+        // ============================================================
+        // ENTRADAS DEL AUTOBOT (PERSISTENTES)
+        // ============================================================
+        let _ultimaEntradaAutobotId = -1;
+
+        async function cargarEntradasAutobot() {
+            try {
+                const res = await fetch('/api/autotrading/entradas', { credentials: 'same-origin' });
+                if (!res.ok) return;
+                const entradas = await res.json();
+                if (!entradas || entradas.length === 0) return;
+
+                const ultimaId = entradas[0]?.id ?? -1;
+                if (ultimaId === _ultimaEntradaAutobotId) return; // sin cambios
+                _ultimaEntradaAutobotId = ultimaId;
+
+                chart.removeOverlay({ groupId: 'autobot-entradas' });
+
+                entradas.forEach(e => {
+                    const ts     = parseInt(e.ts);
+                    const entry  = parseFloat(e.precio_entrada);
+                    const tp     = parseFloat(e.precio_tp);
+                    const sl     = parseFloat(e.precio_sl);
+                    const lado   = e.lado; // 'long' | 'short'
+
+                    if (e.estado === 'cerrada') {
+                        chart.createOverlay({
+                            name: 'operacionBacktest',
+                            groupId: 'autobot-entradas',
+                            lock: true,
+                            points: [
+                                { timestamp: ts,               value: entry                  },
+                                { timestamp: parseInt(e.ts_cierre), value: parseFloat(e.precio_cierre) },
+                                { timestamp: ts,               value: tp                     },
+                                { timestamp: ts,               value: sl                     }
+                            ],
+                            extendData: { type: lado === 'long' ? 'Long' : 'Short', reason: e.razon_cierre }
+                        });
+                    } else {
+                        chart.createOverlay({
+                            name: 'senalEstrategia',
+                            groupId: 'autobot-entradas',
+                            lock: true,
+                            points: [
+                                { timestamp: ts, value: entry },
+                                { timestamp: ts, value: tp    },
+                                { timestamp: ts, value: sl    }
+                            ],
+                            extendData: { signal: lado }
+                        });
+                    }
+                });
+            } catch (e) {
+                console.error('Error cargando entradas autobot:', e);
+            }
+        }
+
+        setInterval(cargarEntradasAutobot, 60000);
+
         function limpiarBacktestOverlays() {
             chart.removeOverlay({ groupId: 'backtest_trades' });
             localStorage.removeItem('backtestTrades');
@@ -1492,7 +1587,7 @@
                 temporalidad:   temporalidadActual,
                 panelVisible:   document.getElementById('orderbook-container').style.display !== 'none',
                 ballenasVisibles,
-                vwapVisible, deltaVisible, deltaSumVisible, oiVisible, maVisible, macdVisible,
+                vwapVisible, deltaVisible, deltaSumVisible, deltaVolVisible, deltaVolVelas, oiVisible, maVisible, macdVisible,
                 configMA:       { ...configMA },
                 vwapReset:      vwapPeriod,
                 deltaSumPeriod: parseInt(document.getElementById('input-deltasum').value),
@@ -1728,6 +1823,10 @@
                     document.getElementById('input-deltasum').value = cfg.deltaSumPeriod;
                     aplicarDeltaSum();
                 }
+                if (cfg.deltaVolVisible === true) {
+                    deltaVolVisible = true;
+                }
+                if (cfg.deltaVolVelas) deltaVolVelas = cfg.deltaVolVelas;
                 if (cfg.oiVisible === false) {
                     oiVisible = false;
                     chart.removeIndicator('pane_oi', 'OPEN_INTEREST');
