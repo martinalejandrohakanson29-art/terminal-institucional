@@ -716,6 +716,8 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
         if (position === 0) {
             const barHour = new Date(ts).getUTCHours();
             if (barHour < p.startHour || barHour >= p.endHour) continue;
+            const argDay = new Date(ts - 3 * 3600000).getUTCDay(); // 0=Dom, 6=Sáb en horario Argentina
+            if (!p.operaFinDeSemana && (argDay === 0 || argDay === 6)) continue;
             const barsSinceClose = lastClosedBarIdx !== null ? i - lastClosedBarIdx : 999999;
             if (p.useCooldown && barsSinceClose < p.cooldownMinutes) continue;
 
@@ -1172,7 +1174,9 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const sig5  = macdLookup?.sig  ?? 0;
 
     const barHour  = new Date(ts).getUTCHours();
-    const horarioOk = barHour >= (p.startHour ?? 9) && barHour < (p.endHour ?? 20);
+    const argDay   = new Date(ts - 3 * 3600000).getUTCDay(); // 0=Dom, 6=Sáb en horario Argentina
+    const horarioOk = barHour >= (p.startHour ?? 9) && barHour < (p.endHour ?? 20)
+                   && (p.operaFinDeSemana || (argDay !== 0 && argDay !== 6));
 
     const above     = close > E50 && close > E100 && close > E200 && close > E500;
     const below     = close < E50 && close < E100 && close < E200 && close < E500;
@@ -1321,6 +1325,7 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             maxTradeMinutes:   parseInt(req.body.maxTradeMinutes) || 15,
             useCooldown:       req.body.useCooldown !== false,
             cooldownMinutes:   parseInt(req.body.cooldownMinutes) || 45,
+            operaFinDeSemana:  req.body.operaFinDeSemana === true,
             useDeltaFilter:    req.body.useDeltaFilter === true,
             deltaVelas:        parseInt(req.body.deltaVelas) || 3,
             useWhaleFilter:    req.body.useWhaleFilter === true,

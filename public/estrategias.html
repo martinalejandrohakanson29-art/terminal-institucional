@@ -247,6 +247,11 @@
                 <label>Hora fin</label>
                 <input type="number" id="p-end-hour" class="form-input" value="20" min="1" max="24">
             </div>
+            <div class="form-row">
+                <label>Operar fin de semana</label>
+                <input type="checkbox" id="p-fds" class="form-check">
+            </div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:2px;">Sáb/Dom según horario Argentina (UTC-3)</div>
         </div>
 
         <div class="form-section">
@@ -358,6 +363,7 @@
             slPerc:            parseFloat(document.getElementById('p-sl').value) || 1.0,
             startHour:         parseInt(document.getElementById('p-start-hour').value) || 9,
             endHour:           parseInt(document.getElementById('p-end-hour').value) || 20,
+            operaFinDeSemana:  document.getElementById('p-fds').checked,
             usePullbackFilter: document.getElementById('p-pullback').checked,
             pullbackPerc:      parseFloat(document.getElementById('p-pullback-perc').value) || 0.20,
             useEmaAlignment:   document.getElementById('p-ema-align').checked,
@@ -525,14 +531,15 @@
 
         // ── Filtros activos ──
         const filtros = [
-            { label: 'RSI 15m',       activo: true,                  desc: '≥60 L / ≤40 S' },
-            { label: 'MACD 5m',       activo: true,                  desc: 'bull/bear' },
-            { label: 'Pullback EMAs', activo: params.usePullbackFilter, desc: `≤${params.pullbackPerc}%` },
-            { label: 'Alineamiento',  activo: params.useEmaAlignment,   desc: 'EMA ordenadas' },
-            { label: 'Cooldown',      activo: params.useCooldown,        desc: `${params.cooldownMinutes}m` },
-            { label: 'Tiempo máx.',   activo: params.useMaxTradeTime,    desc: `${params.maxTradeMinutes}m` },
-            { label: 'Delta Vol.',    activo: params.useDeltaFilter,     desc: `${params.deltaVelas} velas` },
-            { label: 'Ballenas',      activo: params.useWhaleFilter,     desc: `${params.whaleWindow}m / ≥${params.whaleMinBTC}BTC` },
+            { label: 'RSI 15m',       activo: true,                     desc: '≥60 L / ≤40 S' },
+            { label: 'MACD 5m',       activo: true,                     desc: 'bull/bear' },
+            { label: 'Pullback EMAs', activo: params.usePullbackFilter,  desc: `≤${params.pullbackPerc}%` },
+            { label: 'Alineamiento',  activo: params.useEmaAlignment,    desc: 'EMA ordenadas' },
+            { label: 'Cooldown',      activo: params.useCooldown,         desc: `${params.cooldownMinutes}m` },
+            { label: 'Tiempo máx.',   activo: params.useMaxTradeTime,     desc: `${params.maxTradeMinutes}m` },
+            { label: 'Delta Vol.',    activo: params.useDeltaFilter,      desc: `${params.deltaVelas} velas` },
+            { label: 'Ballenas',      activo: params.useWhaleFilter,      desc: `${params.whaleWindow}m / ≥${params.whaleMinBTC}BTC` },
+            { label: 'Fin de semana', activo: params.operaFinDeSemana,    desc: 'sáb/dom ARG' },
         ];
         const filtrosHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center;">
             <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;">Filtros:</span>
@@ -682,6 +689,7 @@
         document.getElementById('p-sl').value            = p.slPerc ?? 1.0;
         document.getElementById('p-start-hour').value    = p.startHour ?? 9;
         document.getElementById('p-end-hour').value      = p.endHour ?? 20;
+        document.getElementById('p-fds').checked         = !!p.operaFinDeSemana;
         document.getElementById('p-pullback').checked    = p.usePullbackFilter !== false;
         document.getElementById('p-pullback-perc').value = p.pullbackPerc ?? 0.20;
         document.getElementById('p-ema-align').checked   = p.useEmaAlignment !== false;
