@@ -16,7 +16,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'cambiar_este_secreto_en_produccion
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    ssl: process.env.DATABASE_URL?.includes('sslmode=disable') ? false : { rejectUnauthorized: false }
 });
 
 let limiteGuardadoBD = 1.0;
@@ -953,7 +953,7 @@ async function ejecutarAutoTrading() {
         const p = stratRes.rows[0].params;
 
         const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
-            fetchKlinesBatch('1m',  520),
+            fetchKlinesBatch('1m',  2000),
             fetchKlinesBatch('5m',  50),
             fetchKlinesBatch('15m', 60),
             pool.query(
@@ -1246,7 +1246,7 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
         const p = stratRes.rows[0].params;
 
         const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
-            fetchKlinesBatch('1m',  520),
+            fetchKlinesBatch('1m',  2000),
             fetchKlinesBatch('5m',  50),
             fetchKlinesBatch('15m', 60),
             pool.query(
