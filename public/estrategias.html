@@ -201,7 +201,7 @@
             </div>
             <div class="form-row">
                 <label>Días de historial</label>
-                <input type="number" id="p-days" class="form-input" value="7" min="1" max="60">
+                <input type="number" id="p-days" class="form-input" value="7" min="1" max="365">
             </div>
         </div>
 
@@ -385,7 +385,7 @@
         document.getElementById('placeholder').style.display = 'none';
         document.getElementById('results').style.display = 'block';
         const dias = parseInt(document.getElementById('p-days').value) || 7;
-        const aviso = dias > 20 ? ` (${dias} días — puede tardar hasta 30s)` : '';
+        const aviso = dias > 20 ? ` (${dias} días — puede tardar ~${dias <= 90 ? '30s' : dias <= 180 ? '1 min' : dias <= 270 ? '2 min' : '3 min'})` : '';
         document.getElementById('results').innerHTML = `<div class="loading-msg"><span>Ejecutando backtest — descargando 3 temporalidades de Binance...${aviso}</span></div>`;
 
         try {

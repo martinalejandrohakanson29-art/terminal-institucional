@@ -574,7 +574,7 @@ function calcMACDArr(closes, fast = 12, slow = 26, signal = 9) {
 
 async function fetchKlinesBatch(interval, totalBars) {
     const perReq = 1000;
-    const CHUNK = 10; // requests en paralelo por tanda
+    const CHUNK = 20; // requests en paralelo por tanda
     const dur = { '1m': 60000, '5m': 300000, '15m': 900000 }[interval] || 60000;
     const n = Math.ceil(totalBars / perReq);
     const now = Date.now();
@@ -1334,7 +1334,7 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             commission:        0.04,
             initialCapital:    parseFloat(req.body.initialCapital) || 1000,
         };
-        const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 60);
+        const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 365);
         const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
         const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
             fetchKlinesBatch('1m',  days * 1440),
