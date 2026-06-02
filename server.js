@@ -765,6 +765,18 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
         if (dd > maxDDPerc) maxDDPerc = dd;
     });
 
+    // Máxima racha de ganadoras / perdedoras consecutivas
+    let maxWinStreak = 0, maxLossStreak = 0, curWin = 0, curLoss = 0;
+    trades.forEach(t => {
+        if (t.pnlPerc > 0) {
+            curWin++; curLoss = 0;
+            if (curWin > maxWinStreak) maxWinStreak = curWin;
+        } else {
+            curLoss++; curWin = 0;
+            if (curLoss > maxLossStreak) maxLossStreak = curLoss;
+        }
+    });
+
     return {
         stats: {
             totalTrades: trades.length,
@@ -779,6 +791,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
             avgLossPerc: losses.length > 0 ? Math.abs(losses.reduce((s, t) => s + t.pnlPerc, 0) / losses.length) : 0,
             longsCount:  trades.filter(t => t.type === 'Long').length,
             shortsCount: trades.filter(t => t.type === 'Short').length,
+            maxWinStreak, maxLossStreak,
         },
         trades: trades.slice(-300),
         equity
@@ -818,7 +831,7 @@ async function limpiarPosicionBD() {
 function buildCloseUrl(lado, qty) {
     const side = lado === 'long' ? 'SELL' : 'BUY';
     const ts   = Date.now();
-    const p    = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&timestamp=${ts}`;
+    const p    = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&reduceOnly=true&timestamp=${ts}`;
     return `${BINANCE_BASE}/fapi/v1/order?${p}&signature=${binanceSign(p)}`;
 }
 

@@ -21,7 +21,23 @@
       "Bash(exit 0)",
       "PowerShell(Stop-Process *)",
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\User\\\\Desktop\\\\claude\\\\terminal\" -Recurse -Exclude \"node_modules\", \".git\" | Where-Object { $_.Extension -in @\\(\".js\", \".html\", \".css\", \".json\", \".py\", \".md\", \".txt\"\\) } | Select-Object FullName | Sort-Object FullName)",
-      "Bash(node -e ' *3)"
+      "Bash(node -e ' *3)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\User\\\\Desktop\\\\claude\\\\terminal\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(git pull *)",
+      "Bash(git checkout *)",
+      "Bash(Get-ChildItem -Force)",
+      "Bash(Select-Object Name, FullName)",
+      "Bash(dir /s /b)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(git stash *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\User\\\\Desktop\\\\claude\\\\terminal\" -Exclude node_modules -Recurse -Include \"*.ts\", \"*.js\", \"*.tsx\", \"*.jsx\")",
+      "Bash(node -e ' *)",
+      "Bash(node *)",
+      "Bash(git -C C:\\\\Users\\\\User\\\\Desktop\\\\claude\\\\terminal ls-files)",
+      "Bash(git reset *)"
     ]
   }
 }

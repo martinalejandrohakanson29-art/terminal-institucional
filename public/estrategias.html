@@ -585,6 +585,11 @@
                 <div class="stat-value neutral" style="font-size:14px;">${f2(s.avgWinPerc)}% / ${f2(s.avgLossPerc)}%</div>
                 <div class="stat-sub">RR: ${s.avgLossPerc > 0 ? f2(s.avgWinPerc / s.avgLossPerc) : '∞'}</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-label">Máx. Racha</div>
+                <div class="stat-value neutral" style="font-size:14px;"><span class="positive">${s.maxWinStreak ?? 0}W</span> / <span class="negative">${s.maxLossStreak ?? 0}L</span></div>
+                <div class="stat-sub">Ganadoras / Perdedoras seguidas</div>
+            </div>
         </div>`;
 
         // ── Equity Curve ──
