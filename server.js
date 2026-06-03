@@ -666,10 +666,11 @@ function calcCapitalEntrada(p, capital, posicionesAbiertas) {
         // porc_capital_actual
         monto = capital * ((p.posicionValor ?? 100) / 100);
     }
-    // Descontar lo ya asignado a posiciones abiertas para no sobre-exponer el capital
+    // Descontar lo ya asignado a posiciones abiertas para no sobre-exponer el capital.
+    // Solo entrar si el disponible cubre el monto completo — sin posiciones parciales.
     const asignado = posicionesAbiertas.reduce((s, pos) => s + pos.capitalAtEntry, 0);
     const disponible = capital - asignado;
-    return Math.min(monto, disponible);
+    return disponible >= monto ? monto : 0;
 }
 
 function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
