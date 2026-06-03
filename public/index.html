@@ -1770,8 +1770,34 @@
         let estrategiaLiveActiva = false;
         let estrategiaLiveInterval = null;
         // Señal abierta: se guarda al detectar entrada y solo se cierra cuando el precio toca TP o SL.
-        // Esto evita que el overlay desaparezca por cambios momentáneos en los indicadores.
-        let senalAbierta = null; // { signal, entry, tp, sl, timestamp }
+        // Persiste en localStorage para sobrevivir recargas de página.
+        let senalAbierta = null; // { signal, entry, tp, sl, timestamp, nombre }
+
+        const LS_SENAL_KEY = 'senalEstrategiaAbierta';
+        function guardarSenalLS(s)   { try { localStorage.setItem(LS_SENAL_KEY, JSON.stringify(s)); } catch (_) {} }
+        function limpiarSenalLS()    { try { localStorage.removeItem(LS_SENAL_KEY); } catch (_) {} }
+        function recuperarSenalLS()  { try { return JSON.parse(localStorage.getItem(LS_SENAL_KEY) || 'null'); } catch (_) { return null; } }
+
+        function dibujarSenalOverlay(s) {
+            chart.removeOverlay({ groupId: 'senal_live' });
+            chart.createOverlay({
+                name: 'senalEstrategia',
+                groupId: 'senal_live',
+                lock: true,
+                points: [
+                    { timestamp: s.timestamp, value: s.entry },
+                    { timestamp: s.timestamp, value: s.tp   },
+                    { timestamp: s.timestamp, value: s.sl   }
+                ],
+                extendData: { signal: s.signal }
+            });
+            const dir   = s.signal === 'long' ? '▲ LONG' : '▼ SHORT';
+            const color = s.signal === 'long' ? '#26a69a' : '#ef5350';
+            setLiveBadge(
+                `${dir}  ENT $${Math.round(s.entry).toLocaleString()}  TP $${Math.round(s.tp).toLocaleString()}  SL $${Math.round(s.sl).toLocaleString()}`,
+                color
+            );
+        }
 
         async function cargarEstrategiasLive() {
             try {
@@ -1804,7 +1830,7 @@
                     // data.entry es el close de la última vela 1m cerrada (proxy del precio actual).
                     const precioActual = data.entry;
                     if (precioActual != null) {
-                        const { signal, tp, sl, entry } = senalAbierta;
+                        const { signal, tp, sl } = senalAbierta;
                         const tpHit = signal === 'long' ? precioActual >= tp : precioActual <= tp;
                         const slHit = signal === 'long' ? precioActual <= sl : precioActual >= sl;
                         if (tpHit || slHit) {
@@ -1813,6 +1839,7 @@
                             chart.removeOverlay({ groupId: 'senal_live' });
                             setLiveBadge(razon, color);
                             senalAbierta = null;
+                            limpiarSenalLS();
                         }
                         // Si no llegó a TP/SL el overlay sigue intacto, no hacer nada más.
                     }
@@ -1821,25 +1848,9 @@
 
                 // No hay señal abierta: buscar nueva entrada.
                 if (data.signal) {
-                    senalAbierta = { signal: data.signal, entry: data.entry, tp: data.tp, sl: data.sl, timestamp: data.timestamp };
-                    chart.removeOverlay({ groupId: 'senal_live' });
-                    chart.createOverlay({
-                        name: 'senalEstrategia',
-                        groupId: 'senal_live',
-                        lock: true,
-                        points: [
-                            { timestamp: data.timestamp, value: data.entry },
-                            { timestamp: data.timestamp, value: data.tp   },
-                            { timestamp: data.timestamp, value: data.sl   }
-                        ],
-                        extendData: { signal: data.signal }
-                    });
-                    const dir   = data.signal === 'long' ? '▲ LONG' : '▼ SHORT';
-                    const color = data.signal === 'long' ? '#26a69a' : '#ef5350';
-                    setLiveBadge(
-                        `${dir}  ENT $${Math.round(data.entry).toLocaleString()}  TP $${Math.round(data.tp).toLocaleString()}  SL $${Math.round(data.sl).toLocaleString()}`,
-                        color
-                    );
+                    senalAbierta = { signal: data.signal, entry: data.entry, tp: data.tp, sl: data.sl, timestamp: data.timestamp, nombre };
+                    guardarSenalLS(senalAbierta);
+                    dibujarSenalOverlay(senalAbierta);
                 } else {
                     setLiveBadge('Sin señal', '#94a3b8');
                 }
@@ -1855,6 +1866,7 @@
                 clearInterval(estrategiaLiveInterval);
                 estrategiaLiveInterval = null;
                 senalAbierta = null;
+                limpiarSenalLS();
                 chart.removeOverlay({ groupId: 'senal_live' });
                 btn.textContent = 'Activar';
                 btn.style.cssText = 'height:24px;padding:0 8px;border:1px solid #d1d4dc;border-radius:4px;font-size:11px;background:#f8fafc;color:#374151;cursor:pointer;white-space:nowrap;';
@@ -1865,7 +1877,16 @@
                 estrategiaLiveActiva = true;
                 btn.textContent = 'Desactivar';
                 btn.style.cssText = 'height:24px;padding:0 8px;border:1px solid #2962FF;border-radius:4px;font-size:11px;background:#2962FF;color:#fff;cursor:pointer;white-space:nowrap;';
-                setLiveBadge('Evaluando...', '#94a3b8');
+
+                // Restaurar señal guardada si corresponde a la misma estrategia
+                const saved = recuperarSenalLS();
+                if (saved && saved.nombre === nombre) {
+                    senalAbierta = saved;
+                    dibujarSenalOverlay(saved);
+                } else {
+                    setLiveBadge('Evaluando...', '#94a3b8');
+                }
+
                 await checkSenalEstrategia();
                 estrategiaLiveInterval = setInterval(checkSenalEstrategia, 30000);
             }
