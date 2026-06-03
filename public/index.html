@@ -518,6 +518,64 @@
             }
         });
 
+        klinecharts.registerIndicator({
+            name: 'ADX_CUSTOM',
+            shortName: 'ADX',
+            calcParams: [14],
+            figures: [
+                { key: 'adx',    title: 'ADX: ',  type: 'line', styles: () => ({ color: '#9c27b0', size: 2 }) },
+                { key: 'plusDI', title: '+DI: ',  type: 'line', styles: () => ({ color: '#26a69a', size: 1 }) },
+                { key: 'minusDI',title: '-DI: ',  type: 'line', styles: () => ({ color: '#ef5350', size: 1 }) },
+            ],
+            calc: (dataList, indicator) => {
+                const period = indicator.calcParams[0] || 14;
+                const n = dataList.length;
+                const res = new Array(n).fill(null).map(() => ({ adx: null, plusDI: null, minusDI: null }));
+                if (n < 2 * period + 1) return res;
+
+                const tr = [], plusDM = [], minusDM = [];
+                for (let i = 1; i < n; i++) {
+                    const up   = dataList[i].high  - dataList[i - 1].high;
+                    const down = dataList[i - 1].low - dataList[i].low;
+                    plusDM.push(up > down && up > 0 ? up : 0);
+                    minusDM.push(down > up && down > 0 ? down : 0);
+                    tr.push(Math.max(
+                        dataList[i].high - dataList[i].low,
+                        Math.abs(dataList[i].high  - dataList[i - 1].close),
+                        Math.abs(dataList[i].low   - dataList[i - 1].close)
+                    ));
+                }
+
+                let smTR = 0, smPDM = 0, smMDM = 0;
+                for (let i = 0; i < period; i++) { smTR += tr[i]; smPDM += plusDM[i]; smMDM += minusDM[i]; }
+
+                const dx = [], pdiArr = [], mdiArr = [];
+                const pushDX = () => {
+                    const pdi = smTR > 0 ? (smPDM / smTR) * 100 : 0;
+                    const mdi = smTR > 0 ? (smMDM / smTR) * 100 : 0;
+                    pdiArr.push(pdi); mdiArr.push(mdi);
+                    const s = pdi + mdi;
+                    dx.push(s > 0 ? Math.abs(pdi - mdi) / s * 100 : 0);
+                };
+                pushDX();
+                for (let i = period; i < tr.length; i++) {
+                    smTR  = smTR  - smTR  / period + tr[i];
+                    smPDM = smPDM - smPDM / period + plusDM[i];
+                    smMDM = smMDM - smMDM / period + minusDM[i];
+                    pushDX();
+                }
+
+                if (dx.length < period) return res;
+                let adx = dx.slice(0, period).reduce((s, v) => s + v, 0) / period;
+                res[2 * period - 1] = { adx, plusDI: pdiArr[period - 1], minusDI: mdiArr[period - 1] };
+                for (let j = period; j < dx.length; j++) {
+                    adx = (adx * (period - 1) + dx[j]) / period;
+                    res[period + j] = { adx, plusDI: pdiArr[j], minusDI: mdiArr[j] };
+                }
+                return res;
+            }
+        });
+
         // --- 2. OVERLAYS PERSONALIZADOS ---
         klinecharts.registerOverlay({
             name: 'marcadorBallena',
@@ -910,6 +968,7 @@
         let vwapPeriod = 60;
         let vwapVisible = true, deltaVisible = true, deltaSumVisible = true, oiVisible = true, macdVisible = true;
         let deltaVolVisible = false, deltaVolVelas = 20;
+        let adxVisible = false;
 
         function actualizarDisplayDeltaVol() {
             const el = document.getElementById('delta-vol-display');
@@ -933,6 +992,7 @@
             { id: 'OI',        label: 'OI',        config: null        },
             { id: 'MACD',      label: 'MACD 15m',  config: null        },
             { id: '3EMA',      label: '3EMA',      config: 'ema'       },
+            { id: 'ADX',       label: 'ADX',       config: null        },
         ];
 
         function indicadorEsVisible(id) {
@@ -943,6 +1003,7 @@
             if (id === 'OI')        return oiVisible;
             if (id === 'MACD')      return macdVisible;
             if (id === '3EMA')      return maVisible;
+            if (id === 'ADX')       return adxVisible;
             return false;
         }
 
@@ -1046,6 +1107,10 @@
                 macdVisible = !macdVisible;
                 if (macdVisible) { chart.createIndicator('MACD_CUSTOM', false, { id: 'pane_macd', height: 120 }); }
                 else { chart.removeIndicator('pane_macd', 'MACD_CUSTOM'); }
+            } else if (tipo === 'ADX') {
+                adxVisible = !adxVisible;
+                if (adxVisible) { chart.createIndicator('ADX_CUSTOM', false, { id: 'pane_adx', height: 80 }); }
+                else { chart.removeIndicator('pane_adx', 'ADX_CUSTOM'); }
             }
             renderChips();
         }

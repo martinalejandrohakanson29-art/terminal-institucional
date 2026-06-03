@@ -328,6 +328,21 @@
             </div>
         </div>
 
+        <div class="form-section">
+            <h3>ADX (Fuerza de Tendencia)</h3>
+            <div class="form-row">
+                <label>Activar filtro</label>
+                <input type="checkbox" id="p-adx" class="form-check">
+            </div>
+            <div class="form-row">
+                <label>Umbral ADX</label>
+                <input type="number" id="p-adx-threshold" class="form-input" value="25" min="1" max="100">
+            </div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                ADX ≥ umbral = tendencia fuerte<br>ADX &lt; 25: rango / tendencia débil
+            </div>
+        </div>
+
         <button class="btn-run" id="btn-run" onclick="ejecutar()">▶ Ejecutar Backtest</button>
     </div>
 
@@ -376,6 +391,8 @@
             useWhaleFilter:    document.getElementById('p-whale').checked,
             whaleWindow:       parseInt(document.getElementById('p-whale-window').value) || 30,
             whaleMinBTC:       parseFloat(document.getElementById('p-whale-min-btc').value) || 5,
+            useADXFilter:      document.getElementById('p-adx').checked,
+            adxThreshold:      parseInt(document.getElementById('p-adx-threshold').value) || 25,
         };
     }
 
@@ -539,6 +556,7 @@
             { label: 'Tiempo máx.',   activo: params.useMaxTradeTime,     desc: `${params.maxTradeMinutes}m` },
             { label: 'Delta Vol.',    activo: params.useDeltaFilter,      desc: `${params.deltaVelas} velas` },
             { label: 'Ballenas',      activo: params.useWhaleFilter,      desc: `${params.whaleWindow}m / ≥${params.whaleMinBTC}BTC` },
+            { label: 'ADX',           activo: params.useADXFilter,        desc: `≥${params.adxThreshold}` },
             { label: 'Fin de semana', activo: params.operaFinDeSemana,    desc: 'sáb/dom ARG' },
         ];
         const filtrosHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center;">
@@ -707,6 +725,8 @@
         document.getElementById('p-whale').checked       = !!p.useWhaleFilter;
         document.getElementById('p-whale-window').value  = p.whaleWindow ?? 30;
         document.getElementById('p-whale-min-btc').value = p.whaleMinBTC ?? 5;
+        document.getElementById('p-adx').checked          = !!p.useADXFilter;
+        document.getElementById('p-adx-threshold').value  = p.adxThreshold ?? 25;
         document.getElementById('row-sl').style.display  = p.stopType === 'Porcentaje' ? 'flex' : 'none';
     }
 

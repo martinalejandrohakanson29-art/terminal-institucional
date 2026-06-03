@@ -572,6 +572,48 @@ function calcMACDArr(closes, fast = 12, slow = 26, signal = 9) {
     return { macd: macdLine, signal: signalLine };
 }
 
+function calcADX(highs, lows, closes, period = 14) {
+    const n = closes.length;
+    const result = new Array(n).fill(null);
+    if (n < 2 * period + 1) return result;
+
+    const tr = [], plusDM = [], minusDM = [];
+    for (let i = 1; i < n; i++) {
+        const up   = highs[i] - highs[i - 1];
+        const down = lows[i - 1] - lows[i];
+        plusDM.push(up > down && up > 0 ? up : 0);
+        minusDM.push(down > up && down > 0 ? down : 0);
+        tr.push(Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1])));
+    }
+
+    let smTR = 0, smPDM = 0, smMDM = 0;
+    for (let i = 0; i < period; i++) { smTR += tr[i]; smPDM += plusDM[i]; smMDM += minusDM[i]; }
+
+    const dx = [];
+    const pushDX = () => {
+        const pdi = smTR > 0 ? (smPDM / smTR) * 100 : 0;
+        const mdi = smTR > 0 ? (smMDM / smTR) * 100 : 0;
+        const s = pdi + mdi;
+        dx.push(s > 0 ? Math.abs(pdi - mdi) / s * 100 : 0);
+    };
+    pushDX();
+    for (let i = period; i < tr.length; i++) {
+        smTR  = smTR  - smTR  / period + tr[i];
+        smPDM = smPDM - smPDM / period + plusDM[i];
+        smMDM = smMDM - smMDM / period + minusDM[i];
+        pushDX();
+    }
+
+    if (dx.length < period) return result;
+    let adx = dx.slice(0, period).reduce((s, v) => s + v, 0) / period;
+    result[2 * period - 1] = adx;
+    for (let j = period; j < dx.length; j++) {
+        adx = (adx * (period - 1) + dx[j]) / period;
+        result[period + j] = adx;
+    }
+    return result;
+}
+
 async function fetchKlinesBatch(interval, totalBars) {
     const perReq = 1000;
     const CHUNK = 20; // requests en paralelo por tanda
@@ -623,6 +665,10 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     const { macd: macdArr, signal: sigArr } = calcMACDArr(c5m);
     const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[0]), { macd: macdArr[i], sig: sigArr[i] }]));
     const ts5m = bars5m.map(b => parseInt(b[0])).sort((a, b) => a - b);
+
+    const h1m = bars1m.map(b => parseFloat(b[2]));
+    const l1m = bars1m.map(b => parseFloat(b[3]));
+    const adxArr = calcADX(h1m, l1m, c1m);
 
     // Delta de volumen — prefix sum para rolling sum O(1) por barra
     const deltaPfx = new Array(bars1m.length + 1).fill(0);
@@ -742,11 +788,14 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
             const whaleOkLong  = !p.useWhaleFilter || whaleDelta > 0;
             const whaleOkShort = !p.useWhaleFilter || whaleDelta < 0;
 
-            if (p.enableLongs && above && alignLong && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong) {
+            // ADX: mide fuerza de tendencia (>=25 = tendencia fuerte)
+            const adxOk = !p.useADXFilter || (adxArr[i] !== null && adxArr[i] >= (p.adxThreshold ?? 25));
+
+            if (p.enableLongs && above && alignLong && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk) {
                 position = 1; entryPrice = close; entryBarIdx = i;
                 openTP = close * (1 + p.tpPerc / 100);
                 openSL = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
-            } else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort) {
+            } else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort && adxOk) {
                 position = -1; entryPrice = close; entryBarIdx = i;
                 openTP = close * (1 - p.tpPerc / 100);
                 openSL = p.stopType === 'Porcentaje' ? close * (1 + p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
@@ -1163,6 +1212,8 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const e100 = calcEMA(c1m, 100);
     const e200 = calcEMA(c1m, 200);
     const e500 = calcEMA(c1m, 500);
+    const adxArr1m = calcADX(bars1m.map(b => parseFloat(b[2])), bars1m.map(b => parseFloat(b[3])), c1m);
+    const adxValue = adxArr1m[adxArr1m.length - 1];
 
     const c15m   = bars15m.map(b => parseFloat(b[4]));
     const rsiArr = calcRSI14(c15m);
@@ -1220,10 +1271,12 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const alignLong  = !p.useEmaAlignment || bullAlign;
     const alignShort = !p.useEmaAlignment || bearAlign;
 
+    const adxOk = !p.useADXFilter || (adxValue !== null && adxValue >= (p.adxThreshold ?? 25));
+
     let signal = null;
-    if (p.enableLongs !== false && horarioOk && above && alignLong && rsi15 >= 60 && macd5 > sig5 && nearEMA && deltaOkLong && whaleOkLong)
+    if (p.enableLongs !== false && horarioOk && above && alignLong && rsi15 >= 60 && macd5 > sig5 && nearEMA && deltaOkLong && whaleOkLong && adxOk)
         signal = 'long';
-    else if (p.enableShorts !== false && horarioOk && below && alignShort && rsi15 <= 40 && macd5 < sig5 && nearEMA && deltaOkShort && whaleOkShort)
+    else if (p.enableShorts !== false && horarioOk && below && alignShort && rsi15 <= 40 && macd5 < sig5 && nearEMA && deltaOkShort && whaleOkShort && adxOk)
         signal = 'short';
 
     const tpPerc = p.tpPerc ?? 0.5;
@@ -1243,7 +1296,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
 
     return {
         signal, timestamp: ts, entry: close, tp, sl,
-        indicadores: { rsi15, macd5, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
+        indicadores: { rsi15, macd5, adx: adxValue, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
     };
 }
 
