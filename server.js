@@ -666,9 +666,11 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[0]), { macd: macdArr[i], sig: sigArr[i] }]));
     const ts5m = bars5m.map(b => parseInt(b[0])).sort((a, b) => a - b);
 
-    const h1m = bars1m.map(b => parseFloat(b[2]));
-    const l1m = bars1m.map(b => parseFloat(b[3]));
-    const adxArr = calcADX(h1m, l1m, c1m);
+    const h15m = bars15m.map(b => parseFloat(b[2]));
+    const l15m = bars15m.map(b => parseFloat(b[3]));
+    const adxArr15m = calcADX(h15m, l15m, c15m);
+    const adx15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[0]), adxArr15m[i]]));
+    const tsAdx15m = bars15m.map(b => parseInt(b[0])).sort((a, b) => a - b);
 
     // Delta de volumen — prefix sum para rolling sum O(1) por barra
     const deltaPfx = new Array(bars1m.length + 1).fill(0);
@@ -788,8 +790,9 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
             const whaleOkLong  = !p.useWhaleFilter || whaleDelta > 0;
             const whaleOkShort = !p.useWhaleFilter || whaleDelta < 0;
 
-            // ADX: mide fuerza de tendencia (>=25 = tendencia fuerte)
-            const adxOk = !p.useADXFilter || (adxArr[i] !== null && adxArr[i] >= (p.adxThreshold ?? 25));
+            // ADX 15m: mide fuerza de tendencia (>=25 = tendencia fuerte)
+            const adxRaw = lookupHTF(tsAdx15m, adx15mByTs, ts);
+            const adxOk  = !p.useADXFilter || (adxRaw !== null && adxRaw >= (p.adxThreshold ?? 25));
 
             if (p.enableLongs && above && alignLong && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk) {
                 position = 1; entryPrice = close; entryBarIdx = i;
@@ -1212,8 +1215,10 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const e100 = calcEMA(c1m, 100);
     const e200 = calcEMA(c1m, 200);
     const e500 = calcEMA(c1m, 500);
-    const adxArr1m = calcADX(bars1m.map(b => parseFloat(b[2])), bars1m.map(b => parseFloat(b[3])), c1m);
-    const adxValue = adxArr1m[adxArr1m.length - 1];
+    const adxArr15m = calcADX(bars15m.map(b => parseFloat(b[2])), bars15m.map(b => parseFloat(b[3])), c15m);
+    const adxByTs15m = new Map(bars15m.map((b, i) => [parseInt(b[0]), adxArr15m[i]]));
+    const adxTs15m   = [...adxByTs15m.keys()].sort((a, b) => a - b);
+    const adxValue   = lookupHTF(adxTs15m, adxByTs15m, parseInt(bars1m[bars1m.length - 1][0]));
 
     const c15m   = bars15m.map(b => parseFloat(b[4]));
     const rsiArr = calcRSI14(c15m);
