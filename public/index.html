@@ -1546,6 +1546,8 @@
                 if (!raw) return;
                 const { trades, stratName } = JSON.parse(raw);
                 if (!trades || trades.length === 0) return;
+                // Quitar autobot entries para evitar superposición con el backtest
+                chart.removeOverlay({ groupId: 'autobot-entradas' });
                 chart.removeOverlay({ groupId: 'backtest_trades' });
                 trades.forEach(t => {
                     if (!t.tp || !t.sl) return; // trades viejos sin TP/SL guardado
@@ -1577,6 +1579,8 @@
         let _ultimaEntradaAutobotId = -1;
 
         async function cargarEntradasAutobot() {
+            // No mostrar entradas del autobot mientras el backtest esté activo en el gráfico
+            if (localStorage.getItem('backtestTrades')) return;
             try {
                 const res = await fetch('/api/autotrading/entradas', { credentials: 'same-origin' });
                 if (!res.ok) return;
@@ -1635,6 +1639,8 @@
             localStorage.removeItem('backtestTrades');
             const bar = document.getElementById('backtest-overlay-bar');
             if (bar) bar.style.display = 'none';
+            // Recargar entradas del autobot ahora que el backtest fue limpiado
+            cargarEntradasAutobot();
         }
 
         // ============================================================

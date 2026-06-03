@@ -124,8 +124,11 @@ async function inicializarBaseDeDatos() {
                 ADD COLUMN IF NOT EXISTS posicion_entry  NUMERIC,
                 ADD COLUMN IF NOT EXISTS posicion_tp     NUMERIC,
                 ADD COLUMN IF NOT EXISTS posicion_sl     NUMERIC,
-                ADD COLUMN IF NOT EXISTS ultima_cierre_ts BIGINT
+                ADD COLUMN IF NOT EXISTS ultima_cierre_ts BIGINT,
+                ADD COLUMN IF NOT EXISTS usuario_id      INTEGER REFERENCES usuarios(id)
         `);
+        // Migración: usuario_id en auto_trading_entradas
+        await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS usuario_id INTEGER REFERENCES usuarios(id)`);
         await pool.query(`
             CREATE TABLE IF NOT EXISTS auto_trading_entradas (
                 id           SERIAL PRIMARY KEY,
@@ -1027,10 +1030,11 @@ async function ejecutarAutoTrading() {
         const cfg = cfgRes.rows[0];
         if (!cfg || !cfg.habilitado || !cfg.estrategia_nombre) return;
 
-        const stratRes = await pool.query(
-            `SELECT params FROM estrategias_guardadas WHERE nombre = $1 LIMIT 1`,
-            [cfg.estrategia_nombre]
-        );
+        const stratQuery = cfg.usuario_id
+            ? `SELECT params FROM estrategias_guardadas WHERE nombre = $1 AND usuario_id = $2 LIMIT 1`
+            : `SELECT params FROM estrategias_guardadas WHERE nombre = $1 LIMIT 1`;
+        const stratParams = cfg.usuario_id ? [cfg.estrategia_nombre, cfg.usuario_id] : [cfg.estrategia_nombre];
+        const stratRes = await pool.query(stratQuery, stratParams);
         if (!stratRes.rows.length) return;
         const p = stratRes.rows[0].params;
 
@@ -1080,9 +1084,9 @@ async function ejecutarAutoTrading() {
             posicionActiva = { lado: nuevaSenal, qty: urls.qty, entry: resultado.entry, tp: resultado.tp, sl: resultado.sl };
             await guardarPosicionBD(posicionActiva);
             await pool.query(
-                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, estado)
-                 VALUES ($1, $2, $3, $4, $5, 'abierta')`,
-                [Date.now(), nuevaSenal, resultado.entry, resultado.tp, resultado.sl]
+                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, estado, usuario_id)
+                 VALUES ($1, $2, $3, $4, $5, 'abierta', $6)`,
+                [Date.now(), nuevaSenal, resultado.entry, resultado.tp, resultado.sl, cfg.usuario_id || null]
             );
             console.log(`[AutoTrading] Posición guardada — TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)}`);
         }
@@ -1148,12 +1152,14 @@ app.put('/api/autotrading', autenticar, soloAdmin, async (req, res) => {
             `UPDATE auto_trading_config
              SET habilitado = COALESCE($1, habilitado),
                  estrategia_nombre = COALESCE($2, estrategia_nombre),
-                 position_usdt = COALESCE($3, position_usdt)
+                 position_usdt = COALESCE($3, position_usdt),
+                 usuario_id = $4
              WHERE id = 1`,
             [
                 habilitado !== undefined ? habilitado : null,
                 estrategia_nombre !== undefined ? estrategia_nombre : null,
                 position_usdt     !== undefined ? parseFloat(position_usdt) : null,
+                req.usuario.id,
             ]
         );
         // Reset señal cuando se cambia config para re-evaluar
@@ -1179,7 +1185,9 @@ app.get('/api/autotrading/entradas', autenticar, async (req, res) => {
             `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl,
                     estado, precio_cierre, razon_cierre, ts_cierre
              FROM auto_trading_entradas
-             ORDER BY ts DESC LIMIT 200`
+             WHERE usuario_id = $1
+             ORDER BY ts DESC LIMIT 200`,
+            [req.usuario.id]
         );
         res.json(r.rows);
     } catch (e) { res.status(500).json({ error: e.message }); }
