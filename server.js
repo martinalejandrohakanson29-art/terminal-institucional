@@ -637,7 +637,9 @@ async function fetchKlinesBatch(interval, totalBars) {
     const seen = new Set();
     const all = [];
     results.flat().forEach(v => {
-        if (Array.isArray(v) && !seen.has(v[0])) { seen.add(v[0]); all.push(v); }
+        // v[6] = closeTime. Descartamos la vela en curso (aún no cerrada) para no operar
+        // sobre datos incompletos ni introducir look-ahead en el último bar.
+        if (Array.isArray(v) && v[6] <= now && !seen.has(v[0])) { seen.add(v[0]); all.push(v); }
     });
     return all.sort((a, b) => a[0] - b[0]);
 }
@@ -656,21 +658,24 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     const e50 = calcEMA(c1m, 50), e100 = calcEMA(c1m, 100),
           e200 = calcEMA(c1m, 200), e500 = calcEMA(c1m, 500);
 
+    // Indexamos los indicadores HTF por tiempo de CIERRE (b[6]), no de apertura (b[0]).
+    // Así lookupHTF(ts) solo devuelve velas HTF ya cerradas respecto a la vela 1m actual,
+    // evitando look-ahead bias (usar el valor final de una vela 15m/5m aún en formación).
     const c15m = bars15m.map(b => parseFloat(b[4]));
     const rsiArr = calcRSI14(c15m);
-    const rsi15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[0]), rsiArr[i]]));
-    const ts15m = bars15m.map(b => parseInt(b[0])).sort((a, b) => a - b);
+    const rsi15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), rsiArr[i]]));
+    const ts15m = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
 
     const c5m = bars5m.map(b => parseFloat(b[4]));
     const { macd: macdArr, signal: sigArr } = calcMACDArr(c5m);
-    const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[0]), { macd: macdArr[i], sig: sigArr[i] }]));
-    const ts5m = bars5m.map(b => parseInt(b[0])).sort((a, b) => a - b);
+    const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), { macd: macdArr[i], sig: sigArr[i] }]));
+    const ts5m = bars5m.map(b => parseInt(b[6])).sort((a, b) => a - b);
 
     const h15m = bars15m.map(b => parseFloat(b[2]));
     const l15m = bars15m.map(b => parseFloat(b[3]));
     const adxArr15m = calcADX(h15m, l15m, c15m);
-    const adx15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[0]), adxArr15m[i]]));
-    const tsAdx15m = bars15m.map(b => parseInt(b[0])).sort((a, b) => a - b);
+    const adx15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), adxArr15m[i]]));
+    const tsAdx15m = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
 
     // Delta de volumen — prefix sum para rolling sum O(1) por barra
     const deltaPfx = new Array(bars1m.length + 1).fill(0);
@@ -691,17 +696,21 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     let entryBarIdx = null, lastClosedBarIdx = null, openTP = null, openSL = null;
     const trades = [];
     const equity = [{ ts: parseInt(bars1m[0][0]), v: capital }];
+    // Drawdown marcado a mercado: se actualiza en cada vela (no solo al cerrar trade),
+    // capturando la peor excursión adversa de las posiciones abiertas.
+    let ddPeak = capital, maxDDPerc = 0;
     const WARMUP = 500;
 
     for (let i = WARMUP; i < bars1m.length; i++) {
         const bar = bars1m[i];
         const ts = parseInt(bar[0]);
+        const tsClose = parseInt(bar[6]); // instante real de la decisión (cierre de la vela 1m)
         const high = parseFloat(bar[2]), low = parseFloat(bar[3]), close = parseFloat(bar[4]);
         const E50 = e50[i], E100 = e100[i], E200 = e200[i], E500 = e500[i];
         if (!E500) continue;
 
-        const rsiRaw  = lookupHTF(ts15m, rsi15mByTs, ts);
-        const macdRaw = lookupHTF(ts5m, macd5mByTs, ts);
+        const rsiRaw  = lookupHTF(ts15m, rsi15mByTs, tsClose);
+        const macdRaw = lookupHTF(ts5m, macd5mByTs, tsClose);
         if (rsiRaw === null || rsiRaw === undefined || !macdRaw || macdRaw.macd === null || macdRaw.sig === null) continue;
 
         const rsi15 = rsiRaw;
@@ -722,8 +731,10 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                     else if (high >= longTP)                  { exitPrice = longTP; exitReason = 'TP'; }
                     else if (low  <= longSL)                  { exitPrice = longSL; exitReason = 'SL'; }
                 } else {
-                    if (high >= longTP) { exitPrice = longTP; exitReason = 'TP'; }
-                    else { const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500; if (close < se) { exitPrice = close; exitReason = 'EMA'; } }
+                    // Conservador: si en la misma vela rompe la EMA (al cierre) y toca el TP, prioriza la ruptura.
+                    const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500;
+                    if      (close < se)     { exitPrice = close;  exitReason = 'EMA'; }
+                    else if (high >= longTP) { exitPrice = longTP; exitReason = 'TP'; }
                 }
                 if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
             } else {
@@ -732,8 +743,10 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                     else if (low  <= shortTP)                   { exitPrice = shortTP; exitReason = 'TP'; }
                     else if (high >= shortSL)                   { exitPrice = shortSL; exitReason = 'SL'; }
                 } else {
-                    if (low <= shortTP) { exitPrice = shortTP; exitReason = 'TP'; }
-                    else { const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500; if (close > se) { exitPrice = close; exitReason = 'EMA'; } }
+                    // Conservador: si en la misma vela rompe la EMA (al cierre) y toca el TP, prioriza la ruptura.
+                    const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500;
+                    if      (close > se)      { exitPrice = close;   exitReason = 'EMA'; }
+                    else if (low <= shortTP)  { exitPrice = shortTP; exitReason = 'TP'; }
                 }
                 if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
             }
@@ -791,7 +804,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
             const whaleOkShort = !p.useWhaleFilter || whaleDelta < 0;
 
             // ADX 15m: mide fuerza de tendencia (>=25 = tendencia fuerte)
-            const adxRaw = lookupHTF(tsAdx15m, adx15mByTs, ts);
+            const adxRaw = lookupHTF(tsAdx15m, adx15mByTs, tsClose);
             const adxOk  = !p.useADXFilter || (adxRaw !== null && adxRaw >= (p.adxThreshold ?? 25));
 
             if (p.enableLongs && above && alignLong && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk) {
@@ -804,18 +817,22 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                 openSL = p.stopType === 'Porcentaje' ? close * (1 + p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
             }
         }
+
+        // Marcado a mercado de la vela: equity realizada + PnL no realizado de la posición abierta
+        let markedEquity = capital;
+        if (position !== 0) {
+            const raw = position === 1 ? (close - entryPrice) / entryPrice : (entryPrice - close) / entryPrice;
+            markedEquity = capital * (1 + raw - (p.commission / 100) * 2);
+        }
+        if (markedEquity > ddPeak) ddPeak = markedEquity;
+        const ddNow = (ddPeak - markedEquity) / ddPeak * 100;
+        if (ddNow > maxDDPerc) maxDDPerc = ddNow;
     }
 
     const wins   = trades.filter(t => t.pnlPerc > 0);
     const losses = trades.filter(t => t.pnlPerc <= 0);
     const grossW = wins.reduce((s, t) => s + Math.abs(t.pnlAbs), 0);
     const grossL = losses.reduce((s, t) => s + Math.abs(t.pnlAbs), 0);
-    let peak = p.initialCapital, maxDDPerc = 0;
-    equity.forEach(pt => {
-        if (pt.v > peak) peak = pt.v;
-        const dd = (peak - pt.v) / peak * 100;
-        if (dd > maxDDPerc) maxDDPerc = dd;
-    });
 
     // Máxima racha de ganadoras / perdedoras consecutivas
     let maxWinStreak = 0, maxLossStreak = 0, curWin = 0, curLoss = 0;
@@ -1215,29 +1232,32 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const e100 = calcEMA(c1m, 100);
     const e200 = calcEMA(c1m, 200);
     const e500 = calcEMA(c1m, 500);
+    // Indicadores HTF indexados por tiempo de CIERRE (b[6]) para evitar look-ahead:
+    // solo se usan velas 15m/5m ya cerradas, igual que en runBacktest (consistencia backtest↔vivo).
     const c15m   = bars15m.map(b => parseFloat(b[4]));
     const rsiArr = calcRSI14(c15m);
 
     const adxArr15m = calcADX(bars15m.map(b => parseFloat(b[2])), bars15m.map(b => parseFloat(b[3])), c15m);
-    const adxByTs15m = new Map(bars15m.map((b, i) => [parseInt(b[0]), adxArr15m[i]]));
+    const adxByTs15m = new Map(bars15m.map((b, i) => [parseInt(b[6]), adxArr15m[i]]));
     const adxTs15m   = [...adxByTs15m.keys()].sort((a, b) => a - b);
-    const adxValue   = lookupHTF(adxTs15m, adxByTs15m, parseInt(bars1m[bars1m.length - 1][0]));
-    const rsi15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[0]), rsiArr[i]]));
+    const adxValue   = lookupHTF(adxTs15m, adxByTs15m, parseInt(bars1m[bars1m.length - 1][6]));
+    const rsi15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), rsiArr[i]]));
     const rsi15mTs   = [...rsi15mByTs.keys()].sort((a, b) => a - b);
 
     const { macd: macdArr, signal: sigArr } = calcMACDArr(bars5m.map(b => parseFloat(b[4])));
-    const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[0]), { macd: macdArr[i], sig: sigArr[i] }]));
+    const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), { macd: macdArr[i], sig: sigArr[i] }]));
     const macd5mTs   = [...macd5mByTs.keys()].sort((a, b) => a - b);
 
     const i     = bars1m.length - 1;
     const bar   = bars1m[i];
     const ts    = parseInt(bar[0]);
+    const tsClose = parseInt(bar[6]); // instante real de la decisión (cierre de la vela 1m)
     const close = parseFloat(bar[4]);
 
     const E50 = e50[i], E100 = e100[i], E200 = e200[i], E500 = e500[i];
 
-    const rsiLookup  = lookupHTF(rsi15mTs, rsi15mByTs, ts);
-    const macdLookup = lookupHTF(macd5mTs, macd5mByTs, ts);
+    const rsiLookup  = lookupHTF(rsi15mTs, rsi15mByTs, tsClose);
+    const macdLookup = lookupHTF(macd5mTs, macd5mByTs, tsClose);
     const rsi15 = rsiLookup  ?? 50;
     const macd5 = macdLookup?.macd ?? 0;
     const sig5  = macdLookup?.sig  ?? 0;
@@ -1387,8 +1407,8 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             tpPerc:            parseFloat(req.body.tpPerc)  || 0.5,
             stopType:          req.body.stopType || 'Porcentaje',
             slPerc:            parseFloat(req.body.slPerc)  || 1.0,
-            startHour:         parseInt(req.body.startHour) ?? 9,
-            endHour:           parseInt(req.body.endHour)   ?? 20,
+            startHour:         Number.isFinite(parseInt(req.body.startHour)) ? parseInt(req.body.startHour) : 9,
+            endHour:           Number.isFinite(parseInt(req.body.endHour))   ? parseInt(req.body.endHour)   : 20,
             usePullbackFilter: req.body.usePullbackFilter !== false,
             pullbackPerc:      parseFloat(req.body.pullbackPerc) || 0.20,
             useEmaAlignment:   req.body.useEmaAlignment !== false,
