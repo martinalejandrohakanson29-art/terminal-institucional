@@ -225,6 +225,25 @@
         </div>
 
         <div class="form-section">
+            <h3>Tamaño de Posición</h3>
+            <div class="form-row">
+                <label>Tipo</label>
+                <select id="p-pos-tipo" class="form-select" onchange="actualizarPosUI()">
+                    <option value="porc_capital_actual">% Capital actual</option>
+                    <option value="porc_capital_inicial">% Capital inicial</option>
+                    <option value="monto_fijo">Monto fijo ($)</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label id="lbl-pos-valor">Valor (%)</label>
+                <input type="number" id="p-pos-valor" class="form-input" value="100" min="0.01" step="1">
+            </div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;" id="pos-hint">
+                Usa este % del capital corriente en cada entrada. Crece o decrece con las ganancias/pérdidas.
+            </div>
+        </div>
+
+        <div class="form-section">
             <h3>Take Profit / Stop Loss</h3>
             <div class="form-row">
                 <label>Take Profit %</label>
@@ -374,6 +393,22 @@
         document.getElementById('row-sl').style.display = this.value === 'Porcentaje' ? 'flex' : 'none';
     });
 
+    function actualizarPosUI() {
+        const tipo = document.getElementById('p-pos-tipo').value;
+        const lbl  = document.getElementById('lbl-pos-valor');
+        const hint = document.getElementById('pos-hint');
+        if (tipo === 'monto_fijo') {
+            lbl.textContent  = 'Monto ($)';
+            hint.textContent = 'Siempre entra con este monto fijo en dólares, sin importar el capital acumulado.';
+        } else if (tipo === 'porc_capital_inicial') {
+            lbl.textContent  = 'Porcentaje (%)';
+            hint.textContent = 'Usa este % del capital INICIAL en cada entrada. El monto en dólares no cambia aunque el capital suba o baje.';
+        } else {
+            lbl.textContent  = 'Porcentaje (%)';
+            hint.textContent = 'Usa este % del capital ACTUAL en cada entrada. Crece con ganancias y decrece con pérdidas.';
+        }
+    }
+
     function getParams() {
         return {
             initialCapital:    parseFloat(document.getElementById('p-capital').value) || 1000,
@@ -401,6 +436,8 @@
             useADXFilter:        document.getElementById('p-adx').checked,
             adxThreshold:        parseInt(document.getElementById('p-adx-threshold').value) || 25,
             allowMultipleEntries: document.getElementById('p-multiple-entries').checked,
+            posicionTipo:         document.getElementById('p-pos-tipo').value,
+            posicionValor:        parseFloat(document.getElementById('p-pos-valor').value) || 100,
         };
     }
 
@@ -567,6 +604,13 @@
             { label: 'ADX',           activo: params.useADXFilter,        desc: `≥${params.adxThreshold}` },
             { label: 'Fin de semana',  activo: params.operaFinDeSemana,     desc: 'sáb/dom ARG' },
             { label: 'Múlt. entradas', activo: params.allowMultipleEntries, desc: 'pyramiding' },
+            { label: 'Tamaño pos.',
+              activo: true,
+              desc: params.posicionTipo === 'monto_fijo'
+                        ? `$${params.posicionValor} fijo`
+                        : params.posicionTipo === 'porc_capital_inicial'
+                            ? `${params.posicionValor}% cap. inicial`
+                            : `${params.posicionValor}% cap. actual` },
         ];
         const filtrosHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center;">
             <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;">Filtros:</span>
@@ -737,6 +781,9 @@
         document.getElementById('p-adx').checked                 = !!p.useADXFilter;
         document.getElementById('p-adx-threshold').value         = p.adxThreshold ?? 25;
         document.getElementById('p-multiple-entries').checked    = !!p.allowMultipleEntries;
+        document.getElementById('p-pos-tipo').value              = p.posicionTipo  || 'porc_capital_actual';
+        document.getElementById('p-pos-valor').value             = p.posicionValor ?? 100;
+        actualizarPosUI();
         document.getElementById('row-sl').style.display          = p.stopType === 'Porcentaje' ? 'flex' : 'none';
     }
 

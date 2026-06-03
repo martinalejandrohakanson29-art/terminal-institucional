@@ -656,6 +656,17 @@ function lookupHTF(sortedTs, byTs, target) {
     return found >= 0 ? byTs.get(sortedTs[found]) : null;
 }
 
+function calcCapitalEntrada(p, capital) {
+    if (p.posicionTipo === 'monto_fijo') {
+        return Math.min(p.posicionValor ?? capital, capital);
+    }
+    if (p.posicionTipo === 'porc_capital_inicial') {
+        return p.initialCapital * ((p.posicionValor ?? 100) / 100);
+    }
+    // default: porc_capital_actual
+    return capital * ((p.posicionValor ?? 100) / 100);
+}
+
 function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     const c1m = bars1m.map(b => parseFloat(b[4]));
     const e50 = calcEMA(c1m, 50), e100 = calcEMA(c1m, 100),
@@ -814,13 +825,21 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                 const adxOk  = !p.useADXFilter || (adxRaw !== null && adxRaw >= (p.adxThreshold ?? 25));
 
                 if (p.enableLongs && above && alignLong && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk) {
-                    const tp = close * (1 + p.tpPerc / 100);
-                    const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
-                    posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capital });
+                    const capEntrada = calcCapitalEntrada(p, capital);
+                    if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
+                    else {
+                        const tp = close * (1 + p.tpPerc / 100);
+                        const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
+                        posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
+                    }
                 } else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort && adxOk) {
-                    const tp = close * (1 - p.tpPerc / 100);
-                    const sl = p.stopType === 'Porcentaje' ? close * (1 + p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
-                    posiciones.push({ side: -1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capital });
+                    const capEntrada = calcCapitalEntrada(p, capital);
+                    if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
+                    else {
+                        const tp = close * (1 - p.tpPerc / 100);
+                        const sl = p.stopType === 'Porcentaje' ? close * (1 + p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
+                        posiciones.push({ side: -1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
+                    }
                 }
             }
         }
@@ -1437,8 +1456,10 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             useADXFilter:        req.body.useADXFilter === true,
             adxThreshold:        parseInt(req.body.adxThreshold) || 25,
             allowMultipleEntries: req.body.allowMultipleEntries === true,
-            commission:          0.04,
-            initialCapital:      parseFloat(req.body.initialCapital) || 1000,
+            posicionTipo:         req.body.posicionTipo || 'porc_capital_actual',
+            posicionValor:        parseFloat(req.body.posicionValor) || 100,
+            commission:           0.04,
+            initialCapital:       parseFloat(req.body.initialCapital) || 1000,
         };
         const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 365);
         const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
