@@ -656,15 +656,20 @@ function lookupHTF(sortedTs, byTs, target) {
     return found >= 0 ? byTs.get(sortedTs[found]) : null;
 }
 
-function calcCapitalEntrada(p, capital) {
+function calcCapitalEntrada(p, capital, posicionesAbiertas) {
+    let monto;
     if (p.posicionTipo === 'monto_fijo') {
-        return Math.min(p.posicionValor ?? capital, capital);
+        monto = p.posicionValor ?? capital;
+    } else if (p.posicionTipo === 'porc_capital_inicial') {
+        monto = p.initialCapital * ((p.posicionValor ?? 100) / 100);
+    } else {
+        // porc_capital_actual
+        monto = capital * ((p.posicionValor ?? 100) / 100);
     }
-    if (p.posicionTipo === 'porc_capital_inicial') {
-        return p.initialCapital * ((p.posicionValor ?? 100) / 100);
-    }
-    // default: porc_capital_actual
-    return capital * ((p.posicionValor ?? 100) / 100);
+    // Descontar lo ya asignado a posiciones abiertas para no sobre-exponer el capital
+    const asignado = posicionesAbiertas.reduce((s, pos) => s + pos.capitalAtEntry, 0);
+    const disponible = capital - asignado;
+    return Math.min(monto, disponible);
 }
 
 function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
@@ -825,7 +830,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                 const adxOk  = !p.useADXFilter || (adxRaw !== null && adxRaw >= (p.adxThreshold ?? 25));
 
                 if (p.enableLongs && above && alignLong && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk) {
-                    const capEntrada = calcCapitalEntrada(p, capital);
+                    const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
                         const tp = close * (1 + p.tpPerc / 100);
@@ -833,7 +838,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                         posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
                     }
                 } else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort && adxOk) {
-                    const capEntrada = calcCapitalEntrada(p, capital);
+                    const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
                         const tp = close * (1 - p.tpPerc / 100);
