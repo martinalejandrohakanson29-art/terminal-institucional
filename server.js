@@ -1215,13 +1215,13 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const e100 = calcEMA(c1m, 100);
     const e200 = calcEMA(c1m, 200);
     const e500 = calcEMA(c1m, 500);
+    const c15m   = bars15m.map(b => parseFloat(b[4]));
+    const rsiArr = calcRSI14(c15m);
+
     const adxArr15m = calcADX(bars15m.map(b => parseFloat(b[2])), bars15m.map(b => parseFloat(b[3])), c15m);
     const adxByTs15m = new Map(bars15m.map((b, i) => [parseInt(b[0]), adxArr15m[i]]));
     const adxTs15m   = [...adxByTs15m.keys()].sort((a, b) => a - b);
     const adxValue   = lookupHTF(adxTs15m, adxByTs15m, parseInt(bars1m[bars1m.length - 1][0]));
-
-    const c15m   = bars15m.map(b => parseFloat(b[4]));
-    const rsiArr = calcRSI14(c15m);
     const rsi15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[0]), rsiArr[i]]));
     const rsi15mTs   = [...rsi15mByTs.keys()].sort((a, b) => a - b);
 
@@ -1402,6 +1402,8 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             useWhaleFilter:    req.body.useWhaleFilter === true,
             whaleWindow:       parseInt(req.body.whaleWindow) || 30,
             whaleMinBTC:       parseFloat(req.body.whaleMinBTC) || 5,
+            useADXFilter:      req.body.useADXFilter === true,
+            adxThreshold:      parseInt(req.body.adxThreshold) || 25,
             commission:        0.04,
             initialCapital:    parseFloat(req.body.initialCapital) || 1000,
         };
