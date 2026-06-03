@@ -1769,6 +1769,9 @@
         // ── Estrategia en Vivo ────────────────────────────────────────
         let estrategiaLiveActiva = false;
         let estrategiaLiveInterval = null;
+        // Señal abierta: se guarda al detectar entrada y solo se cierra cuando el precio toca TP o SL.
+        // Esto evita que el overlay desaparezca por cambios momentáneos en los indicadores.
+        let senalAbierta = null; // { signal, entry, tp, sl, timestamp }
 
         async function cargarEstrategiasLive() {
             try {
@@ -1795,8 +1798,31 @@
             try {
                 const res = await fetch(`/api/estrategia/signal?nombre=${encodeURIComponent(nombre)}`, { credentials: 'same-origin' });
                 const data = await res.json();
-                chart.removeOverlay({ groupId: 'senal_live' });
+
+                if (senalAbierta) {
+                    // Hay señal abierta: solo verificar si el precio actual tocó TP o SL.
+                    // data.entry es el close de la última vela 1m cerrada (proxy del precio actual).
+                    const precioActual = data.entry;
+                    if (precioActual != null) {
+                        const { signal, tp, sl, entry } = senalAbierta;
+                        const tpHit = signal === 'long' ? precioActual >= tp : precioActual <= tp;
+                        const slHit = signal === 'long' ? precioActual <= sl : precioActual >= sl;
+                        if (tpHit || slHit) {
+                            const razon = tpHit ? 'TP alcanzado ✓' : 'SL alcanzado ✗';
+                            const color = tpHit ? '#26a69a' : '#ef5350';
+                            chart.removeOverlay({ groupId: 'senal_live' });
+                            setLiveBadge(razon, color);
+                            senalAbierta = null;
+                        }
+                        // Si no llegó a TP/SL el overlay sigue intacto, no hacer nada más.
+                    }
+                    return;
+                }
+
+                // No hay señal abierta: buscar nueva entrada.
                 if (data.signal) {
+                    senalAbierta = { signal: data.signal, entry: data.entry, tp: data.tp, sl: data.sl, timestamp: data.timestamp };
+                    chart.removeOverlay({ groupId: 'senal_live' });
                     chart.createOverlay({
                         name: 'senalEstrategia',
                         groupId: 'senal_live',
@@ -1828,6 +1854,7 @@
                 estrategiaLiveActiva = false;
                 clearInterval(estrategiaLiveInterval);
                 estrategiaLiveInterval = null;
+                senalAbierta = null;
                 chart.removeOverlay({ groupId: 'senal_live' });
                 btn.textContent = 'Activar';
                 btn.style.cssText = 'height:24px;padding:0 8px;border:1px solid #d1d4dc;border-radius:4px;font-size:11px;background:#f8fafc;color:#374151;cursor:pointer;white-space:nowrap;';
