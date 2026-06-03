@@ -695,12 +695,13 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     const whaleWindowMs = p.whaleWindow * 60000;
     let wLeft = 0, wRight = -1, wBuys = 0, wSells = 0;
 
-    let capital = p.initialCapital, position = 0, entryPrice = 0;
-    let entryBarIdx = null, lastClosedBarIdx = null, openTP = null, openSL = null;
+    let capital = p.initialCapital;
+    let posiciones = []; // { side, entry, entryBarIdx, tp, sl, capitalAtEntry }
+    let lastClosedBarIdx = null;
     const trades = [];
     const equity = [{ ts: parseInt(bars1m[0][0]), v: capital }];
     // Drawdown marcado a mercado: se actualiza en cada vela (no solo al cerrar trade),
-    // capturando la peor excursión adversa de las posiciones abiertas.
+    // capturando la peor excursión adversa de todas las posiciones abiertas.
     let ddPeak = capital, maxDDPerc = 0;
     const WARMUP = 500;
 
@@ -719,49 +720,49 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
         const rsi15 = rsiRaw;
         const { macd: macd5, sig: sig5 } = macdRaw;
 
-        // SALIDAS
-        if (position !== 0) {
-            const barsIn  = i - entryBarIdx;
-            const longTP  = entryPrice * (1 + p.tpPerc / 100);
-            const shortTP = entryPrice * (1 - p.tpPerc / 100);
-            const longSL  = entryPrice * (1 - p.slPerc / 100);
-            const shortSL = entryPrice * (1 + p.slPerc / 100);
+        // SALIDAS — iterar en reversa para poder hacer splice sin afectar índices
+        for (let j = posiciones.length - 1; j >= 0; j--) {
+            const pos = posiciones[j];
+            const barsIn = i - pos.entryBarIdx;
             let exitPrice = null, exitReason = null;
 
-            if (position === 1) {
+            if (pos.side === 1) {
                 if (p.stopType === 'Porcentaje') {
-                    if      (high >= longTP && low <= longSL) { exitPrice = longSL; exitReason = 'SL'; }
-                    else if (high >= longTP)                  { exitPrice = longTP; exitReason = 'TP'; }
-                    else if (low  <= longSL)                  { exitPrice = longSL; exitReason = 'SL'; }
+                    if      (high >= pos.tp && low <= pos.sl) { exitPrice = pos.sl; exitReason = 'SL'; }
+                    else if (high >= pos.tp)                   { exitPrice = pos.tp; exitReason = 'TP'; }
+                    else if (low  <= pos.sl)                   { exitPrice = pos.sl; exitReason = 'SL'; }
                 } else {
                     // Conservador: si en la misma vela rompe la EMA (al cierre) y toca el TP, prioriza la ruptura.
                     const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500;
                     if      (close < se)     { exitPrice = close;  exitReason = 'EMA'; }
-                    else if (high >= longTP) { exitPrice = longTP; exitReason = 'TP'; }
+                    else if (high >= pos.tp) { exitPrice = pos.tp; exitReason = 'TP'; }
                 }
                 if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
             } else {
                 if (p.stopType === 'Porcentaje') {
-                    if      (low <= shortTP && high >= shortSL) { exitPrice = shortSL; exitReason = 'SL'; }
-                    else if (low  <= shortTP)                   { exitPrice = shortTP; exitReason = 'TP'; }
-                    else if (high >= shortSL)                   { exitPrice = shortSL; exitReason = 'SL'; }
+                    if      (low <= pos.tp && high >= pos.sl) { exitPrice = pos.sl; exitReason = 'SL'; }
+                    else if (low  <= pos.tp)                   { exitPrice = pos.tp; exitReason = 'TP'; }
+                    else if (high >= pos.sl)                   { exitPrice = pos.sl; exitReason = 'SL'; }
                 } else {
                     // Conservador: si en la misma vela rompe la EMA (al cierre) y toca el TP, prioriza la ruptura.
                     const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500;
-                    if      (close > se)      { exitPrice = close;   exitReason = 'EMA'; }
-                    else if (low <= shortTP)  { exitPrice = shortTP; exitReason = 'TP'; }
+                    if      (close > se)     { exitPrice = close;   exitReason = 'EMA'; }
+                    else if (low <= pos.tp)  { exitPrice = pos.tp;  exitReason = 'TP'; }
                 }
                 if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
             }
 
             if (exitPrice) {
-                const raw = position === 1 ? (exitPrice - entryPrice) / entryPrice : (entryPrice - exitPrice) / entryPrice;
+                const raw = pos.side === 1
+                    ? (exitPrice - pos.entry) / pos.entry
+                    : (pos.entry - exitPrice) / pos.entry;
                 const net = raw - (p.commission / 100) * 2;
-                const pnlAbs = capital * net;
+                const pnlAbs = pos.capitalAtEntry * net;
                 capital += pnlAbs;
-                trades.push({ type: position === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[entryBarIdx][0]), exitTs: ts, entryPrice, exitPrice, tp: openTP, sl: openSL, pnlPerc: net * 100, pnlAbs, reason: exitReason, capital });
+                trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: ts, entryPrice: pos.entry, exitPrice, tp: pos.tp, sl: pos.sl, pnlPerc: net * 100, pnlAbs, reason: exitReason, capital });
                 equity.push({ ts, v: capital });
-                position = 0; lastClosedBarIdx = i; entryBarIdx = null; openTP = null; openSL = null;
+                lastClosedBarIdx = i;
+                posiciones.splice(j, 1);
             }
         }
 
@@ -776,56 +777,59 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
         }
         const whaleDelta = wBuys - wSells;
 
-        // ENTRADAS
-        if (position === 0) {
+        // ENTRADAS — permitir si no hay posición abierta, o si múltiples entradas está habilitado
+        if (posiciones.length === 0 || p.allowMultipleEntries) {
             const barHour = new Date(ts).getUTCHours();
-            if (barHour < p.startHour || barHour >= p.endHour) continue;
             const argDay = new Date(ts - 3 * 3600000).getUTCDay(); // 0=Dom, 6=Sáb en horario Argentina
-            if (!p.operaFinDeSemana && (argDay === 0 || argDay === 6)) continue;
             const barsSinceClose = lastClosedBarIdx !== null ? i - lastClosedBarIdx : 999999;
-            if (p.useCooldown && barsSinceClose < p.cooldownMinutes) continue;
 
-            const above = close > E50 && close > E100 && close > E200 && close > E500;
-            const below = close < E50 && close < E100 && close < E200 && close < E500;
-            const bullAlign = E50 > E100 && E100 > E200 && E200 > E500;
-            const bearAlign = E50 < E100 && E100 < E200 && E200 < E500;
-            const d50 = Math.abs(close - E50) / close * 100, d100 = Math.abs(close - E100) / close * 100,
-                  d200 = Math.abs(close - E200) / close * 100, d500 = Math.abs(close - E500) / close * 100;
-            const nearEMA = d50 <= p.pullbackPerc || d100 <= p.pullbackPerc || d200 <= p.pullbackPerc || d500 <= p.pullbackPerc;
-            const pullOK     = !p.usePullbackFilter || nearEMA;
-            const alignLong  = !p.useEmaAlignment || bullAlign;
-            const alignShort = !p.useEmaAlignment || bearAlign;
+            if (
+                barHour >= p.startHour && barHour < p.endHour &&
+                (p.operaFinDeSemana || (argDay !== 0 && argDay !== 6)) &&
+                !(p.useCooldown && barsSinceClose < p.cooldownMinutes)
+            ) {
+                const above = close > E50 && close > E100 && close > E200 && close > E500;
+                const below = close < E50 && close < E100 && close < E200 && close < E500;
+                const bullAlign = E50 > E100 && E100 > E200 && E200 > E500;
+                const bearAlign = E50 < E100 && E100 < E200 && E200 < E500;
+                const d50 = Math.abs(close - E50) / close * 100, d100 = Math.abs(close - E100) / close * 100,
+                      d200 = Math.abs(close - E200) / close * 100, d500 = Math.abs(close - E500) / close * 100;
+                const nearEMA = d50 <= p.pullbackPerc || d100 <= p.pullbackPerc || d200 <= p.pullbackPerc || d500 <= p.pullbackPerc;
+                const pullOK     = !p.usePullbackFilter || nearEMA;
+                const alignLong  = !p.useEmaAlignment || bullAlign;
+                const alignShort = !p.useEmaAlignment || bearAlign;
 
-            // Delta de volumen rolling (últimas N velas)
-            const dStart       = Math.max(0, i - p.deltaVelas + 1);
-            const deltaRolling = deltaPfx[i + 1] - deltaPfx[dStart];
-            const deltaOkLong  = !p.useDeltaFilter || deltaRolling > 0;
-            const deltaOkShort = !p.useDeltaFilter || deltaRolling < 0;
+                // Delta de volumen rolling (últimas N velas)
+                const dStart       = Math.max(0, i - p.deltaVelas + 1);
+                const deltaRolling = deltaPfx[i + 1] - deltaPfx[dStart];
+                const deltaOkLong  = !p.useDeltaFilter || deltaRolling > 0;
+                const deltaOkShort = !p.useDeltaFilter || deltaRolling < 0;
 
-            // Ballenas: delta en ventana reciente
-            const whaleOkLong  = !p.useWhaleFilter || whaleDelta > 0;
-            const whaleOkShort = !p.useWhaleFilter || whaleDelta < 0;
+                // Ballenas: delta en ventana reciente
+                const whaleOkLong  = !p.useWhaleFilter || whaleDelta > 0;
+                const whaleOkShort = !p.useWhaleFilter || whaleDelta < 0;
 
-            // ADX 15m: mide fuerza de tendencia (>=25 = tendencia fuerte)
-            const adxRaw = lookupHTF(tsAdx15m, adx15mByTs, tsClose);
-            const adxOk  = !p.useADXFilter || (adxRaw !== null && adxRaw >= (p.adxThreshold ?? 25));
+                // ADX 15m: mide fuerza de tendencia (>=25 = tendencia fuerte)
+                const adxRaw = lookupHTF(tsAdx15m, adx15mByTs, tsClose);
+                const adxOk  = !p.useADXFilter || (adxRaw !== null && adxRaw >= (p.adxThreshold ?? 25));
 
-            if (p.enableLongs && above && alignLong && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk) {
-                position = 1; entryPrice = close; entryBarIdx = i;
-                openTP = close * (1 + p.tpPerc / 100);
-                openSL = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
-            } else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort && adxOk) {
-                position = -1; entryPrice = close; entryBarIdx = i;
-                openTP = close * (1 - p.tpPerc / 100);
-                openSL = p.stopType === 'Porcentaje' ? close * (1 + p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
+                if (p.enableLongs && above && alignLong && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk) {
+                    const tp = close * (1 + p.tpPerc / 100);
+                    const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
+                    posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capital });
+                } else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort && adxOk) {
+                    const tp = close * (1 - p.tpPerc / 100);
+                    const sl = p.stopType === 'Porcentaje' ? close * (1 + p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
+                    posiciones.push({ side: -1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capital });
+                }
             }
         }
 
-        // Marcado a mercado de la vela: equity realizada + PnL no realizado de la posición abierta
+        // Marcado a mercado de la vela: equity realizada + PnL no realizado de todas las posiciones abiertas
         let markedEquity = capital;
-        if (position !== 0) {
-            const raw = position === 1 ? (close - entryPrice) / entryPrice : (entryPrice - close) / entryPrice;
-            markedEquity = capital * (1 + raw - (p.commission / 100) * 2);
+        for (const pos of posiciones) {
+            const raw = pos.side === 1 ? (close - pos.entry) / pos.entry : (pos.entry - close) / pos.entry;
+            markedEquity += pos.capitalAtEntry * (raw - (p.commission / 100) * 2);
         }
         if (markedEquity > ddPeak) ddPeak = markedEquity;
         const ddNow = (ddPeak - markedEquity) / ddPeak * 100;
@@ -1430,10 +1434,11 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             useWhaleFilter:    req.body.useWhaleFilter === true,
             whaleWindow:       parseInt(req.body.whaleWindow) || 30,
             whaleMinBTC:       parseFloat(req.body.whaleMinBTC) || 5,
-            useADXFilter:      req.body.useADXFilter === true,
-            adxThreshold:      parseInt(req.body.adxThreshold) || 25,
-            commission:        0.04,
-            initialCapital:    parseFloat(req.body.initialCapital) || 1000,
+            useADXFilter:        req.body.useADXFilter === true,
+            adxThreshold:        parseInt(req.body.adxThreshold) || 25,
+            allowMultipleEntries: req.body.allowMultipleEntries === true,
+            commission:          0.04,
+            initialCapital:      parseFloat(req.body.initialCapital) || 1000,
         };
         const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 365);
         const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);

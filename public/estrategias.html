@@ -215,6 +215,13 @@
                 <label>Activar Shorts</label>
                 <input type="checkbox" id="p-shorts" class="form-check" checked>
             </div>
+            <div class="form-row">
+                <label>Múltiples entradas</label>
+                <input type="checkbox" id="p-multiple-entries" class="form-check">
+            </div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:2px;line-height:1.4;">
+                Permite abrir nueva entrada aunque ya haya una posición abierta
+            </div>
         </div>
 
         <div class="form-section">
@@ -391,8 +398,9 @@
             useWhaleFilter:    document.getElementById('p-whale').checked,
             whaleWindow:       parseInt(document.getElementById('p-whale-window').value) || 30,
             whaleMinBTC:       parseFloat(document.getElementById('p-whale-min-btc').value) || 5,
-            useADXFilter:      document.getElementById('p-adx').checked,
-            adxThreshold:      parseInt(document.getElementById('p-adx-threshold').value) || 25,
+            useADXFilter:        document.getElementById('p-adx').checked,
+            adxThreshold:        parseInt(document.getElementById('p-adx-threshold').value) || 25,
+            allowMultipleEntries: document.getElementById('p-multiple-entries').checked,
         };
     }
 
@@ -557,7 +565,8 @@
             { label: 'Delta Vol.',    activo: params.useDeltaFilter,      desc: `${params.deltaVelas} velas` },
             { label: 'Ballenas',      activo: params.useWhaleFilter,      desc: `${params.whaleWindow}m / ≥${params.whaleMinBTC}BTC` },
             { label: 'ADX',           activo: params.useADXFilter,        desc: `≥${params.adxThreshold}` },
-            { label: 'Fin de semana', activo: params.operaFinDeSemana,    desc: 'sáb/dom ARG' },
+            { label: 'Fin de semana',  activo: params.operaFinDeSemana,     desc: 'sáb/dom ARG' },
+            { label: 'Múlt. entradas', activo: params.allowMultipleEntries, desc: 'pyramiding' },
         ];
         const filtrosHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center;">
             <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;">Filtros:</span>
@@ -725,9 +734,10 @@
         document.getElementById('p-whale').checked       = !!p.useWhaleFilter;
         document.getElementById('p-whale-window').value  = p.whaleWindow ?? 30;
         document.getElementById('p-whale-min-btc').value = p.whaleMinBTC ?? 5;
-        document.getElementById('p-adx').checked          = !!p.useADXFilter;
-        document.getElementById('p-adx-threshold').value  = p.adxThreshold ?? 25;
-        document.getElementById('row-sl').style.display  = p.stopType === 'Porcentaje' ? 'flex' : 'none';
+        document.getElementById('p-adx').checked                 = !!p.useADXFilter;
+        document.getElementById('p-adx-threshold').value         = p.adxThreshold ?? 25;
+        document.getElementById('p-multiple-entries').checked    = !!p.allowMultipleEntries;
+        document.getElementById('row-sl').style.display          = p.stopType === 'Porcentaje' ? 'flex' : 'none';
     }
 
     function cargarEstrategia() {
