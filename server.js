@@ -743,40 +743,53 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
             const barsIn = i - pos.entryBarIdx;
             let exitPrice = null, exitReason = null;
 
-            if (pos.side === 1) {
-                if (p.stopType === 'Porcentaje') {
-                    if      (high >= pos.tp && low <= pos.sl) { exitPrice = pos.sl; exitReason = 'SL'; }
-                    else if (high >= pos.tp)                   { exitPrice = pos.tp; exitReason = 'TP'; }
-                    else if (low  <= pos.sl)                   { exitPrice = pos.sl; exitReason = 'SL'; }
-                } else {
-                    // Conservador: si en la misma vela rompe la EMA (al cierre) y toca el TP, prioriza la ruptura.
-                    const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500;
-                    if      (close < se)     { exitPrice = close;  exitReason = 'EMA'; }
-                    else if (high >= pos.tp) { exitPrice = pos.tp; exitReason = 'TP'; }
+            // Liquidación por apalancamiento — tiene prioridad sobre TP/SL
+            if (p.palancaActivo && p.palancaValor > 1) {
+                const liqDelta = 1 / p.palancaValor;
+                if (pos.side === 1 && low <= pos.entry * (1 - liqDelta)) {
+                    exitPrice = pos.entry * (1 - liqDelta); exitReason = 'LIQ';
+                } else if (pos.side === -1 && high >= pos.entry * (1 + liqDelta)) {
+                    exitPrice = pos.entry * (1 + liqDelta); exitReason = 'LIQ';
                 }
-                if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
-            } else {
-                if (p.stopType === 'Porcentaje') {
-                    if      (low <= pos.tp && high >= pos.sl) { exitPrice = pos.sl; exitReason = 'SL'; }
-                    else if (low  <= pos.tp)                   { exitPrice = pos.tp; exitReason = 'TP'; }
-                    else if (high >= pos.sl)                   { exitPrice = pos.sl; exitReason = 'SL'; }
+            }
+
+            if (!exitPrice) {
+                if (pos.side === 1) {
+                    if (p.stopType === 'Porcentaje') {
+                        if      (high >= pos.tp && low <= pos.sl) { exitPrice = pos.sl; exitReason = 'SL'; }
+                        else if (high >= pos.tp)                   { exitPrice = pos.tp; exitReason = 'TP'; }
+                        else if (low  <= pos.sl)                   { exitPrice = pos.sl; exitReason = 'SL'; }
+                    } else {
+                        // Conservador: si en la misma vela rompe la EMA (al cierre) y toca el TP, prioriza la ruptura.
+                        const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500;
+                        if      (close < se)     { exitPrice = close;  exitReason = 'EMA'; }
+                        else if (high >= pos.tp) { exitPrice = pos.tp; exitReason = 'TP'; }
+                    }
+                    if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
                 } else {
-                    // Conservador: si en la misma vela rompe la EMA (al cierre) y toca el TP, prioriza la ruptura.
-                    const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500;
-                    if      (close > se)     { exitPrice = close;   exitReason = 'EMA'; }
-                    else if (low <= pos.tp)  { exitPrice = pos.tp;  exitReason = 'TP'; }
+                    if (p.stopType === 'Porcentaje') {
+                        if      (low <= pos.tp && high >= pos.sl) { exitPrice = pos.sl; exitReason = 'SL'; }
+                        else if (low  <= pos.tp)                   { exitPrice = pos.tp; exitReason = 'TP'; }
+                        else if (high >= pos.sl)                   { exitPrice = pos.sl; exitReason = 'SL'; }
+                    } else {
+                        // Conservador: si en la misma vela rompe la EMA (al cierre) y toca el TP, prioriza la ruptura.
+                        const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500;
+                        if      (close > se)     { exitPrice = close;   exitReason = 'EMA'; }
+                        else if (low <= pos.tp)  { exitPrice = pos.tp;  exitReason = 'TP'; }
+                    }
+                    if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
                 }
-                if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
             }
 
             if (exitPrice) {
                 const raw = pos.side === 1
                     ? (exitPrice - pos.entry) / pos.entry
                     : (pos.entry - exitPrice) / pos.entry;
-                const net = raw - (p.commission / 100) * 2;
-                const pnlAbs = pos.capitalAtEntry * net;
+                const palanca = p.palancaActivo ? (p.palancaValor || 1) : 1;
+                const net = raw * palanca - (p.commission / 100) * 2 * palanca;
+                const pnlAbs = Math.max(pos.capitalAtEntry * net, -pos.capitalAtEntry);
                 capital += pnlAbs;
-                trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: ts, entryPrice: pos.entry, exitPrice, tp: pos.tp, sl: pos.sl, pnlPerc: net * 100, pnlAbs, reason: exitReason, capital });
+                trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: ts, entryPrice: pos.entry, exitPrice, tp: pos.tp, sl: pos.sl, pnlPerc: (pnlAbs / pos.capitalAtEntry) * 100, pnlAbs, reason: exitReason, capital });
                 equity.push({ ts, v: capital });
                 lastClosedBarIdx = i;
                 posiciones.splice(j, 1);
@@ -854,7 +867,8 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
         let markedEquity = capital;
         for (const pos of posiciones) {
             const raw = pos.side === 1 ? (close - pos.entry) / pos.entry : (pos.entry - close) / pos.entry;
-            markedEquity += pos.capitalAtEntry * (raw - (p.commission / 100) * 2);
+            const palanca = p.palancaActivo ? (p.palancaValor || 1) : 1;
+            markedEquity += Math.max(pos.capitalAtEntry * (raw * palanca - (p.commission / 100) * 2 * palanca), -pos.capitalAtEntry);
         }
         if (markedEquity > ddPeak) ddPeak = markedEquity;
         const ddNow = (ddPeak - markedEquity) / ddPeak * 100;
@@ -1464,6 +1478,8 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             allowMultipleEntries: req.body.allowMultipleEntries === true,
             posicionTipo:         req.body.posicionTipo || 'porc_capital_actual',
             posicionValor:        parseFloat(req.body.posicionValor) || 100,
+            palancaActivo:        req.body.palancaActivo === true,
+            palancaValor:         parseFloat(req.body.palancaValor) || 1,
             commission:           0.04,
             initialCapital:       parseFloat(req.body.initialCapital) || 1000,
         };
