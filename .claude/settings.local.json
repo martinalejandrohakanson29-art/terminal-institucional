@@ -37,7 +37,18 @@
       "Bash(node -e ' *)",
       "Bash(node *)",
       "Bash(git -C C:\\\\Users\\\\User\\\\Desktop\\\\claude\\\\terminal ls-files)",
-      "Bash(git reset *)"
+      "Bash(git reset *)",
+      "PowerShell(node --check server.js; if \\($?\\) { \"OK sintaxis server.js\" })",
+      "PowerShell(git add *)",
+      "PowerShell(git *)",
+      "Bash(git restore *)",
+      "Bash(printf '%s\\\\n' 'feat: filtro para bloquear entradas multiples en perdida' '' 'Agrega sub-opcion \"No apilar en perdida\" \\(blockMultipleIfLosing\\) al filtro' 'de entradas multiples en /estrategias. Cuando esta activo, bloquea nuevas' 'entradas mientras exista alguna posicion abierta con PnL no realizado' 'negativo, filtrando rachas perdedoras. Implementado en backtest y en vivo' 'con paridad de logica.' '' 'Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')",
+      "Bash(git commit *)",
+      "Bash(rm -f .git/COMMIT_MSG_TMP)",
+      "Bash(wsl grep *)",
+      "Bash(powershell -Command \"Select-String -Path 'C:\\\\Users\\\\User\\\\Desktop\\\\claude\\\\terminal\\\\public\\\\index.html' -Pattern 'estrategia|VWAP.*activ|filtro.*activ|Activar' | Select-Object LineNumber, Line | Format-Table -AutoSize | Out-String -Width 300\")",
+      "Bash(cat)",
+      "Bash(rm -f .git/CMSG_TMP)"
     ]
   }
 }

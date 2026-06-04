@@ -93,6 +93,53 @@
         .hist-price-label { width: 70px; text-align: center; flex-shrink: 0; color: #374151; font-size: 10px; font-family: monospace; }
         .hist-col-sell { flex: 1; display: flex; justify-content: flex-start; align-items: center; overflow: hidden; }
         .hist-bar-sell { height: 12px; background: rgba(239,83,80,0.85); border-radius: 0 2px 2px 0; min-width: 1px; flex-shrink: 0; }
+
+        /* ============================
+           RESPONSIVE — MÓVIL / TABLET
+           ============================ */
+
+        /* Tablet y móvil ancho: filas del header con scroll horizontal */
+        @media (max-width: 960px) {
+            #header { padding: 3px 8px; gap: 2px; }
+            .header-row {
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                scrollbar-width: none;
+                flex-wrap: nowrap;
+            }
+            .header-row::-webkit-scrollbar { display: none; }
+            h2 { font-size: 0.78rem; }
+            .btn-tiempo, .btn-dibujo { padding: 2px 5px; font-size: 10px; }
+            .btn-dibujo { min-width: 22px; height: 22px; }
+            .input-rango { width: 36px; font-size: 10px; }
+        }
+
+        /* Móvil: orderbook como panel flotante sobre el gráfico */
+        @media (max-width: 768px) {
+            #main-content { position: relative; }
+            #orderbook-container {
+                position: absolute;
+                right: 0;
+                top: 0;
+                bottom: 0;
+                width: 260px;
+                min-width: 260px;
+                z-index: 200;
+                box-shadow: -4px 0 14px rgba(0,0,0,0.18);
+            }
+            #rsi-15m-display, #delta-vol-display {
+                font-size: 11px;
+                padding: 3px 7px;
+            }
+        }
+
+        /* Teléfono chico: ocultar elementos secundarios */
+        @media (max-width: 480px) {
+            .herramientas-dibujo { display: none; }
+            #whale-delta-display { display: none !important; }
+            #at-status-bar { display: none !important; }
+            #orderbook-container { width: 220px; min-width: 220px; }
+        }
     </style>
 </head>
 <body>
