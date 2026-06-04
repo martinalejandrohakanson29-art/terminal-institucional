@@ -929,7 +929,12 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                     : (pos.entry - exitPrice) / pos.entry;
                 const palanca = p.palancaActivo ? (p.palancaValor || 1) : 1;
                 const net = raw * palanca - costoOperacion(p, palanca, barsIn);
-                const pnlAbs = Math.max(pos.capitalAtEntry * net, -pos.capitalAtEntry);
+                // En margen aislado la liquidación consume todo el margen (el de
+                // mantenimiento restante se lo lleva el fee de liquidación): pérdida = -margen.
+                // Sin este caso especial, a palanca alta se sub-contabiliza la pérdida.
+                const pnlAbs = exitReason === 'LIQ'
+                    ? -pos.capitalAtEntry
+                    : Math.max(pos.capitalAtEntry * net, -pos.capitalAtEntry);
                 capital += pnlAbs;
                 trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: ts, entryPrice: pos.entry, exitPrice, tp: pos.tp, sl: pos.sl, pnlPerc: (pnlAbs / pos.capitalAtEntry) * 100, pnlAbs, reason: exitReason, capital });
                 lastClosedBarIdx = i;
@@ -1043,6 +1048,28 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
         if ((i - WARMUP) % eqStep === 0 || i === bars1m.length - 1) {
             equity.push({ ts, v: markedEquity });
         }
+    }
+
+    // Cierre forzado de posiciones que quedan abiertas al final del período: se liquidan
+    // al cierre de la última vela ('Fin') para que stats (netProfit/winRate/...) y la curva
+    // de equity reflejen lo mismo y no quede PnL no realizado fuera de las métricas.
+    if (posiciones.length > 0) {
+        const lastIdx   = bars1m.length - 1;
+        const lastClose = parseFloat(bars1m[lastIdx][4]);
+        const lastTs    = parseInt(bars1m[lastIdx][0]);
+        for (let j = posiciones.length - 1; j >= 0; j--) {
+            const pos = posiciones[j];
+            const barsIn = lastIdx - pos.entryBarIdx;
+            const raw = pos.side === 1
+                ? (lastClose - pos.entry) / pos.entry
+                : (pos.entry - lastClose) / pos.entry;
+            const palanca = p.palancaActivo ? (p.palancaValor || 1) : 1;
+            const net = raw * palanca - costoOperacion(p, palanca, barsIn);
+            const pnlAbs = Math.max(pos.capitalAtEntry * net, -pos.capitalAtEntry);
+            capital += pnlAbs;
+            trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: lastTs, entryPrice: pos.entry, exitPrice: lastClose, tp: pos.tp, sl: pos.sl, pnlPerc: (pnlAbs / pos.capitalAtEntry) * 100, pnlAbs, reason: 'Fin', capital });
+        }
+        posiciones = [];
     }
 
     const wins   = trades.filter(t => t.pnlPerc > 0);

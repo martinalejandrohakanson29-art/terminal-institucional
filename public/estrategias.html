@@ -671,8 +671,8 @@
     let filtroTipo  = 'Todos';
     let filtroRazon = 'Todos';
 
-    const RAZON_CLASS = { TP: 'active-tp', SL: 'active-sl', EMA: 'active-ema', Tiempo: 'active-time', LIQ: 'active-liq' };
-    const RAZON_BADGE = { TP: 'badge-tp',  SL: 'badge-sl',  EMA: 'badge-ema', Tiempo: 'badge-time',  LIQ: 'badge-liq' };
+    const RAZON_CLASS = { TP: 'active-tp', SL: 'active-sl', EMA: 'active-ema', Tiempo: 'active-time', LIQ: 'active-liq', Fin: 'active-time' };
+    const RAZON_BADGE = { TP: 'badge-tp',  SL: 'badge-sl',  EMA: 'badge-ema', Tiempo: 'badge-time',  LIQ: 'badge-liq', Fin: 'badge-time' };
 
     function setFiltroTipo(v) {
         filtroTipo = v;
@@ -728,6 +728,7 @@
                 ${btnRazon('EMA')}
                 ${btnRazon('Tiempo')}
                 ${btnRazon('LIQ')}
+                ${btnRazon('Fin')}
             </div>
             <span style="font-size:11px;color:#94a3b8;margin-left:auto;">${filtrado.length} de ${all.length} operaciones</span>
         </div>`;
