@@ -308,7 +308,49 @@
 
         <div class="form-section">
             <h3>Filtros</h3>
+            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;">RSI</div>
             <div class="form-row">
+                <label>Temporalidad</label>
+                <select id="p-rsi-tf" class="form-select">
+                    <option value="1m">1m</option>
+                    <option value="5m">5m</option>
+                    <option value="15m" selected>15m</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>Período</label>
+                <input type="number" id="p-rsi-period" class="form-input" value="14" min="2" max="500">
+            </div>
+            <div class="form-row">
+                <label>Umbral Long (≥)</label>
+                <input type="number" id="p-rsi-long" class="form-input" value="60" min="1" max="99" step="1">
+            </div>
+            <div class="form-row">
+                <label>Umbral Short (≤)</label>
+                <input type="number" id="p-rsi-short" class="form-input" value="40" min="1" max="99" step="1">
+            </div>
+            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">MACD</div>
+            <div class="form-row">
+                <label>Temporalidad</label>
+                <select id="p-macd-tf" class="form-select">
+                    <option value="1m">1m</option>
+                    <option value="5m" selected>5m</option>
+                    <option value="15m">15m</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>Fast</label>
+                <input type="number" id="p-macd-fast" class="form-input" value="12" min="1" max="500">
+            </div>
+            <div class="form-row">
+                <label>Slow</label>
+                <input type="number" id="p-macd-slow" class="form-input" value="26" min="1" max="500">
+            </div>
+            <div class="form-row">
+                <label>Signal</label>
+                <input type="number" id="p-macd-signal" class="form-input" value="9" min="1" max="200">
+            </div>
+            <div class="form-row" style="margin-top:8px;">
                 <label>Pullback a EMAs</label>
                 <input type="checkbox" id="p-pullback" class="form-check" checked>
             </div>
@@ -316,7 +358,12 @@
                 <label>Distancia máx. %</label>
                 <input type="number" id="p-pullback-perc" class="form-input" value="0.20" step="0.05" min="0.01">
             </div>
-            <div class="form-row">
+            <div style="margin-top:6px;">
+                <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;">EMAs del filtro</div>
+                <div id="pullback-ema-list"></div>
+                <button type="button" onclick="agregarPullbackEMA()" style="padding:3px 10px;border:1px dashed #94a3b8;border-radius:4px;background:transparent;color:#64748b;font-size:11px;cursor:pointer;width:100%;margin-top:2px;">+ Agregar EMA</button>
+            </div>
+            <div class="form-row" style="margin-top:8px;">
                 <label>Alineamiento EMAs</label>
                 <input type="checkbox" id="p-ema-align" class="form-check" checked>
             </div>
@@ -453,8 +500,17 @@
             startHour:         parseInt(document.getElementById('p-start-hour').value) || 9,
             endHour:           parseInt(document.getElementById('p-end-hour').value) || 20,
             operaFinDeSemana:  document.getElementById('p-fds').checked,
+            rsiTf:             document.getElementById('p-rsi-tf').value,
+            rsiPeriod:         parseInt(document.getElementById('p-rsi-period').value) || 14,
+            rsiLongMin:        parseFloat(document.getElementById('p-rsi-long').value) || 60,
+            rsiShortMax:       parseFloat(document.getElementById('p-rsi-short').value) || 40,
+            macdTf:            document.getElementById('p-macd-tf').value,
+            macdFast:          parseInt(document.getElementById('p-macd-fast').value)   || 12,
+            macdSlow:          parseInt(document.getElementById('p-macd-slow').value)   || 26,
+            macdSignal:        parseInt(document.getElementById('p-macd-signal').value) || 9,
             usePullbackFilter: document.getElementById('p-pullback').checked,
             pullbackPerc:      parseFloat(document.getElementById('p-pullback-perc').value) || 0.20,
+            pullbackEMAs:      pbEMAs.map(e => ({ period: e.period, tf: e.tf })),
             useEmaAlignment:   document.getElementById('p-ema-align').checked,
             useMaxTradeTime:   document.getElementById('p-max-time').checked,
             maxTradeMinutes:   parseInt(document.getElementById('p-max-minutes').value) || 15,
@@ -628,9 +684,9 @@
 
         // ── Filtros activos ──
         const filtros = [
-            { label: 'RSI 15m',       activo: true,                     desc: '≥60 L / ≤40 S' },
-            { label: 'MACD 5m',       activo: true,                     desc: 'bull/bear' },
-            { label: 'Pullback EMAs', activo: params.usePullbackFilter,  desc: `≤${params.pullbackPerc}%` },
+            { label: `RSI ${params.rsiTf||'15m'}`, activo: true, desc: `≥${params.rsiLongMin??60} L / ≤${params.rsiShortMax??40} S · per.${params.rsiPeriod||14}` },
+            { label: `MACD ${params.macdTf||'5m'}`, activo: true, desc: `${params.macdFast||12}/${params.macdSlow||26}/${params.macdSignal||9}` },
+            { label: 'Pullback EMAs', activo: params.usePullbackFilter,  desc: `≤${params.pullbackPerc}% · ${(params.pullbackEMAs||[]).map(e=>`EMA${e.period} ${e.tf}`).join(', ')}` },
             { label: 'Alineamiento',  activo: params.useEmaAlignment,    desc: 'EMA ordenadas' },
             { label: 'Cooldown',      activo: params.useCooldown,         desc: `${params.cooldownMinutes}m` },
             { label: 'Tiempo máx.',   activo: params.useMaxTradeTime,     desc: `${params.maxTradeMinutes}m` },
@@ -801,8 +857,20 @@
         document.getElementById('p-start-hour').value    = p.startHour ?? 9;
         document.getElementById('p-end-hour').value      = p.endHour ?? 20;
         document.getElementById('p-fds').checked         = !!p.operaFinDeSemana;
+        document.getElementById('p-rsi-tf').value         = p.rsiTf       || '15m';
+        document.getElementById('p-rsi-period').value    = p.rsiPeriod   ?? 14;
+        document.getElementById('p-rsi-long').value      = p.rsiLongMin  ?? 60;
+        document.getElementById('p-rsi-short').value     = p.rsiShortMax ?? 40;
+        document.getElementById('p-macd-tf').value       = p.macdTf      || '5m';
+        document.getElementById('p-macd-fast').value     = p.macdFast    ?? 12;
+        document.getElementById('p-macd-slow').value     = p.macdSlow    ?? 26;
+        document.getElementById('p-macd-signal').value   = p.macdSignal  ?? 9;
         document.getElementById('p-pullback').checked    = p.usePullbackFilter !== false;
         document.getElementById('p-pullback-perc').value = p.pullbackPerc ?? 0.20;
+        pbEMAs = (Array.isArray(p.pullbackEMAs) && p.pullbackEMAs.length > 0)
+            ? p.pullbackEMAs.map(e => ({ period: parseInt(e.period) || 200, tf: e.tf || '1m' }))
+            : [{ period:50,tf:'1m' },{ period:100,tf:'1m' },{ period:200,tf:'1m' },{ period:500,tf:'1m' }];
+        renderPullbackEMAList();
         document.getElementById('p-ema-align').checked   = p.useEmaAlignment !== false;
         document.getElementById('p-max-time').checked    = p.useMaxTradeTime !== false;
         document.getElementById('p-max-minutes').value   = p.maxTradeMinutes ?? 15;
@@ -873,6 +941,38 @@
         }
     }
 
+    // ── Pullback EMA list ────────────────────────────────────────
+    let pbEMAs = [{ period:50,tf:'1m' },{ period:100,tf:'1m' },{ period:200,tf:'1m' },{ period:500,tf:'1m' }];
+
+    function renderPullbackEMAList() {
+        const list = document.getElementById('pullback-ema-list');
+        list.innerHTML = pbEMAs.map((ema, idx) => `
+            <div style="display:flex;gap:4px;align-items:center;margin-bottom:3px;">
+                <input type="number" class="form-input" value="${ema.period}" min="1" max="2000"
+                       style="width:55px;" onchange="pbEMAs[${idx}].period=parseInt(this.value)||200">
+                <select class="form-select" style="width:58px;" onchange="pbEMAs[${idx}].tf=this.value">
+                    <option value="1m"${ema.tf==='1m'?' selected':''}>1m</option>
+                    <option value="5m"${ema.tf==='5m'?' selected':''}>5m</option>
+                    <option value="15m"${ema.tf==='15m'?' selected':''}>15m</option>
+                </select>
+                <button type="button" onclick="removePbEMA(${idx})" style="padding:2px 6px;border:1px solid #d1d4dc;border-radius:4px;background:#f8fafc;color:#ef5350;font-size:11px;cursor:pointer;flex-shrink:0;">✕</button>
+            </div>
+        `).join('');
+    }
+
+    function removePbEMA(idx) {
+        if (pbEMAs.length <= 1) return;
+        pbEMAs.splice(idx, 1);
+        renderPullbackEMAList();
+    }
+
+    function agregarPullbackEMA() {
+        if (pbEMAs.length >= 8) return;
+        pbEMAs.push({ period: 200, tf: '1m' });
+        renderPullbackEMAList();
+    }
+
+    renderPullbackEMAList();
     inicializarEstrategias();
 
     function buildEquitySVG(equity, initialCapital) {

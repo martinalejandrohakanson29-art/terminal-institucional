@@ -541,8 +541,8 @@ function calcEMA(values, period) {
     return result;
 }
 
-function calcRSI14(closes) {
-    const p = 14;
+function calcRSI(closes, period = 14) {
+    const p = period;
     const result = new Array(closes.length).fill(null);
     if (closes.length <= p) return result;
     let gSum = 0, lSum = 0;
@@ -554,8 +554,8 @@ function calcRSI14(closes) {
     result[p] = avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL);
     for (let i = p + 1; i < closes.length; i++) {
         const d = closes[i] - closes[i - 1];
-        avgG = (avgG * 13 + (d > 0 ? d : 0)) / 14;
-        avgL = (avgL * 13 + (d < 0 ? -d : 0)) / 14;
+        avgG = (avgG * (p - 1) + (d > 0 ? d : 0)) / p;
+        avgL = (avgL * (p - 1) + (d < 0 ? -d : 0)) / p;
         result[i] = avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL);
     }
     return result;
@@ -682,14 +682,67 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     // Así lookupHTF(ts) solo devuelve velas HTF ya cerradas respecto a la vela 1m actual,
     // evitando look-ahead bias (usar el valor final de una vela 15m/5m aún en formación).
     const c15m = bars15m.map(b => parseFloat(b[4]));
-    const rsiArr = calcRSI14(c15m);
-    const rsi15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), rsiArr[i]]));
-    const ts15m = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+    const c5m_pb = bars5m.map(b => parseFloat(b[4]));
 
-    const c5m = bars5m.map(b => parseFloat(b[4]));
-    const { macd: macdArr, signal: sigArr } = calcMACDArr(c5m);
-    const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), { macd: macdArr[i], sig: sigArr[i] }]));
-    const ts5m = bars5m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+    // Pullback EMA arrays — configurables por el usuario (período + temporalidad)
+    const pbEMAConfig = (Array.isArray(p.pullbackEMAs) && p.pullbackEMAs.length > 0)
+        ? p.pullbackEMAs
+        : [{ period:50,tf:'1m' },{ period:100,tf:'1m' },{ period:200,tf:'1m' },{ period:500,tf:'1m' }];
+    const pbArr1m = {}, pbArr5m = {}, pbArr15m = {};
+    for (const { period, tf } of pbEMAConfig) {
+        if (tf === '1m' && !pbArr1m[period]) {
+            pbArr1m[period] = calcEMA(c1m, period);
+        } else if (tf === '5m' && !pbArr5m[period]) {
+            const vals = calcEMA(c5m_pb, period);
+            pbArr5m[period] = {
+                ts:  bars5m.map(b => parseInt(b[6])).sort((a, b) => a - b),
+                map: new Map(bars5m.map((b, i) => [parseInt(b[6]), vals[i]]))
+            };
+        } else if (tf === '15m' && !pbArr15m[period]) {
+            const vals = calcEMA(c15m, period);
+            pbArr15m[period] = {
+                ts:  bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b),
+                map: new Map(bars15m.map((b, i) => [parseInt(b[6]), vals[i]]))
+            };
+        }
+    }
+    // RSI — configurable período, temporalidad y umbrales de entrada
+    const rsiPeriod   = p.rsiPeriod   || 14;
+    const rsiTf       = p.rsiTf       || '15m';
+    const rsiLongMin  = p.rsiLongMin  ?? 60;
+    const rsiShortMax = p.rsiShortMax ?? 40;
+    let rsiDirect = null, rsiByTs = null, tsRsi = null;
+    if (rsiTf === '1m') {
+        rsiDirect = calcRSI(c1m, rsiPeriod);
+    } else if (rsiTf === '5m') {
+        const arr = calcRSI(c5m_pb, rsiPeriod);
+        rsiByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), arr[i]]));
+        tsRsi   = bars5m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+    } else {
+        const arr = calcRSI(c15m, rsiPeriod);
+        rsiByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), arr[i]]));
+        tsRsi   = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+    }
+
+    const c5m = c5m_pb;
+    // MACD — configurable período (fast/slow/signal) y temporalidad
+    const macdFast   = p.macdFast   || 12;
+    const macdSlow   = p.macdSlow   || 26;
+    const macdSignal = p.macdSignal || 9;
+    const macdTf     = p.macdTf     || '5m';
+    let macdDirect = null, macdByTs = null, tsMACD = null;
+    if (macdTf === '1m') {
+        const { macd: mArr, signal: sArr } = calcMACDArr(c1m, macdFast, macdSlow, macdSignal);
+        macdDirect = mArr.map((m, idx) => ({ macd: m, sig: sArr[idx] }));
+    } else if (macdTf === '5m') {
+        const { macd: mArr, signal: sArr } = calcMACDArr(c5m, macdFast, macdSlow, macdSignal);
+        macdByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), { macd: mArr[i], sig: sArr[i] }]));
+        tsMACD   = bars5m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+    } else {
+        const { macd: mArr, signal: sArr } = calcMACDArr(c15m, macdFast, macdSlow, macdSignal);
+        macdByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), { macd: mArr[i], sig: sArr[i] }]));
+        tsMACD   = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+    }
 
     const h15m = bars15m.map(b => parseFloat(b[2]));
     const l15m = bars15m.map(b => parseFloat(b[3]));
@@ -730,11 +783,11 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
         const E50 = e50[i], E100 = e100[i], E200 = e200[i], E500 = e500[i];
         if (!E500) continue;
 
-        const rsiRaw  = lookupHTF(ts15m, rsi15mByTs, tsClose);
-        const macdRaw = lookupHTF(ts5m, macd5mByTs, tsClose);
-        if (rsiRaw === null || rsiRaw === undefined || !macdRaw || macdRaw.macd === null || macdRaw.sig === null) continue;
+        const rsiRaw  = rsiTf === '1m'  ? rsiDirect[i]  : lookupHTF(tsRsi,  rsiByTs,  tsClose);
+        const macdRaw = macdTf === '1m' ? macdDirect[i] : lookupHTF(tsMACD, macdByTs, tsClose);
+        if (rsiRaw == null || !macdRaw || macdRaw.macd === null || macdRaw.sig === null) continue;
 
-        const rsi15 = rsiRaw;
+        const rsiVal = rsiRaw;
         const { macd: macd5, sig: sig5 } = macdRaw;
 
         // SALIDAS — iterar en reversa para poder hacer splice sin afectar índices
@@ -822,10 +875,14 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                 const below = close < E50 && close < E100 && close < E200 && close < E500;
                 const bullAlign = E50 > E100 && E100 > E200 && E200 > E500;
                 const bearAlign = E50 < E100 && E100 < E200 && E200 < E500;
-                const d50 = Math.abs(close - E50) / close * 100, d100 = Math.abs(close - E100) / close * 100,
-                      d200 = Math.abs(close - E200) / close * 100, d500 = Math.abs(close - E500) / close * 100;
-                const nearEMA = d50 <= p.pullbackPerc || d100 <= p.pullbackPerc || d200 <= p.pullbackPerc || d500 <= p.pullbackPerc;
-                const pullOK     = !p.usePullbackFilter || nearEMA;
+                const pbVals = pbEMAConfig.map(({ period, tf }) => {
+                    if (tf === '1m')  return pbArr1m[period]?.[i];
+                    if (tf === '5m')  return pbArr5m[period]  ? lookupHTF(pbArr5m[period].ts,  pbArr5m[period].map,  tsClose) : null;
+                    if (tf === '15m') return pbArr15m[period] ? lookupHTF(pbArr15m[period].ts, pbArr15m[period].map, tsClose) : null;
+                    return null;
+                }).filter(v => v != null && v > 0);
+                const nearEMA = pbVals.some(e => Math.abs(close - e) / close * 100 <= (p.pullbackPerc ?? 0.2));
+                const pullOK     = !p.usePullbackFilter || (pbVals.length > 0 && nearEMA);
                 const alignLong  = !p.useEmaAlignment || bullAlign;
                 const alignShort = !p.useEmaAlignment || bearAlign;
 
@@ -843,7 +900,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                 const adxRaw = lookupHTF(tsAdx15m, adx15mByTs, tsClose);
                 const adxOk  = !p.useADXFilter || (adxRaw !== null && adxRaw >= (p.adxThreshold ?? 25));
 
-                if (p.enableLongs && above && alignLong && rsi15 >= 60 && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk) {
+                if (p.enableLongs && above && alignLong && rsiVal >= rsiLongMin && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -851,7 +908,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                         const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
                         posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
                     }
-                } else if (p.enableShorts && below && alignShort && rsi15 <= 40 && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort && adxOk) {
+                } else if (p.enableShorts && below && alignShort && rsiVal <= rsiShortMax && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort && adxOk) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1283,21 +1340,73 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const e100 = calcEMA(c1m, 100);
     const e200 = calcEMA(c1m, 200);
     const e500 = calcEMA(c1m, 500);
-    // Indicadores HTF indexados por tiempo de CIERRE (b[6]) para evitar look-ahead:
-    // solo se usan velas 15m/5m ya cerradas, igual que en runBacktest (consistencia backtest↔vivo).
-    const c15m   = bars15m.map(b => parseFloat(b[4]));
-    const rsiArr = calcRSI14(c15m);
 
-    const adxArr15m = calcADX(bars15m.map(b => parseFloat(b[2])), bars15m.map(b => parseFloat(b[3])), c15m);
+    // Pullback EMAs configurables
+    const pbEMAConfig = (Array.isArray(p.pullbackEMAs) && p.pullbackEMAs.length > 0)
+        ? p.pullbackEMAs
+        : [{ period:50,tf:'1m' },{ period:100,tf:'1m' },{ period:200,tf:'1m' },{ period:500,tf:'1m' }];
+    const pbSn1m = {}, pbSn5m = {}, pbSn15m = {};
+    const c5m_sn  = bars5m.map(b => parseFloat(b[4]));
+    const c15m_sn = bars15m.map(b => parseFloat(b[4]));
+    for (const { period, tf } of pbEMAConfig) {
+        if (tf === '1m' && !pbSn1m[period]) {
+            pbSn1m[period] = calcEMA(c1m, period);
+        } else if (tf === '5m' && !pbSn5m[period]) {
+            const vals = calcEMA(c5m_sn, period);
+            pbSn5m[period] = {
+                ts:  bars5m.map(b => parseInt(b[6])).sort((a, b) => a - b),
+                map: new Map(bars5m.map((b, idx) => [parseInt(b[6]), vals[idx]]))
+            };
+        } else if (tf === '15m' && !pbSn15m[period]) {
+            const vals = calcEMA(c15m_sn, period);
+            pbSn15m[period] = {
+                ts:  bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b),
+                map: new Map(bars15m.map((b, idx) => [parseInt(b[6]), vals[idx]]))
+            };
+        }
+    }
+
+    // RSI — configurable período, temporalidad y umbrales de entrada
+    const rsiPeriod_sn   = p.rsiPeriod   || 14;
+    const rsiTf_sn       = p.rsiTf       || '15m';
+    const rsiLongMin_sn  = p.rsiLongMin  ?? 60;
+    const rsiShortMax_sn = p.rsiShortMax ?? 40;
+    let rsiSnByTs = null, rsiSnTs = null, rsiSnDirect = null;
+    if (rsiTf_sn === '1m') {
+        rsiSnDirect = calcRSI(c1m, rsiPeriod_sn);
+    } else if (rsiTf_sn === '5m') {
+        const arr = calcRSI(c5m_sn, rsiPeriod_sn);
+        rsiSnByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), arr[i]]));
+        rsiSnTs   = [...rsiSnByTs.keys()].sort((a, b) => a - b);
+    } else {
+        const arr = calcRSI(c15m_sn, rsiPeriod_sn);
+        rsiSnByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), arr[i]]));
+        rsiSnTs   = [...rsiSnByTs.keys()].sort((a, b) => a - b);
+    }
+
+    const adxArr15m = calcADX(bars15m.map(b => parseFloat(b[2])), bars15m.map(b => parseFloat(b[3])), c15m_sn);
     const adxByTs15m = new Map(bars15m.map((b, i) => [parseInt(b[6]), adxArr15m[i]]));
     const adxTs15m   = [...adxByTs15m.keys()].sort((a, b) => a - b);
     const adxValue   = lookupHTF(adxTs15m, adxByTs15m, parseInt(bars1m[bars1m.length - 1][6]));
-    const rsi15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), rsiArr[i]]));
-    const rsi15mTs   = [...rsi15mByTs.keys()].sort((a, b) => a - b);
 
-    const { macd: macdArr, signal: sigArr } = calcMACDArr(bars5m.map(b => parseFloat(b[4])));
-    const macd5mByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), { macd: macdArr[i], sig: sigArr[i] }]));
-    const macd5mTs   = [...macd5mByTs.keys()].sort((a, b) => a - b);
+    // MACD — configurable período (fast/slow/signal) y temporalidad
+    const macdFast_sn   = p.macdFast   || 12;
+    const macdSlow_sn   = p.macdSlow   || 26;
+    const macdSignal_sn = p.macdSignal || 9;
+    const macdTf_sn     = p.macdTf     || '5m';
+    let macdSnDirect = null, macdSnByTs = null, macdSnTs = null;
+    if (macdTf_sn === '1m') {
+        const { macd: mArr, signal: sArr } = calcMACDArr(c1m, macdFast_sn, macdSlow_sn, macdSignal_sn);
+        macdSnDirect = mArr.map((m, idx) => ({ macd: m, sig: sArr[idx] }));
+    } else if (macdTf_sn === '5m') {
+        const { macd: mArr, signal: sArr } = calcMACDArr(c5m_sn, macdFast_sn, macdSlow_sn, macdSignal_sn);
+        macdSnByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), { macd: mArr[i], sig: sArr[i] }]));
+        macdSnTs   = [...macdSnByTs.keys()].sort((a, b) => a - b);
+    } else {
+        const { macd: mArr, signal: sArr } = calcMACDArr(c15m_sn, macdFast_sn, macdSlow_sn, macdSignal_sn);
+        macdSnByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), { macd: mArr[i], sig: sArr[i] }]));
+        macdSnTs   = [...macdSnByTs.keys()].sort((a, b) => a - b);
+    }
 
     const i     = bars1m.length - 1;
     const bar   = bars1m[i];
@@ -1307,11 +1416,13 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
 
     const E50 = e50[i], E100 = e100[i], E200 = e200[i], E500 = e500[i];
 
-    const rsiLookup  = lookupHTF(rsi15mTs, rsi15mByTs, tsClose);
-    const macdLookup = lookupHTF(macd5mTs, macd5mByTs, tsClose);
-    const rsi15 = rsiLookup  ?? 50;
-    const macd5 = macdLookup?.macd ?? 0;
-    const sig5  = macdLookup?.sig  ?? 0;
+    const rsiLookup  = rsiTf_sn  === '1m' ? rsiSnDirect[i]  : lookupHTF(rsiSnTs,  rsiSnByTs,  tsClose);
+    const macdLookup = macdTf_sn === '1m' ? macdSnDirect[i] : lookupHTF(macdSnTs, macdSnByTs, tsClose);
+    if (!macdLookup || macdLookup.macd == null || macdLookup.sig == null)
+        return { signal: null, reason: 'macd_no_calentado', indicadores: {} };
+    const rsiVal = rsiLookup ?? 50;
+    const macd5 = macdLookup.macd;
+    const sig5  = macdLookup.sig;
 
     const barHour  = new Date(ts).getUTCHours();
     const argDay   = new Date(ts - 3 * 3600000).getUTCDay(); // 0=Dom, 6=Sáb en horario Argentina
@@ -1323,9 +1434,15 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const bullAlign = E50 > E100 && E100 > E200 && E200 > E500;
     const bearAlign = E50 < E100 && E100 < E200 && E200 < E500;
 
-    const nearEMA = !p.usePullbackFilter || [E50, E100, E200, E500].some(e =>
+    const pbSnVals = pbEMAConfig.map(({ period, tf }) => {
+        if (tf === '1m')  return pbSn1m[period]?.[i];
+        if (tf === '5m')  return pbSn5m[period]  ? lookupHTF(pbSn5m[period].ts,  pbSn5m[period].map,  tsClose) : null;
+        if (tf === '15m') return pbSn15m[period] ? lookupHTF(pbSn15m[period].ts, pbSn15m[period].map, tsClose) : null;
+        return null;
+    }).filter(v => v != null && v > 0);
+    const nearEMA = !p.usePullbackFilter || (pbSnVals.length > 0 && pbSnVals.some(e =>
         Math.abs(close - e) / close * 100 <= (p.pullbackPerc ?? 0.2)
-    );
+    ));
 
     const deltaSlice   = bars1m.slice(-(p.deltaVelas ?? 3));
     const deltaRolling = deltaSlice.reduce((s, b) => {
@@ -1350,9 +1467,9 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const adxOk = !p.useADXFilter || (adxValue !== null && adxValue >= (p.adxThreshold ?? 25));
 
     let signal = null;
-    if (p.enableLongs !== false && horarioOk && above && alignLong && rsi15 >= 60 && macd5 > sig5 && nearEMA && deltaOkLong && whaleOkLong && adxOk)
+    if (p.enableLongs !== false && horarioOk && above && alignLong && rsiVal >= rsiLongMin_sn && macd5 > sig5 && nearEMA && deltaOkLong && whaleOkLong && adxOk)
         signal = 'long';
-    else if (p.enableShorts !== false && horarioOk && below && alignShort && rsi15 <= 40 && macd5 < sig5 && nearEMA && deltaOkShort && whaleOkShort && adxOk)
+    else if (p.enableShorts !== false && horarioOk && below && alignShort && rsiVal <= rsiShortMax_sn && macd5 < sig5 && nearEMA && deltaOkShort && whaleOkShort && adxOk)
         signal = 'short';
 
     const tpPerc = p.tpPerc ?? 0.5;
@@ -1372,7 +1489,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
 
     return {
         signal, timestamp: ts, entry: close, tp, sl,
-        indicadores: { rsi15, macd5, adx: adxValue, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
+        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
     };
 }
 
@@ -1462,6 +1579,20 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             endHour:           Number.isFinite(parseInt(req.body.endHour))   ? parseInt(req.body.endHour)   : 20,
             usePullbackFilter: req.body.usePullbackFilter !== false,
             pullbackPerc:      parseFloat(req.body.pullbackPerc) || 0.20,
+            pullbackEMAs:      Array.isArray(req.body.pullbackEMAs)
+                                   ? req.body.pullbackEMAs.map(e => ({
+                                       period: parseInt(e.period) || 200,
+                                       tf:     ['1m','5m','15m'].includes(e.tf) ? e.tf : '1m'
+                                   }))
+                                   : [{ period:50,tf:'1m' },{ period:100,tf:'1m' },{ period:200,tf:'1m' },{ period:500,tf:'1m' }],
+            rsiTf:             ['1m','5m','15m'].includes(req.body.rsiTf) ? req.body.rsiTf : '15m',
+            rsiPeriod:         parseInt(req.body.rsiPeriod) || 14,
+            rsiLongMin:        req.body.rsiLongMin  != null ? parseFloat(req.body.rsiLongMin)  : 60,
+            rsiShortMax:       req.body.rsiShortMax != null ? parseFloat(req.body.rsiShortMax) : 40,
+            macdTf:            ['1m','5m','15m'].includes(req.body.macdTf) ? req.body.macdTf : '5m',
+            macdFast:          parseInt(req.body.macdFast)   || 12,
+            macdSlow:          parseInt(req.body.macdSlow)   || 26,
+            macdSignal:        parseInt(req.body.macdSignal) || 9,
             useEmaAlignment:   req.body.useEmaAlignment !== false,
             useMaxTradeTime:   req.body.useMaxTradeTime !== false,
             maxTradeMinutes:   parseInt(req.body.maxTradeMinutes) || 15,
