@@ -625,6 +625,35 @@ function calcADX(highs, lows, closes, period = 14) {
     return result;
 }
 
+function calcVWAP(bars, session = 'daily') {
+    const n = bars.length;
+    const result = new Array(n).fill(null);
+    let cumPV = 0, cumV = 0, lastKey = null;
+    for (let i = 0; i < n; i++) {
+        const ts     = parseInt(bars[i][0]);
+        const high   = parseFloat(bars[i][2]);
+        const low    = parseFloat(bars[i][3]);
+        const close  = parseFloat(bars[i][4]);
+        const volume = parseFloat(bars[i][5]);
+        const date   = new Date(ts);
+        let key;
+        if (session === 'weekly') {
+            const dow = (date.getUTCDay() + 6) % 7; // Mon=0
+            key = ts - (dow * 86400000) - (ts % 86400000);
+        } else if (session === 'monthly') {
+            key = `${date.getUTCFullYear()}-${date.getUTCMonth()}`;
+        } else {
+            key = `${date.getUTCFullYear()}-${date.getUTCMonth()}-${date.getUTCDate()}`;
+        }
+        if (key !== lastKey) { cumPV = 0; cumV = 0; lastKey = key; }
+        const tp = (high + low + close) / 3;
+        cumPV += tp * volume;
+        cumV  += volume;
+        result[i] = cumV > 0 ? cumPV / cumV : null;
+    }
+    return result;
+}
+
 async function fetchKlinesBatch(interval, totalBars) {
     const perReq = 1000;
     const CHUNK = 20; // requests en paralelo por tanda
@@ -786,6 +815,24 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     const adx15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), adxArr15m[i]]));
     const tsAdx15m = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
 
+    // VWAP — configurable timeframe y sesión
+    const vwapTf_bt      = p.vwapTf      || '5m';
+    const vwapSession_bt = p.vwapSession || 'daily';
+    let vwapDirect_bt = null, vwapByTs_bt = null, tsVwap_bt = null;
+    if (p.useVwapFilter) {
+        if (vwapTf_bt === '1m') {
+            vwapDirect_bt = calcVWAP(bars1m, vwapSession_bt);
+        } else if (vwapTf_bt === '5m') {
+            const vals = calcVWAP(bars5m, vwapSession_bt);
+            vwapByTs_bt = new Map(bars5m.map((b, idx) => [parseInt(b[6]), vals[idx]]));
+            tsVwap_bt   = bars5m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+        } else {
+            const vals = calcVWAP(bars15m, vwapSession_bt);
+            vwapByTs_bt = new Map(bars15m.map((b, idx) => [parseInt(b[6]), vals[idx]]));
+            tsVwap_bt   = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+        }
+    }
+
     // Delta de volumen — prefix sum para rolling sum O(1) por barra
     const deltaPfx = new Array(bars1m.length + 1).fill(0);
     for (let i = 0; i < bars1m.length; i++) {
@@ -944,7 +991,19 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                 const adxRaw = lookupHTF(tsAdx15m, adx15mByTs, tsClose);
                 const adxOk  = !p.useADXFilter || (adxRaw !== null && adxRaw >= (p.adxThreshold ?? 25));
 
-                if (p.enableLongs && above && alignLong && rsiVal >= rsiLongMin && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk) {
+                // VWAP — dirección y/o pullback
+                const vwapVal_bt = !p.useVwapFilter ? null
+                    : vwapTf_bt === '1m' ? vwapDirect_bt[i] : lookupHTF(tsVwap_bt, vwapByTs_bt, tsClose);
+                const vwapOkLong  = !p.useVwapFilter || (vwapVal_bt !== null &&
+                    (!p.vwapUseDirection || close > vwapVal_bt) &&
+                    (!p.vwapUsePullback  || Math.abs(close - vwapVal_bt) / close * 100 <= (p.vwapPullbackPerc ?? 0.3))
+                );
+                const vwapOkShort = !p.useVwapFilter || (vwapVal_bt !== null &&
+                    (!p.vwapUseDirection || close < vwapVal_bt) &&
+                    (!p.vwapUsePullback  || Math.abs(close - vwapVal_bt) / close * 100 <= (p.vwapPullbackPerc ?? 0.3))
+                );
+
+                if (p.enableLongs && above && alignLong && rsiVal >= rsiLongMin && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -952,7 +1011,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                         const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
                         posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
                     }
-                } else if (p.enableShorts && below && alignShort && rsiVal <= rsiShortMax && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort && adxOk) {
+                } else if (p.enableShorts && below && alignShort && rsiVal <= rsiShortMax && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1605,6 +1664,24 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const adxTs15m   = [...adxByTs15m.keys()].sort((a, b) => a - b);
     const adxValue   = lookupHTF(adxTs15m, adxByTs15m, parseInt(bars1m[bars1m.length - 1][6]));
 
+    // VWAP — configurable timeframe y sesión
+    const vwapTf_sn      = p.vwapTf      || '5m';
+    const vwapSession_sn = p.vwapSession || 'daily';
+    let vwapDirect_sn = null, vwapByTs_sn = null, tsVwap_sn = null;
+    if (p.useVwapFilter) {
+        if (vwapTf_sn === '1m') {
+            vwapDirect_sn = calcVWAP(bars1m, vwapSession_sn);
+        } else if (vwapTf_sn === '5m') {
+            const vals = calcVWAP(bars5m, vwapSession_sn);
+            vwapByTs_sn = new Map(bars5m.map((b, idx) => [parseInt(b[6]), vals[idx]]));
+            tsVwap_sn   = [...vwapByTs_sn.keys()].sort((a, b) => a - b);
+        } else {
+            const vals = calcVWAP(bars15m, vwapSession_sn);
+            vwapByTs_sn = new Map(bars15m.map((b, idx) => [parseInt(b[6]), vals[idx]]));
+            tsVwap_sn   = [...vwapByTs_sn.keys()].sort((a, b) => a - b);
+        }
+    }
+
     // MACD — configurable período (fast/slow/signal) y temporalidad
     const macdFast_sn   = p.macdFast   || 12;
     const macdSlow_sn   = p.macdSlow   || 26;
@@ -1686,10 +1763,22 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
 
     const adxOk = !p.useADXFilter || (adxValue !== null && adxValue >= (p.adxThreshold ?? 25));
 
+    // VWAP — dirección y/o pullback
+    const vwapVal_sn = !p.useVwapFilter ? null
+        : vwapTf_sn === '1m' ? vwapDirect_sn[i] : lookupHTF(tsVwap_sn, vwapByTs_sn, tsClose);
+    const vwapOkLong_sn  = !p.useVwapFilter || (vwapVal_sn !== null &&
+        (!p.vwapUseDirection || close > vwapVal_sn) &&
+        (!p.vwapUsePullback  || Math.abs(close - vwapVal_sn) / close * 100 <= (p.vwapPullbackPerc ?? 0.3))
+    );
+    const vwapOkShort_sn = !p.useVwapFilter || (vwapVal_sn !== null &&
+        (!p.vwapUseDirection || close < vwapVal_sn) &&
+        (!p.vwapUsePullback  || Math.abs(close - vwapVal_sn) / close * 100 <= (p.vwapPullbackPerc ?? 0.3))
+    );
+
     let signal = null;
-    if (p.enableLongs !== false && horarioOk && above && alignLong && rsiVal >= rsiLongMin_sn && macd5 > sig5 && nearEMA && deltaOkLong && whaleOkLong && adxOk)
+    if (p.enableLongs !== false && horarioOk && above && alignLong && rsiVal >= rsiLongMin_sn && macd5 > sig5 && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn)
         signal = 'long';
-    else if (p.enableShorts !== false && horarioOk && below && alignShort && rsiVal <= rsiShortMax_sn && macd5 < sig5 && nearEMA && deltaOkShort && whaleOkShort && adxOk)
+    else if (p.enableShorts !== false && horarioOk && below && alignShort && rsiVal <= rsiShortMax_sn && macd5 < sig5 && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn)
         signal = 'short';
 
     const tpPerc = p.tpPerc ?? 0.5;
@@ -1709,7 +1798,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
 
     return {
         signal, timestamp: ts, entry: close, tp, sl,
-        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
+        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
     };
 }
 

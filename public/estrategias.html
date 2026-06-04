@@ -462,6 +462,46 @@
             </div>
         </div>
 
+        <div class="form-section">
+            <h3>VWAP</h3>
+            <div class="form-row">
+                <label>Activar filtro</label>
+                <input type="checkbox" id="p-vwap" class="form-check">
+            </div>
+            <div class="form-row">
+                <label>Timeframe</label>
+                <select id="p-vwap-tf" class="form-select">
+                    <option value="1m">1m</option>
+                    <option value="5m" selected>5m</option>
+                    <option value="15m">15m</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>Sesión</label>
+                <select id="p-vwap-session" class="form-select">
+                    <option value="daily" selected>Diaria</option>
+                    <option value="weekly">Semanal</option>
+                    <option value="monthly">Mensual</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>Usar como dirección</label>
+                <input type="checkbox" id="p-vwap-direction" class="form-check">
+            </div>
+            <div class="form-row">
+                <label>Usar como pullback</label>
+                <input type="checkbox" id="p-vwap-pullback" class="form-check" onchange="toggleVwapPullback()">
+            </div>
+            <div class="form-row" id="row-vwap-pullback-perc" style="display:none;">
+                <label>Distancia (%)</label>
+                <input type="number" id="p-vwap-pullback-perc" class="form-input" value="0.30" min="0.01" step="0.01">
+            </div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                Dirección: Long si precio &gt; VWAP · Short si precio &lt; VWAP<br>
+                Pullback: precio dentro de X% del VWAP
+            </div>
+        </div>
+
         <button class="btn-run" id="btn-run" onclick="ejecutar()">▶ Ejecutar Backtest</button>
     </div>
 
@@ -485,6 +525,11 @@
     document.getElementById('p-stop-type').addEventListener('change', function() {
         document.getElementById('row-sl').style.display = this.value === 'Porcentaje' ? 'flex' : 'none';
     });
+
+    function toggleVwapPullback() {
+        const on = document.getElementById('p-vwap-pullback').checked;
+        document.getElementById('row-vwap-pullback-perc').style.display = on ? 'flex' : 'none';
+    }
 
     function togglePalanca() {
         const on = document.getElementById('p-palanca-activo').checked;
@@ -553,6 +598,12 @@
             whaleMinBTC:       parseFloat(document.getElementById('p-whale-min-btc').value) || 5,
             useADXFilter:        document.getElementById('p-adx').checked,
             adxThreshold:        numOrDefault('p-adx-threshold', 25),
+            useVwapFilter:       document.getElementById('p-vwap').checked,
+            vwapTf:              document.getElementById('p-vwap-tf').value,
+            vwapSession:         document.getElementById('p-vwap-session').value,
+            vwapUseDirection:    document.getElementById('p-vwap-direction').checked,
+            vwapUsePullback:     document.getElementById('p-vwap-pullback').checked,
+            vwapPullbackPerc:    parseFloat(document.getElementById('p-vwap-pullback-perc').value) || 0.30,
             allowMultipleEntries: document.getElementById('p-multiple-entries').checked,
             posicionTipo:         document.getElementById('p-pos-tipo').value,
             posicionValor:        parseFloat(document.getElementById('p-pos-valor').value) || 100,
@@ -732,6 +783,12 @@
             { label: 'Delta Vol.',    activo: params.useDeltaFilter,      desc: `${params.deltaVelas} velas` },
             { label: 'Ballenas',      activo: params.useWhaleFilter,      desc: `${params.whaleWindow}m / ≥${params.whaleMinBTC}BTC` },
             { label: 'ADX',           activo: params.useADXFilter,        desc: `≥${params.adxThreshold}` },
+            { label: `VWAP ${params.vwapTf||'5m'}`, activo: params.useVwapFilter,
+              desc: [
+                  params.vwapSession === 'weekly' ? 'Semanal' : params.vwapSession === 'monthly' ? 'Mensual' : 'Diaria',
+                  params.vwapUseDirection ? 'Dirección' : '',
+                  params.vwapUsePullback  ? `Pullback ≤${params.vwapPullbackPerc}%` : '',
+              ].filter(Boolean).join(' · ') },
             { label: 'Fin de semana',  activo: params.operaFinDeSemana,     desc: 'sáb/dom ARG' },
             { label: 'Múlt. entradas', activo: params.allowMultipleEntries, desc: 'pyramiding' },
             { label: 'Tamaño pos.',
@@ -926,6 +983,13 @@
         document.getElementById('p-whale-min-btc').value = p.whaleMinBTC ?? 5;
         document.getElementById('p-adx').checked                 = !!p.useADXFilter;
         document.getElementById('p-adx-threshold').value         = p.adxThreshold ?? 25;
+        document.getElementById('p-vwap').checked                = !!p.useVwapFilter;
+        document.getElementById('p-vwap-tf').value               = p.vwapTf       || '5m';
+        document.getElementById('p-vwap-session').value          = p.vwapSession  || 'daily';
+        document.getElementById('p-vwap-direction').checked      = !!p.vwapUseDirection;
+        document.getElementById('p-vwap-pullback').checked       = !!p.vwapUsePullback;
+        document.getElementById('p-vwap-pullback-perc').value    = p.vwapPullbackPerc ?? 0.30;
+        toggleVwapPullback();
         document.getElementById('p-multiple-entries').checked    = !!p.allowMultipleEntries;
         document.getElementById('p-pos-tipo').value              = p.posicionTipo  || 'porc_capital_actual';
         document.getElementById('p-pos-valor').value             = p.posicionValor ?? 100;
