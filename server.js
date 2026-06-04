@@ -628,11 +628,29 @@ async function fetchKlinesBatch(interval, totalBars) {
         `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${perReq}${i > 0 ? `&endTime=${now - i * perReq * dur}` : ''}`
     );
 
+    // No silenciar fallos: un request fallido (p.ej. rate-limit) dejaría huecos de
+    // velas que corrompen indicadores y omiten trades sin aviso. Reintentamos y, si
+    // persiste, abortamos el backtest con un error claro en vez de correr con datos rotos.
+    async function fetchUrl(url, intento = 0) {
+        try {
+            const r = await fetch(url);
+            const j = await r.json();
+            if (!Array.isArray(j)) {
+                throw new Error(j && j.msg ? j.msg : `respuesta inesperada (${JSON.stringify(j).slice(0, 100)})`);
+            }
+            return j;
+        } catch (e) {
+            if (intento < 2) {
+                await new Promise(res => setTimeout(res, 400 * (intento + 1)));
+                return fetchUrl(url, intento + 1);
+            }
+            throw new Error(`No se pudieron descargar las velas ${interval} de Binance (${e.message}). Probá con menos días o reintentá.`);
+        }
+    }
+
     const results = [];
     for (let i = 0; i < urls.length; i += CHUNK) {
-        const batch = urls.slice(i, i + CHUNK).map(url =>
-            fetch(url).then(r => r.json()).catch(() => [])
-        );
+        const batch = urls.slice(i, i + CHUNK).map(url => fetchUrl(url));
         const batchResults = await Promise.all(batch);
         results.push(...batchResults);
     }
@@ -671,6 +689,16 @@ function calcCapitalEntrada(p, capital, posicionesAbiertas) {
     const asignado = posicionesAbiertas.reduce((s, pos) => s + pos.capitalAtEntry, 0);
     const disponible = capital - asignado;
     return disponible >= monto ? monto : 0;
+}
+
+// Costo total de una operación como fracción del capital de la posición (margen):
+// comisión y slippage se cobran en entrada + salida; el funding se prorratea por el
+// tiempo en operación. Todo escala con la palanca porque se aplica sobre el nocional.
+function costoOperacion(p, palanca, minutesHeld) {
+    const fees = (p.commission   / 100) * 2 * palanca;                          // entrada + salida
+    const slip = (p.slippagePerc / 100) * 2 * palanca;                          // entrada + salida
+    const fund = (p.fundingPerc  / 100) * (Math.max(0, minutesHeld) / 480) * palanca; // por cada 8h
+    return fees + slip + fund;
 }
 
 function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
@@ -774,6 +802,9 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     // capturando la peor excursión adversa de todas las posiciones abiertas.
     let ddPeak = capital, maxDDPerc = 0;
     const WARMUP = 500;
+    // Curva de equity marcada a mercado (incluye PnL no realizado), submuestreada a ~600
+    // puntos para que coincida con el max drawdown reportado y no pese de más en payload.
+    const eqStep = Math.max(1, Math.floor((bars1m.length - WARMUP) / 600));
 
     for (let i = WARMUP; i < bars1m.length; i++) {
         const bar = bars1m[i];
@@ -796,9 +827,12 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
             const barsIn = i - pos.entryBarIdx;
             let exitPrice = null, exitReason = null;
 
-            // Liquidación por apalancamiento — tiene prioridad sobre TP/SL
+            // Liquidación por apalancamiento — tiene prioridad sobre TP/SL.
+            // El margen aislado se agota un poco ANTES de 1/palanca por el margen de
+            // mantenimiento y la comisión de cierre, así que la liquidación ocurre antes.
             if (p.palancaActivo && p.palancaValor > 1) {
-                const liqDelta = 1 / p.palancaValor;
+                const MMR = 0.005; // margen de mantenimiento aprox. (BTC perp)
+                const liqDelta = Math.max(0.0001, 1 / p.palancaValor - MMR - (p.commission / 100));
                 if (pos.side === 1 && low <= pos.entry * (1 - liqDelta)) {
                     exitPrice = pos.entry * (1 - liqDelta); exitReason = 'LIQ';
                 } else if (pos.side === -1 && high >= pos.entry * (1 + liqDelta)) {
@@ -839,22 +873,24 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                     ? (exitPrice - pos.entry) / pos.entry
                     : (pos.entry - exitPrice) / pos.entry;
                 const palanca = p.palancaActivo ? (p.palancaValor || 1) : 1;
-                const net = raw * palanca - (p.commission / 100) * 2 * palanca;
+                const net = raw * palanca - costoOperacion(p, palanca, barsIn);
                 const pnlAbs = Math.max(pos.capitalAtEntry * net, -pos.capitalAtEntry);
                 capital += pnlAbs;
                 trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: ts, entryPrice: pos.entry, exitPrice, tp: pos.tp, sl: pos.sl, pnlPerc: (pnlAbs / pos.capitalAtEntry) * 100, pnlAbs, reason: exitReason, capital });
-                equity.push({ ts, v: capital });
                 lastClosedBarIdx = i;
                 posiciones.splice(j, 1);
             }
         }
 
-        // Actualizar sliding window de ballenas (se hace siempre, no solo en entrada)
-        while (wRight + 1 < whaleTrades.length && whaleTrades[wRight + 1].ts <= ts) {
+        // Actualizar sliding window de ballenas (se hace siempre, no solo en entrada).
+        // Anclada al CIERRE de la vela 1m (tsClose): la decisión ocurre al cierre, así que
+        // se incluyen las ballenas de la propia vela (igual que el filtro de delta) sin
+        // look-ahead, y queda alineado con el modo en vivo (que usa el momento actual).
+        while (wRight + 1 < whaleTrades.length && whaleTrades[wRight + 1].ts <= tsClose) {
             wRight++;
             if (whaleTrades[wRight].isSell) wSells += whaleTrades[wRight].btc; else wBuys += whaleTrades[wRight].btc;
         }
-        while (wLeft <= wRight && whaleTrades[wLeft].ts < ts - whaleWindowMs) {
+        while (wLeft <= wRight && whaleTrades[wLeft].ts < tsClose - whaleWindowMs) {
             if (whaleTrades[wLeft].isSell) wSells -= whaleTrades[wLeft].btc; else wBuys -= whaleTrades[wLeft].btc;
             wLeft++;
         }
@@ -925,17 +961,26 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
         for (const pos of posiciones) {
             const raw = pos.side === 1 ? (close - pos.entry) / pos.entry : (pos.entry - close) / pos.entry;
             const palanca = p.palancaActivo ? (p.palancaValor || 1) : 1;
-            markedEquity += Math.max(pos.capitalAtEntry * (raw * palanca - (p.commission / 100) * 2 * palanca), -pos.capitalAtEntry);
+            markedEquity += Math.max(pos.capitalAtEntry * (raw * palanca - costoOperacion(p, palanca, i - pos.entryBarIdx)), -pos.capitalAtEntry);
         }
         if (markedEquity > ddPeak) ddPeak = markedEquity;
         const ddNow = (ddPeak - markedEquity) / ddPeak * 100;
         if (ddNow > maxDDPerc) maxDDPerc = ddNow;
+
+        // Muestreo de la curva de equity a mercado (último bar siempre incluido)
+        if ((i - WARMUP) % eqStep === 0 || i === bars1m.length - 1) {
+            equity.push({ ts, v: markedEquity });
+        }
     }
 
     const wins   = trades.filter(t => t.pnlPerc > 0);
     const losses = trades.filter(t => t.pnlPerc <= 0);
     const grossW = wins.reduce((s, t) => s + Math.abs(t.pnlAbs), 0);
     const grossL = losses.reduce((s, t) => s + Math.abs(t.pnlAbs), 0);
+
+    // Desglose de razones de salida sobre TODOS los trades (no solo los devueltos)
+    const exitReasons = {};
+    trades.forEach(t => { exitReasons[t.reason] = (exitReasons[t.reason] || 0) + 1; });
 
     // Máxima racha de ganadoras / perdedoras consecutivas
     let maxWinStreak = 0, maxLossStreak = 0, curWin = 0, curLoss = 0;
@@ -964,6 +1009,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
             longsCount:  trades.filter(t => t.type === 'Long').length,
             shortsCount: trades.filter(t => t.type === 'Short').length,
             maxWinStreak, maxLossStreak,
+            exitReasons,
         },
         trades: trades.slice(-300),
         equity
@@ -981,7 +1027,8 @@ const BINANCE_WS_PRECIO  = BINANCE_BASE.includes('testnet')
     : 'wss://fstream.binance.com/ws/btcusdt@aggTrade';
 
 // Estado de posición activa (memoria + BD)
-let posicionActiva = null; // { lado, qty, entry, tp, sl }
+let posicionActiva = null; // { lado, qty, entry, tp, sl, entryTs, stopType }
+let ultimoPrecioFuturos = null; // último precio del WS de futuros, para cierres a mercado
 
 async function guardarPosicionBD(pos) {
     await pool.query(
@@ -1007,20 +1054,12 @@ function buildCloseUrl(lado, qty) {
     return `${BINANCE_BASE}/fapi/v1/order?${p}&signature=${binanceSign(p)}`;
 }
 
-async function chequearSalida(precio) {
+// Cierre a mercado compartido por todas las vías de salida (TP/SL/Tiempo/EMA)
+async function cerrarPosicionMercado(razon, precio) {
     if (!posicionActiva) return;
-    const { lado, qty, tp, sl } = posicionActiva;
-
-    const golpeTP = lado === 'long' ? precio >= tp : precio <= tp;
-    const golpeSL = lado === 'long' ? precio <= sl : precio >= sl;
-    if (!golpeTP && !golpeSL) return;
-
-    const razon = golpeTP ? 'TP' : 'SL';
-    console.log(`[AutoTrading] ${razon} alcanzado @ $${precio.toFixed(1)} — cerrando posición`);
-
-    // Limpiar antes de ejecutar para evitar doble cierre
     const pos = posicionActiva;
-    posicionActiva = null;
+    posicionActiva = null; // limpiar antes de ejecutar para evitar doble cierre
+    console.log(`[AutoTrading] ${razon} @ $${precio.toFixed(1)} — cerrando posición`);
     await limpiarPosicionBD();
     const ahoraMs = Date.now();
     await pool.query(`UPDATE auto_trading_config SET ultima_senal = NULL, ultima_cierre_ts = $1 WHERE id = 1`, [ahoraMs]);
@@ -1034,8 +1073,59 @@ async function chequearSalida(precio) {
          )`,
         [precio, razon, ahoraMs, pos.lado]
     );
-
     await ejecutarOrdenBinance(buildCloseUrl(pos.lado, pos.qty), BINANCE_API_KEY, `CIERRE-${razon}`);
+}
+
+async function chequearSalida(precio) {
+    if (!posicionActiva) return;
+    ultimoPrecioFuturos = precio;
+    const { lado, tp, sl, stopType } = posicionActiva;
+
+    const golpeTP = lado === 'long' ? precio >= tp : precio <= tp;
+    // El SL fijo por tick solo aplica a stop por Porcentaje. Para stop por Ruptura EMA
+    // la salida es dinámica (cierre de vela 1m vs EMA actual) y la gestiona el loop,
+    // replicando exactamente el comportamiento del backtest.
+    const slPorTick = (stopType ?? 'Porcentaje') === 'Porcentaje';
+    const golpeSL = slPorTick && (lado === 'long' ? precio <= sl : precio >= sl);
+    if (!golpeTP && !golpeSL) return;
+
+    await cerrarPosicionMercado(golpeTP ? 'TP' : 'SL', precio);
+}
+
+// Gestión de posición abierta en cada ciclo (1 min): salida por tiempo y stop EMA dinámico.
+// El WS de precio gestiona TP/SL fijos; esto cubre lo que el backtest hace al cierre de vela.
+async function gestionarPosicionAbierta(p) {
+    if (!posicionActiva) return;
+
+    // 1) Salida por tiempo máximo en operación
+    if (p.useMaxTradeTime && posicionActiva.entryTs) {
+        const minutos = (Date.now() - posicionActiva.entryTs) / 60000;
+        if (minutos >= (p.maxTradeMinutes ?? 15)) {
+            let precio = ultimoPrecioFuturos;
+            if (!precio) {
+                const b = await fetchKlinesBatch('1m', 2);
+                if (b.length) precio = parseFloat(b[b.length - 1][4]);
+            }
+            if (precio) { await cerrarPosicionMercado('Tiempo', precio); return; }
+        }
+    }
+
+    // 2) Stop EMA dinámico: cierra si la última vela 1m cerrada rompe la EMA actual
+    const stopType = p.stopType ?? 'Porcentaje';
+    if (stopType === 'Ruptura EMA 200' || stopType === 'Ruptura EMA 500') {
+        const bars1m = await fetchKlinesBatch('1m', 600);
+        if (bars1m.length >= 510) {
+            const c1m = bars1m.map(b => parseFloat(b[4]));
+            const emaArr = calcEMA(c1m, stopType === 'Ruptura EMA 200' ? 200 : 500);
+            const last = bars1m.length - 1;
+            const close = c1m[last];
+            const se = emaArr[last];
+            if (se != null) {
+                const rompe = posicionActiva.lado === 'long' ? close < se : close > se;
+                if (rompe) { await cerrarPosicionMercado('EMA', close); return; }
+            }
+        }
+    }
 }
 
 // WebSocket de precio futuros para monitoreo TP/SL en tiempo real
@@ -1103,6 +1193,16 @@ async function ejecutarOrdenBinance(url, apiKey, etiqueta) {
     }
 }
 
+// Setea el apalancamiento real del símbolo en Binance para que la posición tenga el
+// perfil de riesgo (margen / liquidación) que se asumió en el backtest.
+async function setBinanceLeverage(leverage) {
+    const ts = Date.now();
+    const q  = `symbol=BTCUSDT&leverage=${Math.round(leverage)}&timestamp=${ts}`;
+    const url = `${BINANCE_BASE}/fapi/v1/leverage?${q}&signature=${binanceSign(q)}`;
+    const r = await ejecutarOrdenBinance(url, BINANCE_API_KEY, `LEVERAGE-${Math.round(leverage)}x`);
+    return r.ok;
+}
+
 function buildBinanceUrls(signal, entry, tp, sl, positionUsdt) {
     const side   = signal === 'long' ? 'BUY' : 'SELL';
     const tpSide = signal === 'long' ? 'SELL' : 'BUY';
@@ -1124,7 +1224,6 @@ function buildBinanceUrls(signal, entry, tp, sl, positionUsdt) {
 
 async function ejecutarAutoTrading() {
     if (!N8N_WEBHOOK_URL) return;
-    if (posicionActiva) return; // ya hay posición abierta, el WS gestiona la salida
     try {
         const cfgRes = await pool.query('SELECT * FROM auto_trading_config WHERE id = 1');
         const cfg = cfgRes.rows[0];
@@ -1138,14 +1237,23 @@ async function ejecutarAutoTrading() {
         if (!stratRes.rows.length) return;
         const p = stratRes.rows[0].params;
 
+        // Si ya hay posición abierta: gestionar salidas por tiempo / EMA dinámico y salir.
+        // El WS de precio cubre TP/SL fijos en paralelo. No se evalúan entradas nuevas.
+        if (posicionActiva) {
+            await gestionarPosicionAbierta(p);
+            return;
+        }
+
         const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
-            fetchKlinesBatch('1m',  2000),
-            fetchKlinesBatch('5m',  50),
-            fetchKlinesBatch('15m', 60),
+            // Suficientes velas para que EMA/MACD/RSI/ADX (incluso de período alto en HTF)
+            // converjan igual que en el backtest y no diverja la señal en vivo.
+            fetchKlinesBatch('1m',  3000),
+            fetchKlinesBatch('5m',  800),
+            fetchKlinesBatch('15m', 800),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
-                 FROM ballenas WHERE fecha >= NOW() - INTERVAL '2 hours' AND cantidad >= $1 ORDER BY fecha ASC`,
-                [p.whaleMinBTC || 5]
+                 FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 ORDER BY fecha ASC`,
+                [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5]
             ),
         ]);
 
@@ -1179,9 +1287,14 @@ async function ejecutarAutoTrading() {
 
         console.log(`[AutoTrading] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${urls.qty} BTC`);
 
+        // Setear apalancamiento real antes de entrar si la estrategia lo usa
+        if (p.palancaActivo && p.palancaValor > 1) {
+            await setBinanceLeverage(p.palancaValor);
+        }
+
         const ordenEntrada = await ejecutarOrdenBinance(urls.entryUrl, urls.apiKey, 'ENTRADA');
         if (ordenEntrada.ok) {
-            posicionActiva = { lado: nuevaSenal, qty: urls.qty, entry: resultado.entry, tp: resultado.tp, sl: resultado.sl };
+            posicionActiva = { lado: nuevaSenal, qty: urls.qty, entry: resultado.entry, tp: resultado.tp, sl: resultado.sl, entryTs: Date.now(), stopType: p.stopType ?? 'Porcentaje' };
             await guardarPosicionBD(posicionActiva);
             await pool.query(
                 `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, estado, usuario_id)
@@ -1225,8 +1338,30 @@ setTimeout(async () => {
                 entry: parseFloat(pos.posicion_entry),
                 tp:    parseFloat(pos.posicion_tp),
                 sl:    parseFloat(pos.posicion_sl),
+                stopType: 'Porcentaje',
             };
-            console.log(`[AutoTrading] Posición activa recuperada: ${posicionActiva.lado.toUpperCase()} @ $${posicionActiva.entry} | TP $${posicionActiva.tp?.toFixed(0)} | SL $${posicionActiva.sl?.toFixed(0)}`);
+            // Recuperar entryTs (para salida por tiempo) desde la entrada abierta
+            try {
+                const eRes = await pool.query(
+                    `SELECT ts FROM auto_trading_entradas WHERE estado = 'abierta' AND lado = $1 ORDER BY ts DESC LIMIT 1`,
+                    [pos.posicion_lado]
+                );
+                if (eRes.rows.length) posicionActiva.entryTs = parseInt(eRes.rows[0].ts);
+            } catch (_) {}
+            // Recuperar stopType (para stop EMA dinámico) desde la estrategia configurada
+            try {
+                const cfgR = await pool.query('SELECT estrategia_nombre, usuario_id FROM auto_trading_config WHERE id = 1');
+                const c = cfgR.rows[0];
+                if (c && c.estrategia_nombre) {
+                    const sQ = c.usuario_id
+                        ? 'SELECT params FROM estrategias_guardadas WHERE nombre = $1 AND usuario_id = $2 LIMIT 1'
+                        : 'SELECT params FROM estrategias_guardadas WHERE nombre = $1 LIMIT 1';
+                    const sP = c.usuario_id ? [c.estrategia_nombre, c.usuario_id] : [c.estrategia_nombre];
+                    const sR = await pool.query(sQ, sP);
+                    if (sR.rows.length && sR.rows[0].params) posicionActiva.stopType = sR.rows[0].params.stopType || 'Porcentaje';
+                }
+            } catch (_) {}
+            console.log(`[AutoTrading] Posición activa recuperada: ${posicionActiva.lado.toUpperCase()} @ $${posicionActiva.entry} | TP $${posicionActiva.tp?.toFixed(0)} | SL $${posicionActiva.sl?.toFixed(0)} | stop ${posicionActiva.stopType}`);
         }
     } catch (e) {
         console.error('[AutoTrading] Error cargando posición desde BD:', e.message);
@@ -1305,7 +1440,7 @@ app.post('/api/autotrading/test', autenticar, soloAdmin, async (req, res) => {
 
         const resEntrada = await ejecutarOrdenBinance(urls.entryUrl, urls.apiKey, 'ENTRADA');
         if (resEntrada.ok) {
-            posicionActiva = { lado: signal, qty: urls.qty, entry, tp, sl };
+            posicionActiva = { lado: signal, qty: urls.qty, entry, tp, sl, entryTs: Date.now(), stopType: 'Porcentaje' };
             await guardarPosicionBD(posicionActiva);
         }
         const resTp = { ok: false, body: { msg: 'gestionado por monitor WebSocket' } };
@@ -1420,7 +1555,11 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const macdLookup = macdTf_sn === '1m' ? macdSnDirect[i] : lookupHTF(macdSnTs, macdSnByTs, tsClose);
     if (!macdLookup || macdLookup.macd == null || macdLookup.sig == null)
         return { signal: null, reason: 'macd_no_calentado', indicadores: {} };
-    const rsiVal = rsiLookup ?? 50;
+    // Coherencia con el backtest: si el RSI no está calentado, no se evalúa señal
+    // (el backtest saltea esa vela en vez de asumir un valor neutro de 50).
+    if (rsiLookup == null)
+        return { signal: null, reason: 'rsi_no_calentado', indicadores: {} };
+    const rsiVal = rsiLookup;
     const macd5 = macdLookup.macd;
     const sig5  = macdLookup.sig;
 
@@ -1505,13 +1644,15 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
         const p = stratRes.rows[0].params;
 
         const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
-            fetchKlinesBatch('1m',  2000),
-            fetchKlinesBatch('5m',  50),
-            fetchKlinesBatch('15m', 60),
+            // Suficientes velas para que EMA/MACD/RSI/ADX (incluso de período alto en HTF)
+            // converjan igual que en el backtest y no diverja la señal en vivo.
+            fetchKlinesBatch('1m',  3000),
+            fetchKlinesBatch('5m',  800),
+            fetchKlinesBatch('15m', 800),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
-                 FROM ballenas WHERE fecha >= NOW() - INTERVAL '2 hours' AND cantidad >= $1 ORDER BY fecha ASC`,
-                [p.whaleMinBTC || 5]
+                 FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 ORDER BY fecha ASC`,
+                [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5]
             ),
         ]);
 
@@ -1611,7 +1752,9 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             posicionValor:        parseFloat(req.body.posicionValor) || 100,
             palancaActivo:        req.body.palancaActivo === true,
             palancaValor:         parseFloat(req.body.palancaValor) || 1,
-            commission:           0.04,
+            commission:           Number.isFinite(parseFloat(req.body.commission))   ? parseFloat(req.body.commission)   : 0.04,
+            slippagePerc:         Number.isFinite(parseFloat(req.body.slippagePerc))  ? parseFloat(req.body.slippagePerc)  : 0.02,
+            fundingPerc:          Number.isFinite(parseFloat(req.body.fundingPerc))   ? parseFloat(req.body.fundingPerc)   : 0.01,
             initialCapital:       parseFloat(req.body.initialCapital) || 1000,
         };
         const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 365);
@@ -1626,10 +1769,32 @@ app.post('/api/backtest', autenticar, async (req, res) => {
                 [periodStart.toISOString(), p.whaleMinBTC]
             ),
         ]);
-        res.json(runBacktest(bars1m, bars5m, bars15m, whaleRes.rows, p));
+        const resultado = runBacktest(bars1m, bars5m, bars15m, whaleRes.rows, p);
+
+        // ── Advertencias de calidad de datos que afectan la validez del backtest ──
+        const warnings = [];
+        if (p.useWhaleFilter) {
+            const covRes = await pool.query(
+                'SELECT MIN(fecha) AS primera FROM ballenas WHERE cantidad >= $1',
+                [p.whaleMinBTC]
+            );
+            const primera = covRes.rows[0] && covRes.rows[0].primera ? new Date(covRes.rows[0].primera) : null;
+            if (!primera) {
+                warnings.push('Filtro de Ballenas activo pero no hay datos de ballenas guardados para ese mínimo de BTC: ningún trade pasará el filtro.');
+            } else if (primera.getTime() > periodStart.getTime()) {
+                const diasCubiertos = Math.max(0, (Date.now() - primera.getTime()) / 86400000);
+                warnings.push(`Filtro de Ballenas activo: solo hay datos desde ${primera.toISOString().slice(0, 16).replace('T', ' ')} UTC (~${diasCubiertos.toFixed(1)} días). El tramo anterior del período NO genera trades; las métricas reflejan solo el subperíodo con cobertura de ballenas.`);
+            }
+            if (p.whaleMinBTC < limiteGuardadoBD) {
+                warnings.push(`El "Mínimo BTC" del filtro (${p.whaleMinBTC}) es menor que el umbral de guardado en BD (${limiteGuardadoBD} BTC): solo existen trades ≥ ${limiteGuardadoBD} BTC, por lo que el filtro corre con datos incompletos.`);
+            }
+        }
+        resultado.warnings = warnings;
+
+        res.json(resultado);
     } catch (err) {
         console.error('Error backtest:', err);
-        res.status(500).json({ error: 'Error al ejecutar backtest' });
+        res.status(500).json({ error: err.message || 'Error al ejecutar backtest' });
     }
 });
 

@@ -208,6 +208,25 @@
         </div>
 
         <div class="form-section">
+            <h3>Costos de Operación</h3>
+            <div class="form-row">
+                <label>Comisión % (por lado)</label>
+                <input type="number" id="p-commission" class="form-input" value="0.04" step="0.01" min="0">
+            </div>
+            <div class="form-row">
+                <label>Slippage % (por lado)</label>
+                <input type="number" id="p-slippage" class="form-input" value="0.02" step="0.01" min="0">
+            </div>
+            <div class="form-row">
+                <label>Funding % (cada 8h)</label>
+                <input type="number" id="p-funding" class="form-input" value="0.01" step="0.01" min="0">
+            </div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                Comisión y slippage se cobran en entrada y salida. El funding se prorratea por el tiempo en operación. Todo escala con la palanca.
+            </div>
+        </div>
+
+        <div class="form-section">
             <h3>Apalancamiento</h3>
             <div class="form-row">
                 <label>Activar palanca</label>
@@ -488,22 +507,32 @@
         }
     }
 
+    // Lee un input numérico respetando el 0 (a diferencia de `parseFloat(x) || def`,
+    // que convertiría un 0 legítimo en el valor por defecto).
+    function numOrDefault(id, def) {
+        const v = parseFloat(document.getElementById(id).value);
+        return Number.isFinite(v) ? v : def;
+    }
+
     function getParams() {
         return {
             initialCapital:    parseFloat(document.getElementById('p-capital').value) || 1000,
             lookbackDays:      parseInt(document.getElementById('p-days').value) || 7,
+            commission:        numOrDefault('p-commission', 0.04),
+            slippagePerc:      numOrDefault('p-slippage', 0.02),
+            fundingPerc:       numOrDefault('p-funding', 0.01),
             enableLongs:       document.getElementById('p-longs').checked,
             enableShorts:      document.getElementById('p-shorts').checked,
             tpPerc:            parseFloat(document.getElementById('p-tp').value) || 0.5,
             stopType:          document.getElementById('p-stop-type').value,
             slPerc:            parseFloat(document.getElementById('p-sl').value) || 1.0,
-            startHour:         parseInt(document.getElementById('p-start-hour').value) || 9,
-            endHour:           parseInt(document.getElementById('p-end-hour').value) || 20,
+            startHour:         numOrDefault('p-start-hour', 9),
+            endHour:           numOrDefault('p-end-hour', 20),
             operaFinDeSemana:  document.getElementById('p-fds').checked,
             rsiTf:             document.getElementById('p-rsi-tf').value,
             rsiPeriod:         parseInt(document.getElementById('p-rsi-period').value) || 14,
-            rsiLongMin:        parseFloat(document.getElementById('p-rsi-long').value) || 60,
-            rsiShortMax:       parseFloat(document.getElementById('p-rsi-short').value) || 40,
+            rsiLongMin:        numOrDefault('p-rsi-long', 60),
+            rsiShortMax:       numOrDefault('p-rsi-short', 40),
             macdTf:            document.getElementById('p-macd-tf').value,
             macdFast:          parseInt(document.getElementById('p-macd-fast').value)   || 12,
             macdSlow:          parseInt(document.getElementById('p-macd-slow').value)   || 26,
@@ -522,7 +551,7 @@
             whaleWindow:       parseInt(document.getElementById('p-whale-window').value) || 30,
             whaleMinBTC:       parseFloat(document.getElementById('p-whale-min-btc').value) || 5,
             useADXFilter:        document.getElementById('p-adx').checked,
-            adxThreshold:        parseInt(document.getElementById('p-adx-threshold').value) || 25,
+            adxThreshold:        numOrDefault('p-adx-threshold', 25),
             allowMultipleEntries: document.getElementById('p-multiple-entries').checked,
             posicionTipo:         document.getElementById('p-pos-tipo').value,
             posicionValor:        parseFloat(document.getElementById('p-pos-valor').value) || 100,
@@ -568,6 +597,7 @@
 
     // ── Estado de filtros de trades ─────────────────────────────────
     let tradesActuales = [];
+    let totalTradesGlobal = 0;
     let filtroTipo  = 'Todos';
     let filtroRazon = 'Todos';
 
@@ -663,6 +693,7 @@
             <div style="padding:11px 13px;border-bottom:1px solid #f0f2f5;">
                 <div style="font-size:12px;font-weight:bold;color:#374151;margin-bottom:8px;">
                     Operaciones ${mostrados.length < filtrado.length ? `(mostrando ${mostrados.length} de ${filtrado.length})` : `(${filtrado.length})`}
+                    ${totalTradesGlobal > all.length ? `<span style="font-weight:normal;color:#94a3b8;font-size:11px;">— tabla limitada a las últimas ${all.length} de ${totalTradesGlobal} operaciones totales (las métricas usan todas)</span>` : ''}
                 </div>
                 ${filterBar}
             </div>
@@ -678,9 +709,16 @@
         </div>`;
     }
 
-    function renderResults({ stats: s, trades, equity }, params) {
+    function renderResults({ stats: s, trades, equity, warnings = [] }, params) {
         const initialCapital = params.initialCapital;
         const pClass = s.netProfit >= 0 ? 'positive' : 'negative';
+
+        // ── Advertencias de calidad de datos ──
+        const warningsHTML = (warnings && warnings.length) ? `
+            <div style="background:#fff7ed;border:1px solid #fb923c;border-radius:8px;padding:10px 13px;margin-bottom:14px;">
+                <div style="font-size:11px;font-weight:bold;color:#c2410c;text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px;">⚠ Advertencias de datos</div>
+                ${warnings.map(w => `<div style="font-size:12px;color:#9a3412;line-height:1.5;">• ${escHtml(w)}</div>`).join('')}
+            </div>` : '';
 
         // ── Filtros activos ──
         const filtros = [
@@ -761,21 +799,21 @@
                 ${buildEquitySVG(equity, initialCapital)}
             </div>` : '';
 
-        // ── Exit Reason Breakdown ──
-        const reasons = {};
-        trades.forEach(t => { reasons[t.reason] = (reasons[t.reason] || 0) + 1; });
+        // ── Exit Reason Breakdown (sobre TODOS los trades, no solo los devueltos) ──
+        const reasons = s.exitReasons || {};
+        const totalReason = Object.values(reasons).reduce((a, b) => a + b, 0) || 1;
         const reasonHTML = `<div class="reason-bar">
             <span style="font-size:12px;color:#64748b;align-self:center;">Salidas:</span>
             ${Object.entries(reasons).sort((a,b) => b[1]-a[1]).map(([r, cnt]) => `
                 <div class="reason-item">
                     <span class="r-label">${r}</span>
                     <span class="r-val">${cnt}</span>
-                    <span style="color:#94a3b8;font-size:10px;">${(cnt/trades.length*100).toFixed(0)}%</span>
+                    <span style="color:#94a3b8;font-size:10px;">${(cnt/totalReason*100).toFixed(0)}%</span>
                 </div>`).join('')}
         </div>`;
 
         if (s.totalTrades === 0) {
-            document.getElementById('results').innerHTML = filtrosHTML + statsHTML + `
+            document.getElementById('results').innerHTML = warningsHTML + filtrosHTML + statsHTML + `
                 <div class="loading-msg" style="flex-direction:column;gap:6px;">
                     <span style="font-size:24px;">🔍</span>
                     <span>Sin trades en el período. Probá relajar los filtros o aumentar los días.</span>
@@ -785,6 +823,7 @@
 
         // Guardar trades, resetear filtros y renderizar
         tradesActuales = trades;
+        totalTradesGlobal = s.totalTrades;
         filtroTipo  = 'Todos';
         filtroRazon = 'Todos';
 
@@ -799,7 +838,7 @@
         </div>`;
 
         document.getElementById('results').innerHTML =
-            filtrosHTML + verEnGraficoHTML + statsHTML + equityHTML + reasonHTML +
+            warningsHTML + filtrosHTML + verEnGraficoHTML + statsHTML + equityHTML + reasonHTML +
             '<div id="trades-section"></div>';
 
         renderTradesTable();
@@ -849,6 +888,9 @@
     function aplicarParams(p) {
         document.getElementById('p-capital').value       = p.initialCapital ?? 1000;
         document.getElementById('p-days').value          = p.lookbackDays ?? 7;
+        document.getElementById('p-commission').value    = p.commission ?? 0.04;
+        document.getElementById('p-slippage').value      = p.slippagePerc ?? 0.02;
+        document.getElementById('p-funding').value       = p.fundingPerc ?? 0.01;
         document.getElementById('p-longs').checked       = p.enableLongs !== false;
         document.getElementById('p-shorts').checked      = p.enableShorts !== false;
         document.getElementById('p-tp').value            = p.tpPerc ?? 0.5;
