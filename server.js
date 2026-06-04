@@ -43,6 +43,20 @@ async function inicializarBaseDeDatos() {
             valor NUMERIC NOT NULL
         );
     `;
+    // Cache de velas 1m de BTCUSDT para los backtests de /estrategias. Guardamos solo el
+    // timeframe de 1m; 5m y 15m se derivan agregando en SQL (ver fetchKlinesDesdeBD).
+    const queryTablaKlines = `
+        CREATE TABLE IF NOT EXISTS klines_1m (
+            open_time      BIGINT PRIMARY KEY,
+            open           NUMERIC NOT NULL,
+            high           NUMERIC NOT NULL,
+            low            NUMERIC NOT NULL,
+            close          NUMERIC NOT NULL,
+            volume         NUMERIC NOT NULL,
+            close_time     BIGINT  NOT NULL,
+            taker_buy_base NUMERIC NOT NULL
+        );
+    `;
     const queryTablaUsuarios = `
         CREATE TABLE IF NOT EXISTS usuarios (
             id SERIAL PRIMARY KEY,
@@ -96,6 +110,7 @@ async function inicializarBaseDeDatos() {
         await pool.query(queryTablaBallenas);
         await pool.query(queryTablaConfig);
         await pool.query(queryTablaOI);
+        await pool.query(queryTablaKlines);
         await pool.query(queryTablaUsuarios);
         await pool.query(queryTablaConfigUsuario);
         await pool.query(queryTablaEstrategias);
@@ -700,6 +715,108 @@ async function fetchKlinesBatch(interval, totalBars) {
         if (Array.isArray(v) && v[6] <= now && !seen.has(v[0])) { seen.add(v[0]); all.push(v); }
     });
     return all.sort((a, b) => a[0] - b[0]);
+}
+
+// ── Cache de velas en BD ───────────────────────────────────────────────────
+// Guardamos solo 1m. fetchKlinesDesdeBD devuelve velas en EL MISMO formato array
+// que Binance (índices: 0 openTime, 1 open, 2 high, 3 low, 4 close, 5 volume,
+// 6 closeTime, 9 takerBuyBase) para que runBacktest sea agnóstico de la fuente.
+const DIAS_CACHE_KLINES = 365;
+let sincronizandoKlines = false;
+
+async function upsertKlines1m(velas) {
+    const CHUNK = 500; // 500 filas × 8 params = 4000, bajo el límite de 65535 de PG
+    for (let i = 0; i < velas.length; i += CHUNK) {
+        const slice = velas.slice(i, i + CHUNK);
+        const placeholders = [];
+        const params = [];
+        slice.forEach((k, idx) => {
+            const o = idx * 8;
+            placeholders.push(`($${o+1},$${o+2},$${o+3},$${o+4},$${o+5},$${o+6},$${o+7},$${o+8})`);
+            params.push(
+                Number(k[0]), parseFloat(k[1]), parseFloat(k[2]), parseFloat(k[3]),
+                parseFloat(k[4]), parseFloat(k[5]), Number(k[6]), parseFloat(k[9])
+            );
+        });
+        await pool.query(
+            `INSERT INTO klines_1m (open_time, open, high, low, close, volume, close_time, taker_buy_base)
+             VALUES ${placeholders.join(',')}
+             ON CONFLICT (open_time) DO NOTHING`,
+            params
+        );
+    }
+}
+
+// Mantiene la cache fresca. Si la tabla está vacía hace el backfill inicial de
+// DIAS_CACHE_KLINES días; si no, trae solo las velas nuevas desde la última guardada.
+async function sincronizarKlines() {
+    if (sincronizandoKlines) return;
+    sincronizandoKlines = true;
+    try {
+        const r = await pool.query('SELECT MAX(open_time) AS ult FROM klines_1m');
+        const ult = r.rows[0].ult ? Number(r.rows[0].ult) : null;
+        const now = Date.now();
+        let faltan;
+        if (!ult) {
+            faltan = DIAS_CACHE_KLINES * 1440;
+            console.log(`[Klines] BD vacía: backfill inicial de ${DIAS_CACHE_KLINES} días (~${faltan} velas 1m). Puede tardar varios minutos…`);
+        } else {
+            faltan = Math.ceil((now - ult) / 60000) + 2; // +2 de solape para no perder velas
+            if (faltan <= 2) { sincronizandoKlines = false; return; } // nada nuevo cerrado
+            faltan = Math.min(faltan, DIAS_CACHE_KLINES * 1440);
+        }
+        const velas = await fetchKlinesBatch('1m', faltan);
+        if (velas.length) {
+            await upsertKlines1m(velas);
+            const ultIso = new Date(Number(velas[velas.length - 1][0])).toISOString().slice(0, 16).replace('T', ' ');
+            console.log(`[Klines] Sincronizadas ${velas.length} velas 1m (última: ${ultIso} UTC).`);
+        }
+        // Descartamos velas más viejas que la ventana de cache para no crecer sin límite.
+        await pool.query('DELETE FROM klines_1m WHERE open_time < $1', [now - DIAS_CACHE_KLINES * 86400000]);
+    } catch (e) {
+        console.error('[Klines] Error al sincronizar:', e.message);
+    } finally {
+        sincronizandoKlines = false;
+    }
+}
+setInterval(sincronizarKlines, 60000);
+// Arranque diferido: damos tiempo a que inicializarBaseDeDatos cree la tabla.
+setTimeout(sincronizarKlines, 8000);
+
+async function fetchKlinesDesdeBD(interval, days) {
+    const desde = Date.now() - days * 86400000;
+    if (interval === '1m') {
+        const r = await pool.query(
+            `SELECT open_time, open, high, low, close, volume, close_time, taker_buy_base
+             FROM klines_1m WHERE open_time >= $1::bigint ORDER BY open_time ASC`,
+            [desde]
+        );
+        return r.rows.map(f => [
+            Number(f.open_time), Number(f.open), Number(f.high), Number(f.low),
+            Number(f.close), Number(f.volume), Number(f.close_time), 0, 0, Number(f.taker_buy_base)
+        ]);
+    }
+    // Derivamos 5m / 15m agregando las velas de 1m por bucket temporal.
+    const bucket = interval === '15m' ? 900000 : 300000;
+    const r = await pool.query(
+        `SELECT b * $2::bigint AS open_time,
+                (array_agg(open  ORDER BY open_time ASC ))[1] AS open,
+                MAX(high) AS high,
+                MIN(low)  AS low,
+                (array_agg(close ORDER BY open_time DESC))[1] AS close,
+                SUM(volume) AS volume,
+                MAX(close_time) AS close_time,
+                SUM(taker_buy_base) AS taker_buy_base
+         FROM (SELECT open_time, open_time / $2::bigint AS b, open, high, low, close, volume, close_time, taker_buy_base
+               FROM klines_1m WHERE open_time >= $1::bigint) t
+         GROUP BY b
+         ORDER BY b ASC`,
+        [desde, bucket]
+    );
+    return r.rows.map(f => [
+        Number(f.open_time), Number(f.open), Number(f.high), Number(f.low),
+        Number(f.close), Number(f.volume), Number(f.close_time), 0, 0, Number(f.taker_buy_base)
+    ]);
 }
 
 function lookupHTF(sortedTs, byTs, target) {
@@ -1987,17 +2104,28 @@ app.post('/api/backtest', autenticar, async (req, res) => {
         };
         const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 365);
         const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        // Fuente de velas: 'bd' (cache local, default) o 'binance' (descarga en vivo).
+        // El toggle en /estrategias permite comparar ambas para validar que coinciden.
+        const fuente = req.body.fuenteDatos === 'binance' ? 'binance' : 'bd';
+        const cargarKlines = fuente === 'binance'
+            ? (tf, n) => fetchKlinesBatch(tf, n)
+            : (tf)    => fetchKlinesDesdeBD(tf, days);
         const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
-            fetchKlinesBatch('1m',  days * 1440),
-            fetchKlinesBatch('5m',  days * 288),
-            fetchKlinesBatch('15m', days * 96),
+            cargarKlines('1m',  days * 1440),
+            cargarKlines('5m',  days * 288),
+            cargarKlines('15m', days * 96),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
                  FROM ballenas WHERE fecha >= $1 AND cantidad >= $2 ORDER BY fecha ASC`,
                 [periodStart.toISOString(), p.whaleMinBTC]
             ),
         ]);
+        if (fuente === 'bd' && bars1m.length === 0) {
+            throw new Error('La BD todavía no tiene velas cacheadas (el backfill inicial puede tardar unos minutos). Probá de nuevo en un rato o cambiá la fuente a Binance.');
+        }
         const resultado = runBacktest(bars1m, bars5m, bars15m, whaleRes.rows, p);
+        resultado.fuenteDatos = fuente;
+        resultado.barsUsadas = { m1: bars1m.length, m5: bars5m.length, m15: bars15m.length };
 
         // ── Advertencias de calidad de datos que afectan la validez del backtest ──
         const warnings = [];
@@ -2023,6 +2151,29 @@ app.post('/api/backtest', autenticar, async (req, res) => {
     } catch (err) {
         console.error('Error backtest:', err);
         res.status(500).json({ error: err.message || 'Error al ejecutar backtest' });
+    }
+});
+
+// Estado de la cache de velas: cobertura y si el backfill sigue corriendo.
+app.get('/api/klines/estado', autenticar, async (req, res) => {
+    try {
+        const r = await pool.query(
+            'SELECT COUNT(*)::int AS filas, MIN(open_time) AS primera, MAX(open_time) AS ultima FROM klines_1m'
+        );
+        const row = r.rows[0];
+        const diasCobertura = row.primera
+            ? (Number(row.ultima) - Number(row.primera)) / 86400000
+            : 0;
+        res.json({
+            filas: row.filas,
+            primera: row.primera ? Number(row.primera) : null,
+            ultima:  row.ultima  ? Number(row.ultima)  : null,
+            diasCobertura: Math.round(diasCobertura * 10) / 10,
+            sincronizando: sincronizandoKlines,
+            diasObjetivo: DIAS_CACHE_KLINES,
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 

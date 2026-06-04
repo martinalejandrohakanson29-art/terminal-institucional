@@ -50,6 +50,19 @@
         .btn-run:hover:not(:disabled) { background: #1a4fd6; }
         .btn-run:disabled { background: #94a3b8; cursor: not-allowed; }
 
+        /* ─── Selector de fuente de datos (BD vs Binance) ─── */
+        .fuente-box { margin: 4px 14px 0; }
+        .fuente-label { display: block; font-size: 11px; color: #64748b; margin-bottom: 5px; font-weight: 600; }
+        .fuente-toggle { display: flex; gap: 6px; }
+        .fuente-opt {
+            flex: 1; padding: 7px 6px; font-size: 12px; font-weight: 600;
+            background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1;
+            border-radius: 6px; cursor: pointer; transition: all .12s;
+        }
+        .fuente-opt:hover { background: #e2e8f0; }
+        .fuente-opt.activa { background: #2962FF; color: #fff; border-color: #2962FF; }
+        .fuente-info { font-size: 10.5px; color: #94a3b8; margin-top: 5px; line-height: 1.35; }
+
         /* ─── Estrategias guardadas ─── */
         .strat-select {
             flex: 1; padding: 4px 6px; border: 1px solid #d1d4dc;
@@ -520,6 +533,15 @@
             </div>
         </div>
 
+        <div class="fuente-box">
+            <label class="fuente-label">Fuente de velas</label>
+            <div class="fuente-toggle">
+                <button type="button" id="fuente-bd" class="fuente-opt activa" onclick="setFuente('bd')">⚡ BD (cache)</button>
+                <button type="button" id="fuente-binance" class="fuente-opt" onclick="setFuente('binance')">🌐 Binance</button>
+            </div>
+            <div class="fuente-info" id="fuente-info">Cargando estado de la cache…</div>
+        </div>
+
         <button class="btn-run" id="btn-run" onclick="ejecutar()">▶ Ejecutar Backtest</button>
     </div>
 
@@ -585,8 +607,37 @@
         return Number.isFinite(v) ? v : def;
     }
 
+    // Fuente de velas seleccionada: 'bd' (cache local, default) o 'binance' (en vivo).
+    let fuenteSeleccionada = 'bd';
+    function setFuente(f) {
+        fuenteSeleccionada = f;
+        document.getElementById('fuente-bd').classList.toggle('activa', f === 'bd');
+        document.getElementById('fuente-binance').classList.toggle('activa', f === 'binance');
+    }
+
+    async function actualizarEstadoCache() {
+        const info = document.getElementById('fuente-info');
+        try {
+            const res = await fetch('/api/klines/estado', { credentials: 'same-origin' });
+            if (!res.ok) throw new Error();
+            const d = await res.json();
+            if (!d.filas) {
+                info.innerHTML = '⏳ Cache vacía: backfill inicial en progreso. Usá Binance por ahora.';
+                return;
+            }
+            const ult = d.ultima ? new Date(d.ultima).toISOString().slice(0, 16).replace('T', ' ') : '—';
+            const sync = d.sincronizando ? ' · 🔄 actualizando' : '';
+            info.innerHTML = `BD: ${d.diasCobertura}/${d.diasObjetivo} días · ${d.filas.toLocaleString()} velas 1m · última ${ult} UTC${sync}`;
+        } catch {
+            info.innerHTML = 'No se pudo leer el estado de la cache.';
+        }
+    }
+    actualizarEstadoCache();
+    setInterval(actualizarEstadoCache, 30000);
+
     function getParams() {
         return {
+            fuenteDatos:       fuenteSeleccionada,
             initialCapital:    parseFloat(document.getElementById('p-capital').value) || 1000,
             lookbackDays:      parseInt(document.getElementById('p-days').value) || 7,
             commission:        numOrDefault('p-commission', 0.04),
@@ -642,12 +693,14 @@
 
     async function ejecutar() {
         const btn = document.getElementById('btn-run');
-        btn.disabled = true; btn.textContent = '⏳ Descargando velas...';
+        const esBD = fuenteSeleccionada === 'bd';
+        btn.disabled = true; btn.textContent = esBD ? '⏳ Cargando velas...' : '⏳ Descargando velas...';
         document.getElementById('placeholder').style.display = 'none';
         document.getElementById('results').style.display = 'block';
         const dias = parseInt(document.getElementById('p-days').value) || 7;
-        const aviso = dias > 20 ? ` (${dias} días — puede tardar ~${dias <= 90 ? '30s' : dias <= 180 ? '1 min' : dias <= 270 ? '2 min' : '3 min'})` : '';
-        document.getElementById('results').innerHTML = `<div class="loading-msg"><span>Ejecutando backtest — descargando 3 temporalidades de Binance...${aviso}</span></div>`;
+        const aviso = (!esBD && dias > 20) ? ` (${dias} días — puede tardar ~${dias <= 90 ? '30s' : dias <= 180 ? '1 min' : dias <= 270 ? '2 min' : '3 min'})` : '';
+        const origen = esBD ? 'leyendo velas desde la BD (cache)' : 'descargando 3 temporalidades de Binance';
+        document.getElementById('results').innerHTML = `<div class="loading-msg"><span>Ejecutando backtest — ${origen}...${aviso}</span></div>`;
 
         try {
             const res = await fetch('/api/backtest', {
