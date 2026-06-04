@@ -129,6 +129,14 @@ async function inicializarBaseDeDatos() {
         `);
         // Migración: usuario_id en auto_trading_entradas
         await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS usuario_id INTEGER REFERENCES usuarios(id)`);
+        // Migración: qty y stop_type por entrada (para gestionar sub-posiciones / pyramiding en vivo)
+        await pool.query(`
+            ALTER TABLE auto_trading_entradas
+                ADD COLUMN IF NOT EXISTS qty       NUMERIC,
+                ADD COLUMN IF NOT EXISTS stop_type VARCHAR(20)
+        `);
+        // Migración: referencia de capital inicial para sizing "% capital inicial" en vivo
+        await pool.query(`ALTER TABLE auto_trading_config ADD COLUMN IF NOT EXISTS capital_inicial_ref NUMERIC`);
         await pool.query(`
             CREATE TABLE IF NOT EXISTS auto_trading_entradas (
                 id           SERIAL PRIMARY KEY,
@@ -1018,7 +1026,6 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
 
 // ── Auto-Trading Loop ─────────────────────────────────────────
 const N8N_WEBHOOK_URL    = process.env.N8N_WEBHOOK_URL;
-const AUTO_POSITION_USDT = parseFloat(process.env.AUTO_POSITION_USDT) || 100;
 const BINANCE_API_KEY    = process.env.Clave_API_Binance;
 const BINANCE_SECRET     = process.env.Clave_secreta_Binance;
 const BINANCE_BASE       = 'https://testnet.binancefuture.com';
@@ -1026,24 +1033,32 @@ const BINANCE_WS_PRECIO  = BINANCE_BASE.includes('testnet')
     ? 'wss://stream.binancefuture.com/ws/btcusdt@aggTrade'
     : 'wss://fstream.binance.com/ws/btcusdt@aggTrade';
 
-// Estado de posición activa (memoria + BD)
-let posicionActiva = null; // { lado, qty, entry, tp, sl, entryTs, stopType }
+// Estado de sub-posiciones activas (memoria + BD). El exchange netea las posiciones de
+// un símbolo, así que cada sub-posición vive en memoria y se cierra con una orden
+// reduceOnly PARCIAL por su cantidad, replicando el pyramiding del backtest.
+let posicionesActivas = []; // [{ id, lado, qty, entry, tp, sl, entryTs, stopType }]
 let ultimoPrecioFuturos = null; // último precio del WS de futuros, para cierres a mercado
 
-async function guardarPosicionBD(pos) {
+// Mantiene las columnas posicion_* (posición NETA) por compatibilidad y para mostrar estado.
+async function sincronizarPosicionBD() {
+    if (posicionesActivas.length === 0) {
+        await pool.query(
+            `UPDATE auto_trading_config
+             SET posicion_lado=NULL, posicion_qty=NULL, posicion_entry=NULL, posicion_tp=NULL, posicion_sl=NULL
+             WHERE id=1`
+        );
+        return;
+    }
+    const lado  = posicionesActivas[0].lado;
+    const qty   = posicionesActivas.reduce((s, p) => s + p.qty, 0);
+    const entry = posicionesActivas.reduce((s, p) => s + p.entry * p.qty, 0) / (qty || 1);
+    const tp    = posicionesActivas[0].tp;
+    const sl    = posicionesActivas[0].sl;
     await pool.query(
         `UPDATE auto_trading_config
          SET posicion_lado=$1, posicion_qty=$2, posicion_entry=$3, posicion_tp=$4, posicion_sl=$5
          WHERE id=1`,
-        [pos.lado, pos.qty, pos.entry, pos.tp, pos.sl]
-    );
-}
-
-async function limpiarPosicionBD() {
-    await pool.query(
-        `UPDATE auto_trading_config
-         SET posicion_lado=NULL, posicion_qty=NULL, posicion_entry=NULL, posicion_tp=NULL, posicion_sl=NULL
-         WHERE id=1`
+        [lado, qty, entry, tp, sl]
     );
 }
 
@@ -1054,78 +1069,131 @@ function buildCloseUrl(lado, qty) {
     return `${BINANCE_BASE}/fapi/v1/order?${p}&signature=${binanceSign(p)}`;
 }
 
-// Cierre a mercado compartido por todas las vías de salida (TP/SL/Tiempo/EMA)
-async function cerrarPosicionMercado(razon, precio) {
-    if (!posicionActiva) return;
-    const pos = posicionActiva;
-    posicionActiva = null; // limpiar antes de ejecutar para evitar doble cierre
-    console.log(`[AutoTrading] ${razon} @ $${precio.toFixed(1)} — cerrando posición`);
-    await limpiarPosicionBD();
+function buildEntryUrl(lado, qty) {
+    const side = lado === 'long' ? 'BUY' : 'SELL';
+    const ts   = Date.now();
+    const p    = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&timestamp=${ts}`;
+    return `${BINANCE_BASE}/fapi/v1/order?${p}&signature=${binanceSign(p)}`;
+}
+
+// Cierra UNA sub-posición. El llamador ya debe haberla removido de posicionesActivas de
+// forma síncrona (antes de cualquier await) para evitar dobles cierres por ticks concurrentes.
+async function cerrarSubPosicion(pos, razon, precio) {
+    console.log(`[AutoTrading] ${razon} sub-pos #${pos.id} ${pos.lado.toUpperCase()} qty ${pos.qty} @ $${precio.toFixed(1)}`);
     const ahoraMs = Date.now();
-    await pool.query(`UPDATE auto_trading_config SET ultima_senal = NULL, ultima_cierre_ts = $1 WHERE id = 1`, [ahoraMs]);
     await pool.query(
-        `UPDATE auto_trading_entradas
-         SET estado = 'cerrada', precio_cierre = $1, razon_cierre = $2, ts_cierre = $3
-         WHERE id = (
-             SELECT id FROM auto_trading_entradas
-             WHERE estado = 'abierta' AND lado = $4
-             ORDER BY ts DESC LIMIT 1
-         )`,
-        [precio, razon, ahoraMs, pos.lado]
+        `UPDATE auto_trading_entradas SET estado='cerrada', precio_cierre=$1, razon_cierre=$2, ts_cierre=$3 WHERE id=$4`,
+        [precio, razon, ahoraMs, pos.id]
     );
+    await pool.query(`UPDATE auto_trading_config SET ultima_cierre_ts=$1 WHERE id=1`, [ahoraMs]);
+    // Al quedar plano, resetear la última señal para poder re-entrar en la próxima señal
+    if (posicionesActivas.length === 0) {
+        await pool.query(`UPDATE auto_trading_config SET ultima_senal=NULL WHERE id=1`);
+    }
+    await sincronizarPosicionBD();
     await ejecutarOrdenBinance(buildCloseUrl(pos.lado, pos.qty), BINANCE_API_KEY, `CIERRE-${razon}`);
 }
 
+// TP/SL por tick para cada sub-posición. El SL fijo por tick solo aplica a stop por
+// Porcentaje; el stop por Ruptura EMA es dinámico (lo gestiona gestionarPosicionAbierta).
 async function chequearSalida(precio) {
-    if (!posicionActiva) return;
     ultimoPrecioFuturos = precio;
-    const { lado, tp, sl, stopType } = posicionActiva;
+    if (posicionesActivas.length === 0) return;
 
-    const golpeTP = lado === 'long' ? precio >= tp : precio <= tp;
-    // El SL fijo por tick solo aplica a stop por Porcentaje. Para stop por Ruptura EMA
-    // la salida es dinámica (cierre de vela 1m vs EMA actual) y la gestiona el loop,
-    // replicando exactamente el comportamiento del backtest.
-    const slPorTick = (stopType ?? 'Porcentaje') === 'Porcentaje';
-    const golpeSL = slPorTick && (lado === 'long' ? precio <= sl : precio >= sl);
-    if (!golpeTP && !golpeSL) return;
-
-    await cerrarPosicionMercado(golpeTP ? 'TP' : 'SL', precio);
-}
-
-// Gestión de posición abierta en cada ciclo (1 min): salida por tiempo y stop EMA dinámico.
-// El WS de precio gestiona TP/SL fijos; esto cubre lo que el backtest hace al cierre de vela.
-async function gestionarPosicionAbierta(p) {
-    if (!posicionActiva) return;
-
-    // 1) Salida por tiempo máximo en operación
-    if (p.useMaxTradeTime && posicionActiva.entryTs) {
-        const minutos = (Date.now() - posicionActiva.entryTs) / 60000;
-        if (minutos >= (p.maxTradeMinutes ?? 15)) {
-            let precio = ultimoPrecioFuturos;
-            if (!precio) {
-                const b = await fetchKlinesBatch('1m', 2);
-                if (b.length) precio = parseFloat(b[b.length - 1][4]);
-            }
-            if (precio) { await cerrarPosicionMercado('Tiempo', precio); return; }
+    const aCerrar = [];
+    for (let i = posicionesActivas.length - 1; i >= 0; i--) {
+        const pos = posicionesActivas[i];
+        const golpeTP   = pos.lado === 'long' ? precio >= pos.tp : precio <= pos.tp;
+        const slPorTick = (pos.stopType ?? 'Porcentaje') === 'Porcentaje';
+        const golpeSL   = slPorTick && (pos.lado === 'long' ? precio <= pos.sl : precio >= pos.sl);
+        if (golpeTP || golpeSL) {
+            posicionesActivas.splice(i, 1); // remover síncronamente antes de awaits
+            aCerrar.push({ pos, razon: golpeTP ? 'TP' : 'SL' });
         }
     }
+    for (const { pos, razon } of aCerrar) await cerrarSubPosicion(pos, razon, precio);
+}
 
-    // 2) Stop EMA dinámico: cierra si la última vela 1m cerrada rompe la EMA actual
-    const stopType = p.stopType ?? 'Porcentaje';
-    if (stopType === 'Ruptura EMA 200' || stopType === 'Ruptura EMA 500') {
+// Cada ciclo (1 min): salida por tiempo máximo y stop EMA dinámico, por sub-posición.
+// Replica lo que el backtest hace al cierre de vela 1m.
+async function gestionarPosicionAbierta(p) {
+    if (posicionesActivas.length === 0) return;
+    const ahora = Date.now();
+
+    // Precio/EMA de referencia (cierre de la última vela 1m), calculados una sola vez.
+    const stopEMA = (p.stopType === 'Ruptura EMA 200' || p.stopType === 'Ruptura EMA 500');
+    let precioActual = ultimoPrecioFuturos, emaVal = null;
+    if (stopEMA) {
         const bars1m = await fetchKlinesBatch('1m', 600);
         if (bars1m.length >= 510) {
             const c1m = bars1m.map(b => parseFloat(b[4]));
-            const emaArr = calcEMA(c1m, stopType === 'Ruptura EMA 200' ? 200 : 500);
+            const emaArr = calcEMA(c1m, p.stopType === 'Ruptura EMA 200' ? 200 : 500);
             const last = bars1m.length - 1;
-            const close = c1m[last];
-            const se = emaArr[last];
-            if (se != null) {
-                const rompe = posicionActiva.lado === 'long' ? close < se : close > se;
-                if (rompe) { await cerrarPosicionMercado('EMA', close); return; }
-            }
+            emaVal = emaArr[last];
+            precioActual = c1m[last]; // decisión al cierre de vela, igual que el backtest
         }
     }
+    if (!precioActual) {
+        const b = await fetchKlinesBatch('1m', 2);
+        if (b.length) precioActual = parseFloat(b[b.length - 1][4]);
+    }
+    if (!precioActual) return;
+
+    const aCerrar = [];
+    for (let i = posicionesActivas.length - 1; i >= 0; i--) {
+        const pos = posicionesActivas[i];
+        let razon = null;
+        if (p.useMaxTradeTime && pos.entryTs && (ahora - pos.entryTs) / 60000 >= (p.maxTradeMinutes ?? 15)) {
+            razon = 'Tiempo';
+        } else if (stopEMA && emaVal != null) {
+            const rompe = pos.lado === 'long' ? precioActual < emaVal : precioActual > emaVal;
+            if (rompe) razon = 'EMA';
+        }
+        if (razon) {
+            posicionesActivas.splice(i, 1);
+            aCerrar.push({ pos, razon });
+        }
+    }
+    for (const { pos, razon } of aCerrar) await cerrarSubPosicion(pos, razon, precioActual);
+}
+
+// ── Sizing: balance real y nocional según la estrategia ───────────
+async function obtenerBalanceUSDT() {
+    const ts  = Date.now();
+    const q   = `timestamp=${ts}&recvWindow=10000`;
+    const url = `${BINANCE_BASE}/fapi/v2/balance?${q}&signature=${binanceSign(q)}`;
+    const r    = await fetch(url, { headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+    const body = await r.json();
+    if (!Array.isArray(body)) throw new Error(body && body.msg ? body.msg : 'balance no disponible');
+    const usdt = body.find(b => b.asset === 'USDT');
+    return {
+        wallet:    usdt ? parseFloat(usdt.balance) : 0,
+        disponible: usdt ? parseFloat(usdt.availableBalance) : 0,
+    };
+}
+
+// Devuelve el NOCIONAL (USDT) de la orden de entrada según el tamaño de posición de la
+// estrategia. En el backtest posicionValor es el MARGEN; la exposición = margen × palanca.
+async function calcularNocionalEntrada(p, cfg) {
+    const tipo   = p.posicionTipo  || 'porc_capital_actual';
+    const valor  = p.posicionValor ?? 100;
+    const palanca = (p.palancaActivo && p.palancaValor > 1) ? p.palancaValor : 1;
+
+    let bal;
+    try { bal = await obtenerBalanceUSDT(); }
+    catch (e) { return { ok: false, motivo: 'no se pudo leer balance: ' + e.message }; }
+
+    let margin;
+    if (tipo === 'monto_fijo')                margin = valor;
+    else if (tipo === 'porc_capital_inicial') margin = (parseFloat(cfg.capital_inicial_ref) || bal.wallet) * (valor / 100);
+    else                                      margin = bal.wallet * (valor / 100); // porc_capital_actual
+
+    if (!(margin > 0)) return { ok: false, motivo: 'monto calculado <= 0' };
+    // availableBalance ya descuenta el margen de las sub-posiciones abiertas → cubre el
+    // chequeo de no sobre-exponer el capital (equivalente a calcCapitalEntrada del backtest).
+    if (margin > bal.disponible) return { ok: false, motivo: `margen ${margin.toFixed(2)} > disponible ${bal.disponible.toFixed(2)}` };
+
+    return { ok: true, nocional: margin * palanca };
 }
 
 // WebSocket de precio futuros para monitoreo TP/SL en tiempo real
@@ -1203,27 +1271,11 @@ async function setBinanceLeverage(leverage) {
     return r.ok;
 }
 
-function buildBinanceUrls(signal, entry, tp, sl, positionUsdt) {
-    const side   = signal === 'long' ? 'BUY' : 'SELL';
-    const tpSide = signal === 'long' ? 'SELL' : 'BUY';
-    const qty    = Math.floor((positionUsdt / entry) * 1000) / 1000;
-    const ts     = Date.now();
-
-    const entryP = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&timestamp=${ts}`;
-    const tpP    = `symbol=BTCUSDT&side=${tpSide}&type=TAKE_PROFIT_MARKET&stopPrice=${tp.toFixed(1)}&closePosition=true&workingType=CONTRACT_PRICE&recvWindow=10000&timestamp=${ts + 1}`;
-    const slP    = `symbol=BTCUSDT&side=${tpSide}&type=STOP_MARKET&stopPrice=${sl.toFixed(1)}&closePosition=true&workingType=CONTRACT_PRICE&recvWindow=10000&timestamp=${ts + 2}`;
-
-    return {
-        entryUrl: `${BINANCE_BASE}/fapi/v1/order?${entryP}&signature=${binanceSign(entryP)}`,
-        tpUrl:    `${BINANCE_BASE}/fapi/v1/order?${tpP}&signature=${binanceSign(tpP)}`,
-        slUrl:    `${BINANCE_BASE}/fapi/v1/order?${slP}&signature=${binanceSign(slP)}`,
-        apiKey:   BINANCE_API_KEY,
-        qty, side, entry, tp, sl,
-    };
-}
-
+let autoTradingCorriendo = false;
 async function ejecutarAutoTrading() {
     if (!N8N_WEBHOOK_URL) return;
+    if (autoTradingCorriendo) return; // evita solapamiento de ciclos (entradas duplicadas)
+    autoTradingCorriendo = true;
     try {
         const cfgRes = await pool.query('SELECT * FROM auto_trading_config WHERE id = 1');
         const cfg = cfgRes.rows[0];
@@ -1237,12 +1289,14 @@ async function ejecutarAutoTrading() {
         if (!stratRes.rows.length) return;
         const p = stratRes.rows[0].params;
 
-        // Si ya hay posición abierta: gestionar salidas por tiempo / EMA dinámico y salir.
-        // El WS de precio cubre TP/SL fijos en paralelo. No se evalúan entradas nuevas.
-        if (posicionActiva) {
+        // Gestionar salidas de las sub-posiciones abiertas (tiempo / EMA dinámico).
+        // El WS de precio cubre TP/SL fijos en paralelo.
+        if (posicionesActivas.length > 0) {
             await gestionarPosicionAbierta(p);
-            return;
         }
+
+        // ¿Se permite abrir entrada? Sin posiciones, o con pyramiding habilitado.
+        if (posicionesActivas.length > 0 && !p.allowMultipleEntries) return;
 
         const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
             // Suficientes velas para que EMA/MACD/RSI/ADX (incluso de período alto en HTF)
@@ -1269,8 +1323,9 @@ async function ejecutarAutoTrading() {
         const resultado = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p);
         const nuevaSenal = resultado.signal;
 
-        // Solo disparar si la señal cambia (evita órdenes duplicadas)
-        if (nuevaSenal === cfg.ultima_senal) return;
+        // Dedup: en modo de una sola posición evitamos reenviar la misma señal. En
+        // pyramiding permitimos apilar mientras se cumplan condiciones (lo limita el capital).
+        if (!p.allowMultipleEntries && nuevaSenal === cfg.ultima_senal) return;
 
         await pool.query(
             `UPDATE auto_trading_config SET ultima_senal = $1, ultima_senal_ts = $2 WHERE id = 1`,
@@ -1278,30 +1333,43 @@ async function ejecutarAutoTrading() {
         );
 
         if (!nuevaSenal) {
-            console.log(`[AutoTrading] Señal cerrada — sin posición nueva`);
+            if (posicionesActivas.length === 0) console.log(`[AutoTrading] Sin señal`);
             return;
         }
 
-        const positionUsdt = parseFloat(cfg.position_usdt) || AUTO_POSITION_USDT;
-        const urls = buildBinanceUrls(nuevaSenal, resultado.entry, resultado.tp, resultado.sl, positionUsdt);
+        // Binance netea posiciones: si ya hay sub-posiciones, solo se apila del MISMO lado.
+        if (posicionesActivas.length > 0 && posicionesActivas[0].lado !== nuevaSenal) {
+            console.log(`[AutoTrading] Señal ${nuevaSenal} opuesta a posiciones abiertas (${posicionesActivas[0].lado}) — omitida`);
+            return;
+        }
 
-        console.log(`[AutoTrading] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${urls.qty} BTC`);
+        // Tamaño de posición según la estrategia (margen × palanca → nocional de la orden)
+        const sizing = await calcularNocionalEntrada(p, cfg);
+        if (!sizing.ok) { console.log(`[AutoTrading] Entrada omitida — ${sizing.motivo}`); return; }
+        const qty = Math.floor((sizing.nocional / resultado.entry) * 1000) / 1000;
+        if (qty < 0.001) { console.log(`[AutoTrading] qty ${qty} < mínimo 0.001 BTC — omitida`); return; }
+
+        console.log(`[AutoTrading] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${qty} BTC`);
 
         // Setear apalancamiento real antes de entrar si la estrategia lo usa
         if (p.palancaActivo && p.palancaValor > 1) {
             await setBinanceLeverage(p.palancaValor);
         }
 
-        const ordenEntrada = await ejecutarOrdenBinance(urls.entryUrl, urls.apiKey, 'ENTRADA');
+        const ordenEntrada = await ejecutarOrdenBinance(buildEntryUrl(nuevaSenal, qty), BINANCE_API_KEY, 'ENTRADA');
         if (ordenEntrada.ok) {
-            posicionActiva = { lado: nuevaSenal, qty: urls.qty, entry: resultado.entry, tp: resultado.tp, sl: resultado.sl, entryTs: Date.now(), stopType: p.stopType ?? 'Porcentaje' };
-            await guardarPosicionBD(posicionActiva);
-            await pool.query(
-                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, estado, usuario_id)
-                 VALUES ($1, $2, $3, $4, $5, 'abierta', $6)`,
-                [Date.now(), nuevaSenal, resultado.entry, resultado.tp, resultado.sl, cfg.usuario_id || null]
+            const stopType = p.stopType ?? 'Porcentaje';
+            const ins = await pool.query(
+                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8) RETURNING id`,
+                [Date.now(), nuevaSenal, resultado.entry, resultado.tp, resultado.sl, qty, stopType, cfg.usuario_id || null]
             );
-            console.log(`[AutoTrading] Posición guardada — TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)}`);
+            posicionesActivas.push({
+                id: ins.rows[0].id, lado: nuevaSenal, qty, entry: resultado.entry,
+                tp: resultado.tp, sl: resultado.sl, entryTs: Date.now(), stopType,
+            });
+            await sincronizarPosicionBD();
+            console.log(`[AutoTrading] Sub-posición #${ins.rows[0].id} abierta — abiertas: ${posicionesActivas.length}`);
         }
 
         // Notificar a n8n (opcional, solo logging)
@@ -1312,7 +1380,7 @@ async function ejecutarAutoTrading() {
                 body: JSON.stringify({
                     signal: nuevaSenal, entry: resultado.entry,
                     tp: resultado.tp, sl: resultado.sl,
-                    qty: urls.qty, estrategia: cfg.estrategia_nombre,
+                    qty, estrategia: cfg.estrategia_nombre,
                     ordenOk: ordenEntrada.ok,
                 }),
             }).catch(() => {});
@@ -1320,51 +1388,53 @@ async function ejecutarAutoTrading() {
 
     } catch (e) {
         console.error('[AutoTrading] Error en loop:', e.message);
+    } finally {
+        autoTradingCorriendo = false;
     }
 }
 
 // Arrancar loop después de que la BD esté lista
 setTimeout(async () => {
-    // Recuperar posición activa si el servidor se reinició con una posición abierta
+    // Recuperar TODAS las sub-posiciones abiertas si el servidor se reinició con posición.
     try {
-        const r = await pool.query(
-            'SELECT posicion_lado, posicion_qty, posicion_entry, posicion_tp, posicion_sl FROM auto_trading_config WHERE id = 1'
+        // stopType de respaldo desde la estrategia configurada (para filas legacy sin stop_type)
+        let stopTypeCfg = 'Porcentaje';
+        try {
+            const cfgR = await pool.query('SELECT estrategia_nombre, usuario_id FROM auto_trading_config WHERE id = 1');
+            const c = cfgR.rows[0];
+            if (c && c.estrategia_nombre) {
+                const sQ = c.usuario_id
+                    ? 'SELECT params FROM estrategias_guardadas WHERE nombre = $1 AND usuario_id = $2 LIMIT 1'
+                    : 'SELECT params FROM estrategias_guardadas WHERE nombre = $1 LIMIT 1';
+                const sP = c.usuario_id ? [c.estrategia_nombre, c.usuario_id] : [c.estrategia_nombre];
+                const sR = await pool.query(sQ, sP);
+                if (sR.rows.length && sR.rows[0].params) stopTypeCfg = sR.rows[0].params.stopType || 'Porcentaje';
+            }
+        } catch (_) {}
+
+        const openRows = await pool.query(
+            `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type
+             FROM auto_trading_entradas WHERE estado = 'abierta' ORDER BY ts ASC`
         );
-        const pos = r.rows[0];
-        if (pos && pos.posicion_lado) {
-            posicionActiva = {
-                lado:  pos.posicion_lado,
-                qty:   parseFloat(pos.posicion_qty),
-                entry: parseFloat(pos.posicion_entry),
-                tp:    parseFloat(pos.posicion_tp),
-                sl:    parseFloat(pos.posicion_sl),
-                stopType: 'Porcentaje',
-            };
-            // Recuperar entryTs (para salida por tiempo) desde la entrada abierta
-            try {
-                const eRes = await pool.query(
-                    `SELECT ts FROM auto_trading_entradas WHERE estado = 'abierta' AND lado = $1 ORDER BY ts DESC LIMIT 1`,
-                    [pos.posicion_lado]
-                );
-                if (eRes.rows.length) posicionActiva.entryTs = parseInt(eRes.rows[0].ts);
-            } catch (_) {}
-            // Recuperar stopType (para stop EMA dinámico) desde la estrategia configurada
-            try {
-                const cfgR = await pool.query('SELECT estrategia_nombre, usuario_id FROM auto_trading_config WHERE id = 1');
-                const c = cfgR.rows[0];
-                if (c && c.estrategia_nombre) {
-                    const sQ = c.usuario_id
-                        ? 'SELECT params FROM estrategias_guardadas WHERE nombre = $1 AND usuario_id = $2 LIMIT 1'
-                        : 'SELECT params FROM estrategias_guardadas WHERE nombre = $1 LIMIT 1';
-                    const sP = c.usuario_id ? [c.estrategia_nombre, c.usuario_id] : [c.estrategia_nombre];
-                    const sR = await pool.query(sQ, sP);
-                    if (sR.rows.length && sR.rows[0].params) posicionActiva.stopType = sR.rows[0].params.stopType || 'Porcentaje';
-                }
-            } catch (_) {}
-            console.log(`[AutoTrading] Posición activa recuperada: ${posicionActiva.lado.toUpperCase()} @ $${posicionActiva.entry} | TP $${posicionActiva.tp?.toFixed(0)} | SL $${posicionActiva.sl?.toFixed(0)} | stop ${posicionActiva.stopType}`);
+        posicionesActivas = [];
+        for (const row of openRows.rows) {
+            const qty = parseFloat(row.qty);
+            if (!(qty > 0)) {
+                console.warn(`[AutoTrading] Sub-pos #${row.id} sin qty válida — no se gestionará automáticamente. Revisar manualmente.`);
+                continue;
+            }
+            posicionesActivas.push({
+                id: row.id, lado: row.lado, qty,
+                entry: parseFloat(row.precio_entrada), tp: parseFloat(row.precio_tp), sl: parseFloat(row.precio_sl),
+                entryTs: parseInt(row.ts), stopType: row.stop_type || stopTypeCfg,
+            });
+        }
+        await sincronizarPosicionBD();
+        if (posicionesActivas.length) {
+            console.log(`[AutoTrading] ${posicionesActivas.length} sub-posición(es) recuperada(s): ${posicionesActivas.map(x => `#${x.id} ${x.lado} ${x.qty}`).join(', ')}`);
         }
     } catch (e) {
-        console.error('[AutoTrading] Error cargando posición desde BD:', e.message);
+        console.error('[AutoTrading] Error cargando posiciones desde BD:', e.message);
     }
 
     iniciarMonitorPrecio();
@@ -1401,6 +1471,17 @@ app.put('/api/autotrading', autenticar, soloAdmin, async (req, res) => {
         if (estrategia_nombre !== undefined || habilitado === true) {
             await pool.query(`UPDATE auto_trading_config SET ultima_senal = NULL WHERE id = 1`);
         }
+        // Snapshot del capital inicial al ACTIVAR el autobot (base para "% capital inicial").
+        // Se refresca cada vez que se enciende, para que la referencia sea el balance vigente.
+        if (habilitado === true) {
+            try {
+                const bal = await obtenerBalanceUSDT();
+                await pool.query(`UPDATE auto_trading_config SET capital_inicial_ref = $1 WHERE id = 1`, [bal.wallet]);
+                console.log(`[AutoTrading] Capital inicial de referencia: ${bal.wallet} USDT`);
+            } catch (e) {
+                console.error('[AutoTrading] No se pudo snapshotear capital inicial:', e.message);
+            }
+        }
         res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1436,30 +1517,30 @@ app.post('/api/autotrading/test', autenticar, soloAdmin, async (req, res) => {
     const sl           = parseFloat(req.body.sl)            || 94050;
     const positionUsdt = parseFloat(req.body.positionUsdt)  || 100;
     try {
-        const urls = buildBinanceUrls(signal, entry, tp, sl, positionUsdt);
-
-        const resEntrada = await ejecutarOrdenBinance(urls.entryUrl, urls.apiKey, 'ENTRADA');
+        const qty = Math.floor((positionUsdt / entry) * 1000) / 1000;
+        const resEntrada = await ejecutarOrdenBinance(buildEntryUrl(signal, qty), BINANCE_API_KEY, 'ENTRADA-TEST');
         if (resEntrada.ok) {
-            posicionActiva = { lado: signal, qty: urls.qty, entry, tp, sl, entryTs: Date.now(), stopType: 'Porcentaje' };
-            await guardarPosicionBD(posicionActiva);
+            const ins = await pool.query(
+                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'Porcentaje', 'abierta', $7) RETURNING id`,
+                [Date.now(), signal, entry, tp, sl, qty, req.usuario.id || null]
+            );
+            posicionesActivas.push({ id: ins.rows[0].id, lado: signal, qty, entry, tp, sl, entryTs: Date.now(), stopType: 'Porcentaje' });
+            await sincronizarPosicionBD();
         }
-        const resTp = { ok: false, body: { msg: 'gestionado por monitor WebSocket' } };
-        const resSl = { ok: false, body: { msg: 'gestionado por monitor WebSocket' } };
 
         // Notificar n8n si está configurado
         if (N8N_WEBHOOK_URL) {
             fetch(N8N_WEBHOOK_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ signal, entry, tp, sl, qty: urls.qty, estrategia: 'TEST', ordenOk: resEntrada.ok }),
+                body: JSON.stringify({ signal, entry, tp, sl, qty, estrategia: 'TEST', ordenOk: resEntrada.ok }),
             }).catch(() => {});
         }
 
         res.json({
             entrada: { ok: resEntrada.ok, orderId: resEntrada.body?.orderId, msg: resEntrada.body?.msg },
-            tp:      { ok: resTp.ok,      orderId: resTp.body?.orderId,      msg: resTp.body?.msg },
-            sl:      { ok: resSl.ok,      orderId: resSl.body?.orderId,      msg: resSl.body?.msg },
-            qty: urls.qty, signal, entry, tp, sl,
+            qty, signal, entry, tp, sl,
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
