@@ -951,8 +951,13 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
         }
         const whaleDelta = wBuys - wSells;
 
-        // ENTRADAS — permitir si no hay posición abierta, o si múltiples entradas está habilitado
-        if (posiciones.length === 0 || p.allowMultipleEntries) {
+        // ENTRADAS — permitir si no hay posición abierta, o si múltiples entradas está habilitado.
+        // Filtro opcional: si ya hay sub-posiciones abiertas con PnL no realizado negativo,
+        // bloquear nuevas entradas múltiples (filtra rachas perdedoras al precio actual).
+        const hayPosicionEnPerdida = p.blockMultipleIfLosing && posiciones.some(pos =>
+            (pos.side === 1 ? close - pos.entry : pos.entry - close) < 0
+        );
+        if ((posiciones.length === 0 || p.allowMultipleEntries) && !hayPosicionEnPerdida) {
             const barHour = new Date(ts).getUTCHours();
             const argDay = new Date(ts - 3 * 3600000).getUTCDay(); // 0=Dom, 6=Sáb en horario Argentina
             const barsSinceClose = lastClosedBarIdx !== null ? i - lastClosedBarIdx : 999999;
@@ -1381,6 +1386,19 @@ async function ejecutarAutoTrading() {
 
         const resultado = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p);
         const nuevaSenal = resultado.signal;
+
+        // Filtro opcional: no apilar nuevas entradas mientras alguna sub-posición abierta
+        // esté en pérdida (PnL no realizado < 0). Filtra rachas perdedoras (igual que el backtest).
+        if (p.allowMultipleEntries && p.blockMultipleIfLosing && posicionesActivas.length > 0) {
+            const precioRef = resultado.entry || ultimoPrecioFuturos;
+            const enPerdida = precioRef && posicionesActivas.some(pos =>
+                (pos.lado === 'long' ? precioRef - pos.entry : pos.entry - precioRef) < 0
+            );
+            if (enPerdida) {
+                console.log(`[AutoTrading] Entrada múltiple omitida — posiciones abiertas en pérdida @ $${precioRef.toFixed(1)}`);
+                return;
+            }
+        }
 
         // Dedup: en modo de una sola posición evitamos reenviar la misma señal. En
         // pyramiding permitimos apilar mientras se cumplan condiciones (lo limita el capital).
@@ -1918,6 +1936,7 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             useADXFilter:        req.body.useADXFilter === true,
             adxThreshold:        parseInt(req.body.adxThreshold) || 25,
             allowMultipleEntries: req.body.allowMultipleEntries === true,
+            blockMultipleIfLosing: req.body.blockMultipleIfLosing === true,
             posicionTipo:         req.body.posicionTipo || 'porc_capital_actual',
             posicionValor:        parseFloat(req.body.posicionValor) || 100,
             palancaActivo:        req.body.palancaActivo === true,

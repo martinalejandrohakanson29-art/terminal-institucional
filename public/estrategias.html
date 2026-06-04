@@ -262,11 +262,21 @@
             </div>
             <div class="form-row">
                 <label>Múltiples entradas</label>
-                <input type="checkbox" id="p-multiple-entries" class="form-check">
+                <input type="checkbox" id="p-multiple-entries" class="form-check" onchange="toggleMultipleEntries()">
             </div>
             <div style="font-size:10px;color:#94a3b8;margin-top:2px;line-height:1.4;">
                 Permite abrir nueva entrada aunque ya haya una posición abierta.
                 En vivo solo apila del mismo lado (el exchange netea posiciones).
+            </div>
+            <div id="p-multiple-block-losing-row" style="display:none;">
+                <div class="form-row">
+                    <label>No apilar en pérdida</label>
+                    <input type="checkbox" id="p-multiple-block-losing" class="form-check">
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:2px;line-height:1.4;">
+                    Si hay posiciones abiertas con PnL negativo, bloquea nuevas entradas múltiples
+                    (filtra rachas perdedoras evitando apilar mientras estamos en pérdida).
+                </div>
             </div>
         </div>
 
@@ -531,6 +541,13 @@
         document.getElementById('row-vwap-pullback-perc').style.display = on ? 'flex' : 'none';
     }
 
+    function toggleMultipleEntries() {
+        // El filtro "no apilar en pérdida" solo aplica si las entradas múltiples están activas.
+        const on = document.getElementById('p-multiple-entries').checked;
+        document.getElementById('p-multiple-block-losing-row').style.display = on ? 'block' : 'none';
+        if (!on) document.getElementById('p-multiple-block-losing').checked = false;
+    }
+
     function togglePalanca() {
         const on = document.getElementById('p-palanca-activo').checked;
         document.getElementById('row-palanca-valor').style.display = on ? 'flex' : 'none';
@@ -605,6 +622,7 @@
             vwapUsePullback:     document.getElementById('p-vwap-pullback').checked,
             vwapPullbackPerc:    parseFloat(document.getElementById('p-vwap-pullback-perc').value) || 0.30,
             allowMultipleEntries: document.getElementById('p-multiple-entries').checked,
+            blockMultipleIfLosing: document.getElementById('p-multiple-block-losing').checked,
             posicionTipo:         document.getElementById('p-pos-tipo').value,
             posicionValor:        parseFloat(document.getElementById('p-pos-valor').value) || 100,
             palancaActivo:        document.getElementById('p-palanca-activo').checked,
@@ -790,7 +808,8 @@
                   params.vwapUsePullback  ? `Pullback ≤${params.vwapPullbackPerc}%` : '',
               ].filter(Boolean).join(' · ') },
             { label: 'Fin de semana',  activo: params.operaFinDeSemana,     desc: 'sáb/dom ARG' },
-            { label: 'Múlt. entradas', activo: params.allowMultipleEntries, desc: 'pyramiding' },
+            { label: 'Múlt. entradas', activo: params.allowMultipleEntries,
+              desc: ['pyramiding', params.blockMultipleIfLosing ? 'no en pérdida' : ''].filter(Boolean).join(' · ') },
             { label: 'Tamaño pos.',
               activo: true,
               desc: params.posicionTipo === 'monto_fijo'
@@ -991,6 +1010,8 @@
         document.getElementById('p-vwap-pullback-perc').value    = p.vwapPullbackPerc ?? 0.30;
         toggleVwapPullback();
         document.getElementById('p-multiple-entries').checked    = !!p.allowMultipleEntries;
+        document.getElementById('p-multiple-block-losing').checked = !!p.blockMultipleIfLosing;
+        toggleMultipleEntries();
         document.getElementById('p-pos-tipo').value              = p.posicionTipo  || 'porc_capital_actual';
         document.getElementById('p-pos-valor').value             = p.posicionValor ?? 100;
         document.getElementById('p-palanca-activo').checked      = !!p.palancaActivo;
