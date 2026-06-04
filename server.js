@@ -776,6 +776,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     const rsiTf       = p.rsiTf       || '15m';
     const rsiLongMin  = p.rsiLongMin  ?? 60;
     const rsiShortMax = p.rsiShortMax ?? 40;
+    const useRsiFilter = p.useRsiFilter !== false;   // default ON (compat. estrategias previas)
     let rsiDirect = null, rsiByTs = null, tsRsi = null;
     if (rsiTf === '1m') {
         rsiDirect = calcRSI(c1m, rsiPeriod);
@@ -795,6 +796,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     const macdSlow   = p.macdSlow   || 26;
     const macdSignal = p.macdSignal || 9;
     const macdTf     = p.macdTf     || '5m';
+    const useMacdFilter = p.useMacdFilter !== false;  // default ON (compat. estrategias previas)
     let macdDirect = null, macdByTs = null, tsMACD = null;
     if (macdTf === '1m') {
         const { macd: mArr, signal: sArr } = calcMACDArr(c1m, macdFast, macdSlow, macdSignal);
@@ -1013,7 +1015,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                     (!p.vwapUsePullback  || Math.abs(close - vwapVal_bt) / close * 100 <= (p.vwapPullbackPerc ?? 0.3))
                 );
 
-                if (p.enableLongs && above && alignLong && rsiVal >= rsiLongMin && macd5 > sig5 && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong) {
+                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1021,7 +1023,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                         const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
                         posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
                     }
-                } else if (p.enableShorts && below && alignShort && rsiVal <= rsiShortMax && macd5 < sig5 && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort) {
+                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1691,6 +1693,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const rsiTf_sn       = p.rsiTf       || '15m';
     const rsiLongMin_sn  = p.rsiLongMin  ?? 60;
     const rsiShortMax_sn = p.rsiShortMax ?? 40;
+    const useRsiFilter_sn = p.useRsiFilter !== false;   // default ON (compat. estrategias previas)
     let rsiSnByTs = null, rsiSnTs = null, rsiSnDirect = null;
     if (rsiTf_sn === '1m') {
         rsiSnDirect = calcRSI(c1m, rsiPeriod_sn);
@@ -1732,6 +1735,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const macdSlow_sn   = p.macdSlow   || 26;
     const macdSignal_sn = p.macdSignal || 9;
     const macdTf_sn     = p.macdTf     || '5m';
+    const useMacdFilter_sn = p.useMacdFilter !== false;  // default ON (compat. estrategias previas)
     let macdSnDirect = null, macdSnByTs = null, macdSnTs = null;
     if (macdTf_sn === '1m') {
         const { macd: mArr, signal: sArr } = calcMACDArr(c1m, macdFast_sn, macdSlow_sn, macdSignal_sn);
@@ -1821,9 +1825,9 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     );
 
     let signal = null;
-    if (p.enableLongs !== false && horarioOk && above && alignLong && rsiVal >= rsiLongMin_sn && macd5 > sig5 && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn)
+    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn)
         signal = 'long';
-    else if (p.enableShorts !== false && horarioOk && below && alignShort && rsiVal <= rsiShortMax_sn && macd5 < sig5 && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn)
+    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn)
         signal = 'short';
 
     const tpPerc = p.tpPerc ?? 0.5;
@@ -1941,10 +1945,12 @@ app.post('/api/backtest', autenticar, async (req, res) => {
                                        tf:     ['1m','5m','15m'].includes(e.tf) ? e.tf : '1m'
                                    }))
                                    : [{ period:50,tf:'1m' },{ period:100,tf:'1m' },{ period:200,tf:'1m' },{ period:500,tf:'1m' }],
+            useRsiFilter:      req.body.useRsiFilter !== false,
             rsiTf:             ['1m','5m','15m'].includes(req.body.rsiTf) ? req.body.rsiTf : '15m',
             rsiPeriod:         parseInt(req.body.rsiPeriod) || 14,
             rsiLongMin:        req.body.rsiLongMin  != null ? parseFloat(req.body.rsiLongMin)  : 60,
             rsiShortMax:       req.body.rsiShortMax != null ? parseFloat(req.body.rsiShortMax) : 40,
+            useMacdFilter:     req.body.useMacdFilter !== false,
             macdTf:            ['1m','5m','15m'].includes(req.body.macdTf) ? req.body.macdTf : '5m',
             macdFast:          parseInt(req.body.macdFast)   || 12,
             macdSlow:          parseInt(req.body.macdSlow)   || 26,
@@ -1962,6 +1968,12 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             whaleMinBTC:       parseFloat(req.body.whaleMinBTC) || 5,
             useADXFilter:        req.body.useADXFilter === true,
             adxThreshold:        parseInt(req.body.adxThreshold) || 25,
+            useVwapFilter:       req.body.useVwapFilter === true,
+            vwapTf:              ['1m','5m','15m'].includes(req.body.vwapTf) ? req.body.vwapTf : '5m',
+            vwapSession:         ['daily','weekly','monthly'].includes(req.body.vwapSession) ? req.body.vwapSession : 'daily',
+            vwapUseDirection:    req.body.vwapUseDirection === true,
+            vwapUsePullback:     req.body.vwapUsePullback === true,
+            vwapPullbackPerc:    parseFloat(req.body.vwapPullbackPerc) || 0.30,
             allowMultipleEntries: req.body.allowMultipleEntries === true,
             blockMultipleIfLosing: req.body.blockMultipleIfLosing === true,
             posicionTipo:         req.body.posicionTipo || 'porc_capital_actual',

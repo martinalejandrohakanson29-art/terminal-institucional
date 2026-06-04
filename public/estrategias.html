@@ -340,6 +340,10 @@
             <h3>Filtros</h3>
             <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;">RSI</div>
             <div class="form-row">
+                <label>Activar filtro</label>
+                <input type="checkbox" id="p-rsi" class="form-check" checked>
+            </div>
+            <div class="form-row">
                 <label>Temporalidad</label>
                 <select id="p-rsi-tf" class="form-select">
                     <option value="1m">1m</option>
@@ -360,6 +364,10 @@
                 <input type="number" id="p-rsi-short" class="form-input" value="40" min="1" max="99" step="1">
             </div>
             <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">MACD</div>
+            <div class="form-row">
+                <label>Activar filtro</label>
+                <input type="checkbox" id="p-macd" class="form-check" checked>
+            </div>
             <div class="form-row">
                 <label>Temporalidad</label>
                 <select id="p-macd-tf" class="form-select">
@@ -592,10 +600,12 @@
             startHour:         numOrDefault('p-start-hour', 9),
             endHour:           numOrDefault('p-end-hour', 20),
             operaFinDeSemana:  document.getElementById('p-fds').checked,
+            useRsiFilter:      document.getElementById('p-rsi').checked,
             rsiTf:             document.getElementById('p-rsi-tf').value,
             rsiPeriod:         parseInt(document.getElementById('p-rsi-period').value) || 14,
             rsiLongMin:        numOrDefault('p-rsi-long', 60),
             rsiShortMax:       numOrDefault('p-rsi-short', 40),
+            useMacdFilter:     document.getElementById('p-macd').checked,
             macdTf:            document.getElementById('p-macd-tf').value,
             macdFast:          parseInt(document.getElementById('p-macd-fast').value)   || 12,
             macdSlow:          parseInt(document.getElementById('p-macd-slow').value)   || 26,
@@ -793,8 +803,8 @@
 
         // ── Filtros activos ──
         const filtros = [
-            { label: `RSI ${params.rsiTf||'15m'}`, activo: true, desc: `≥${params.rsiLongMin??60} L / ≤${params.rsiShortMax??40} S · per.${params.rsiPeriod||14}` },
-            { label: `MACD ${params.macdTf||'5m'}`, activo: true, desc: `${params.macdFast||12}/${params.macdSlow||26}/${params.macdSignal||9}` },
+            { label: `RSI ${params.rsiTf||'15m'}`, activo: params.useRsiFilter !== false, desc: `≥${params.rsiLongMin??60} L / ≤${params.rsiShortMax??40} S · per.${params.rsiPeriod||14}` },
+            { label: `MACD ${params.macdTf||'5m'}`, activo: params.useMacdFilter !== false, desc: `${params.macdFast||12}/${params.macdSlow||26}/${params.macdSignal||9}` },
             { label: 'Pullback EMAs', activo: params.usePullbackFilter,  desc: `≤${params.pullbackPerc}% · ${(params.pullbackEMAs||[]).map(e=>`EMA${e.period} ${e.tf}`).join(', ')}` },
             { label: 'Alineamiento',  activo: params.useEmaAlignment,    desc: 'EMA ordenadas' },
             { label: 'Cooldown',      activo: params.useCooldown,         desc: `${params.cooldownMinutes}m` },
@@ -977,10 +987,12 @@
         document.getElementById('p-start-hour').value    = p.startHour ?? 9;
         document.getElementById('p-end-hour').value      = p.endHour ?? 20;
         document.getElementById('p-fds').checked         = !!p.operaFinDeSemana;
+        document.getElementById('p-rsi').checked          = p.useRsiFilter !== false;
         document.getElementById('p-rsi-tf').value         = p.rsiTf       || '15m';
         document.getElementById('p-rsi-period').value    = p.rsiPeriod   ?? 14;
         document.getElementById('p-rsi-long').value      = p.rsiLongMin  ?? 60;
         document.getElementById('p-rsi-short').value     = p.rsiShortMax ?? 40;
+        document.getElementById('p-macd').checked         = p.useMacdFilter !== false;
         document.getElementById('p-macd-tf').value       = p.macdTf      || '5m';
         document.getElementById('p-macd-fast').value     = p.macdFast    ?? 12;
         document.getElementById('p-macd-slow').value     = p.macdSlow    ?? 26;
