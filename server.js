@@ -676,8 +676,11 @@ async function fetchKlinesBatch(interval, totalBars) {
     const n = Math.ceil(totalBars / perReq);
     const now = Date.now();
 
+    // Cuando se piden pocas velas (p.ej. el sync incremental: ~3 velas), no tiene
+    // sentido pedir 1000 a Binance y descartar 997 por dedup. Acotamos el limit.
+    const lim = Math.min(perReq, totalBars);
     const urls = Array.from({ length: n }, (_, i) =>
-        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${perReq}${i > 0 ? `&endTime=${now - i * perReq * dur}` : ''}`
+        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${lim}${i > 0 ? `&endTime=${now - i * perReq * dur}` : ''}`
     );
 
     // No silenciar fallos: un request fallido (p.ej. rate-limit) dejaría huecos de
@@ -726,6 +729,7 @@ let sincronizandoKlines = false;
 
 async function upsertKlines1m(velas) {
     const CHUNK = 500; // 500 filas × 8 params = 4000, bajo el límite de 65535 de PG
+    let insertadas = 0;
     for (let i = 0; i < velas.length; i += CHUNK) {
         const slice = velas.slice(i, i + CHUNK);
         const placeholders = [];
@@ -738,13 +742,15 @@ async function upsertKlines1m(velas) {
                 parseFloat(k[4]), parseFloat(k[5]), Number(k[6]), parseFloat(k[9])
             );
         });
-        await pool.query(
+        const r = await pool.query(
             `INSERT INTO klines_1m (open_time, open, high, low, close, volume, close_time, taker_buy_base)
              VALUES ${placeholders.join(',')}
              ON CONFLICT (open_time) DO NOTHING`,
             params
         );
+        insertadas += r.rowCount;
     }
+    return insertadas;
 }
 
 // Mantiene la cache fresca. Si la tabla está vacía hace el backfill inicial de
@@ -767,9 +773,11 @@ async function sincronizarKlines() {
         }
         const velas = await fetchKlinesBatch('1m', faltan);
         if (velas.length) {
-            await upsertKlines1m(velas);
-            const ultIso = new Date(Number(velas[velas.length - 1][0])).toISOString().slice(0, 16).replace('T', ' ');
-            console.log(`[Klines] Sincronizadas ${velas.length} velas 1m (última: ${ultIso} UTC).`);
+            const nuevas = await upsertKlines1m(velas);
+            if (nuevas > 0) {
+                const ultIso = new Date(Number(velas[velas.length - 1][0])).toISOString().slice(0, 16).replace('T', ' ');
+                console.log(`[Klines] +${nuevas} velas 1m nuevas (última: ${ultIso} UTC).`);
+            }
         }
         // Descartamos velas más viejas que la ventana de cache para no crecer sin límite.
         await pool.query('DELETE FROM klines_1m WHERE open_time < $1', [now - DIAS_CACHE_KLINES * 86400000]);
