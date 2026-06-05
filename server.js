@@ -14,6 +14,63 @@ app.use(cookieParser());
 
 const JWT_SECRET = process.env.JWT_SECRET || 'cambiar_este_secreto_en_produccion';
 
+// ── Cifrado de secretos (claves API Binance de cada usuario) ──────────
+// Las claves secretas de Binance NO se guardan en texto plano: se cifran con
+// AES-256-GCM usando ENCRYPTION_KEY del entorno y se descifran solo en memoria
+// al momento de firmar una request. Sin ENCRYPTION_KEY, no se permite guardarlas.
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY
+    ? crypto.createHash('sha256').update(process.env.ENCRYPTION_KEY).digest() // 32 bytes
+    : null;
+
+function cifrarSecreto(textoPlano) {
+    if (!ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY no configurada en el entorno — no se pueden guardar claves');
+    const iv     = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
+    const ct     = Buffer.concat([cipher.update(textoPlano, 'utf8'), cipher.final()]);
+    const tag    = cipher.getAuthTag();
+    // formato: iv:tag:ciphertext (todo base64)
+    return `${iv.toString('base64')}:${tag.toString('base64')}:${ct.toString('base64')}`;
+}
+
+function descifrarSecreto(blob) {
+    if (!ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY no configurada en el entorno');
+    const [ivB64, tagB64, ctB64] = String(blob).split(':');
+    const iv       = Buffer.from(ivB64,  'base64');
+    const tag      = Buffer.from(tagB64, 'base64');
+    const ct       = Buffer.from(ctB64,  'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+}
+
+// Enmascara una api_key para mostrarla sin revelarla entera (ej. "XSLE…R5Hkm").
+function enmascararClave(clave) {
+    if (!clave) return '';
+    if (clave.length <= 10) return '••••';
+    return `${clave.slice(0, 4)}…${clave.slice(-4)}`;
+}
+
+// ── Helpers Binance por-cuenta (multi-cuenta) ─────────────────────────
+// A diferencia de binanceSign (que usa el secret global del ENV), estos reciben
+// el contexto de la cuenta { apiKey, secret, base } para operar la cuenta de cada usuario.
+function firmarParams(params, secret) {
+    return crypto.createHmac('sha256', secret).update(params).digest('hex');
+}
+
+async function balanceDeCuenta(ctx) {
+    const ts  = Date.now();
+    const q   = `timestamp=${ts}&recvWindow=10000`;
+    const url = `${ctx.base}/fapi/v2/balance?${q}&signature=${firmarParams(q, ctx.secret)}`;
+    const r    = await fetch(url, { headers: { 'X-MBX-APIKEY': ctx.apiKey } });
+    const body = await r.json();
+    if (!Array.isArray(body)) throw new Error(body && body.msg ? body.msg : 'no se pudo leer balance');
+    const usdt = body.find(b => b.asset === 'USDT');
+    return {
+        wallet:     usdt ? parseFloat(usdt.balance) : 0,
+        disponible: usdt ? parseFloat(usdt.availableBalance) : 0,
+    };
+}
+
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_URL?.includes('sslmode=disable') ? false : { rejectUnauthorized: false }
@@ -175,6 +232,34 @@ async function inicializarBaseDeDatos() {
         `);
         // Migración: referencia de capital inicial para sizing "% capital inicial" en vivo
         await pool.query(`ALTER TABLE auto_trading_config ADD COLUMN IF NOT EXISTS capital_inicial_ref NUMERIC`);
+
+        // Auto-trading multi-cuenta: una cuenta Binance por usuario (1:1). Reemplaza la
+        // config global única (auto_trading_config id=1). El secret va cifrado (AES-256-GCM).
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS cuentas_trading (
+                usuario_id          INTEGER PRIMARY KEY REFERENCES usuarios(id) ON DELETE CASCADE,
+                api_key             TEXT,
+                api_secret_cifrado  TEXT,
+                base_url            TEXT DEFAULT 'https://testnet.binancefuture.com',
+                margin_type         VARCHAR(10) DEFAULT 'CROSSED',
+                estrategia_nombre   VARCHAR(100),
+                position_usdt       NUMERIC DEFAULT 100,
+                habilitado          BOOLEAN DEFAULT false,
+                posicion_lado       VARCHAR(10),
+                posicion_qty        NUMERIC,
+                posicion_entry      NUMERIC,
+                posicion_tp         NUMERIC,
+                posicion_sl         NUMERIC,
+                ultima_senal        VARCHAR(10),
+                ultima_senal_ts     BIGINT,
+                ultima_cierre_ts    BIGINT,
+                capital_inicial_ref NUMERIC,
+                creado_en           TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        // account_id en auto_trading_entradas para separar entradas por cuenta (= usuario_id).
+        await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS account_id INTEGER`);
+
         await pool.query(`INSERT INTO configuracion (clave, valor) VALUES ('limite_bd', 1.0) ON CONFLICT (clave) DO NOTHING`);
 
         const configRes = await pool.query(`SELECT valor FROM configuracion WHERE clave = 'limite_bd'`);
@@ -2222,6 +2307,151 @@ app.delete('/api/estrategias/:nombre', autenticar, async (req, res) => {
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
+});
+
+// ============================================================
+// CUENTA DE TRADING (multi-cuenta: una cuenta Binance por usuario)
+// ============================================================
+
+// Config de la cuenta del usuario (nunca expone el secret; la api_key va enmascarada).
+app.get('/api/mi-cuenta', autenticar, async (req, res) => {
+    try {
+        const r = await pool.query(
+            `SELECT api_key, base_url, margin_type, estrategia_nombre, position_usdt, habilitado
+             FROM cuentas_trading WHERE usuario_id = $1`,
+            [req.usuario.id]
+        );
+        if (!r.rows.length) return res.json({ configurada: false });
+        const c = r.rows[0];
+        res.json({
+            configurada:       !!c.api_key,
+            api_key_mascara:   enmascararClave(c.api_key),
+            base_url:          c.base_url,
+            entorno:           String(c.base_url).includes('testnet') ? 'testnet' : 'real',
+            margin_type:       c.margin_type,
+            estrategia_nombre: c.estrategia_nombre,
+            position_usdt:     c.position_usdt,
+            habilitado:        c.habilitado,
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Guarda/actualiza las claves Binance. El secret se cifra. Valida contra Binance antes de guardar.
+app.put('/api/mi-cuenta', autenticar, async (req, res) => {
+    const apiKey    = (req.body.api_key    || '').trim();
+    const apiSecret = (req.body.api_secret || '').trim();
+    if (!apiKey || !apiSecret) return res.status(400).json({ error: 'api_key y api_secret requeridos' });
+    if (!ENCRYPTION_KEY) return res.status(503).json({ error: 'El servidor no tiene ENCRYPTION_KEY configurada; no se pueden guardar claves de forma segura' });
+
+    const base = 'https://testnet.binancefuture.com'; // testnet fijo por ahora
+    try {
+        // Verificar las claves contra Binance antes de persistir (evita guardar claves rotas).
+        let balance;
+        try { balance = await balanceDeCuenta({ apiKey, secret: apiSecret, base }); }
+        catch (e) { return res.status(400).json({ error: 'Las claves no pasaron la verificación con Binance: ' + e.message }); }
+
+        const secretCifrado = cifrarSecreto(apiSecret);
+        await pool.query(
+            `INSERT INTO cuentas_trading (usuario_id, api_key, api_secret_cifrado, base_url)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (usuario_id) DO UPDATE
+                SET api_key = EXCLUDED.api_key,
+                    api_secret_cifrado = EXCLUDED.api_secret_cifrado,
+                    base_url = EXCLUDED.base_url`,
+            [req.usuario.id, apiKey, secretCifrado, base]
+        );
+        res.json({ ok: true, entorno: 'testnet', balance_usdt: balance.wallet });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Desvincula la cuenta (borra las claves). Bloqueado si el bot está encendido.
+app.delete('/api/mi-cuenta', autenticar, async (req, res) => {
+    try {
+        const r = await pool.query('SELECT habilitado FROM cuentas_trading WHERE usuario_id = $1', [req.usuario.id]);
+        if (r.rows.length && r.rows[0].habilitado) {
+            return res.status(409).json({ error: 'Apagá el auto-trading antes de desvincular la cuenta' });
+        }
+        await pool.query('DELETE FROM cuentas_trading WHERE usuario_id = $1', [req.usuario.id]);
+        res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Configura estrategia + monto + encendido del bot para la cuenta del usuario.
+app.put('/api/mi-cuenta/autotrading', autenticar, async (req, res) => {
+    const { habilitado, estrategia_nombre, position_usdt } = req.body;
+    try {
+        const cuenta = await pool.query(
+            'SELECT api_key, api_secret_cifrado, base_url FROM cuentas_trading WHERE usuario_id = $1',
+            [req.usuario.id]
+        );
+        if (!cuenta.rows.length || !cuenta.rows[0].api_key) {
+            return res.status(400).json({ error: 'Primero cargá tus claves de Binance' });
+        }
+        if (habilitado === true && !estrategia_nombre) {
+            return res.status(400).json({ error: 'Seleccioná una estrategia para encender el bot' });
+        }
+        if (estrategia_nombre) {
+            const s = await pool.query(
+                'SELECT 1 FROM estrategias_guardadas WHERE nombre = $1 AND usuario_id = $2',
+                [estrategia_nombre, req.usuario.id]
+            );
+            if (!s.rows.length) return res.status(400).json({ error: 'Estrategia no encontrada' });
+        }
+        await pool.query(
+            `UPDATE cuentas_trading SET
+                habilitado        = COALESCE($1, habilitado),
+                estrategia_nombre = COALESCE($2, estrategia_nombre),
+                position_usdt     = COALESCE($3, position_usdt)
+             WHERE usuario_id = $4`,
+            [
+                habilitado !== undefined ? habilitado : null,
+                estrategia_nombre !== undefined ? estrategia_nombre : null,
+                position_usdt !== undefined ? parseFloat(position_usdt) : null,
+                req.usuario.id,
+            ]
+        );
+        // Reset de la última señal al cambiar config / encender, para re-evaluar limpio.
+        if (estrategia_nombre !== undefined || habilitado === true) {
+            await pool.query('UPDATE cuentas_trading SET ultima_senal = NULL WHERE usuario_id = $1', [req.usuario.id]);
+        }
+        // Snapshot del capital inicial al encender (base para sizing "% capital inicial").
+        if (habilitado === true) {
+            try {
+                const c = cuenta.rows[0];
+                const bal = await balanceDeCuenta({ apiKey: c.api_key, secret: descifrarSecreto(c.api_secret_cifrado), base: c.base_url });
+                await pool.query('UPDATE cuentas_trading SET capital_inicial_ref = $1 WHERE usuario_id = $2', [bal.wallet, req.usuario.id]);
+            } catch (e) {
+                console.error(`[AutoTrading] No se pudo snapshotear capital de usuario ${req.usuario.id}:`, e.message);
+            }
+        }
+        res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Estado liviano de la cuenta del usuario (para el indicador en la UI).
+app.get('/api/mi-cuenta/status', autenticar, async (req, res) => {
+    try {
+        const r = await pool.query(
+            `SELECT habilitado, estrategia_nombre, ultima_senal, ultima_senal_ts, position_usdt,
+                    posicion_lado, posicion_qty, posicion_entry
+             FROM cuentas_trading WHERE usuario_id = $1`,
+            [req.usuario.id]
+        );
+        res.json(r.rows[0] || { configurada: false, habilitado: false });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Historial de entradas de la cuenta del usuario.
+app.get('/api/mi-cuenta/entradas', autenticar, async (req, res) => {
+    try {
+        const r = await pool.query(
+            `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl,
+                    estado, precio_cierre, razon_cierre, ts_cierre
+             FROM auto_trading_entradas WHERE usuario_id = $1 ORDER BY ts DESC LIMIT 200`,
+            [req.usuario.id]
+        );
+        res.json(r.rows);
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/backtest', autenticar, async (req, res) => {
