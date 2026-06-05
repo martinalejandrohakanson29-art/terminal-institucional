@@ -900,6 +900,10 @@ async function fetchKlinesDesdeBD(interval, days) {
     }
     // Derivamos 5m / 15m agregando las velas de 1m por bucket temporal.
     const bucket = interval === '15m' ? 900000 : 300000;
+    // Descartamos el bucket EN CURSO: aquel cuyo período aún no terminó ((b+1)*bucket > now).
+    // Sus velas 1m están incompletas, así que su OHLC/indicadores son parciales y cambian cada
+    // minuto. Incluirlo hacía que un backtest abriera trades sobre datos no finales que
+    // desaparecían (o cerraban en un SL fantasma) al re-correrlo un minuto después.
     const r = await pool.query(
         `SELECT b * $2::bigint AS open_time,
                 (array_agg(open  ORDER BY open_time ASC ))[1] AS open,
@@ -912,8 +916,9 @@ async function fetchKlinesDesdeBD(interval, days) {
          FROM (SELECT open_time, open_time / $2::bigint AS b, open, high, low, close, volume, close_time, taker_buy_base
                FROM klines_1m WHERE open_time >= $1::bigint) t
          GROUP BY b
+         HAVING (b + 1) * $2::bigint <= $3::bigint
          ORDER BY b ASC`,
-        [desde, bucket]
+        [desde, bucket, Date.now()]
     );
     return r.rows.map(f => [
         Number(f.open_time), Number(f.open), Number(f.high), Number(f.low),
@@ -1413,32 +1418,41 @@ function redondearPrecio(precio) {
 
 // Orden de protección reduceOnly en el exchange (TAKE_PROFIT_MARKET o STOP_MARKET).
 // Disparada por MARK_PRICE para evitar wicks de precio last. Cierra solo su qty.
+// Desde 2025-12-09 Binance migró las órdenes condicionales al servicio Algo:
+// /fapi/v1/order las rechaza con -4120, así que van por /fapi/v1/algoOrder
+// (algoType=CONDITIONAL, stopPrice → triggerPrice, la respuesta trae algoId).
 function buildStopUrl(ctx, lado, qty, stopPrice, tipo) {
     const side = lado === 'long' ? 'SELL' : 'BUY';
     const sp   = redondearPrecio(stopPrice);
     const ts   = Date.now();
-    const p    = `symbol=BTCUSDT&side=${side}&type=${tipo}&quantity=${qty}&stopPrice=${sp}&reduceOnly=true&workingType=MARK_PRICE&timestamp=${ts}`;
-    return `${ctx.base}/fapi/v1/order?${p}&signature=${firmarParams(p, ctx.secret)}`;
+    const p    = `algoType=CONDITIONAL&symbol=BTCUSDT&side=${side}&type=${tipo}&quantity=${qty}&triggerPrice=${sp}&reduceOnly=true&workingType=MARK_PRICE&timestamp=${ts}`;
+    return `${ctx.base}/fapi/v1/algoOrder?${p}&signature=${firmarParams(p, ctx.secret)}`;
 }
 
-async function cancelarOrden(ctx, orderId) {
-    if (!orderId) return;
+// Cancela una orden de protección por su algoId (las TP/SL ahora son órdenes Algo).
+async function cancelarOrden(ctx, algoId) {
+    if (!algoId) return;
     try {
         const ts  = Date.now();
-        const q   = `symbol=BTCUSDT&orderId=${orderId}&timestamp=${ts}`;
-        const url = `${ctx.base}/fapi/v1/order?${q}&signature=${firmarParams(q, ctx.secret)}`;
+        const q   = `symbol=BTCUSDT&algoId=${algoId}&timestamp=${ts}`;
+        const url = `${ctx.base}/fapi/v1/algoOrder?${q}&signature=${firmarParams(q, ctx.secret)}`;
         await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
-    } catch (e) { console.error(`[AutoTrading] Error cancelando orden ${orderId}: ${e.message}`); }
+    } catch (e) { console.error(`[AutoTrading] Error cancelando orden ${algoId}: ${e.message}`); }
 }
 
 // Barrido: cancela todas las órdenes abiertas del símbolo (al quedar plano / reconciliar).
+// Limpia tanto las condicionales Algo (TP/SL actuales) como cualquier orden clásica residual.
 async function cancelarTodasLasOrdenes(ctx) {
-    try {
-        const ts  = Date.now();
-        const q   = `symbol=BTCUSDT&timestamp=${ts}`;
-        const url = `${ctx.base}/fapi/v1/allOpenOrders?${q}&signature=${firmarParams(q, ctx.secret)}`;
-        await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
-    } catch (e) { console.error(`[AutoTrading] Error cancelando órdenes abiertas: ${e.message}`); }
+    const ts = Date.now();
+    const eliminar = async (endpoint) => {
+        try {
+            const q   = `symbol=BTCUSDT&timestamp=${ts}`;
+            const url = `${ctx.base}/${endpoint}?${q}&signature=${firmarParams(q, ctx.secret)}`;
+            await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
+        } catch (e) { console.error(`[AutoTrading] Error cancelando ${endpoint}: ${e.message}`); }
+    };
+    await eliminar('fapi/v1/algoOpenOrders');
+    await eliminar('fapi/v1/allOpenOrders');
 }
 
 // Coloca en el exchange las órdenes de protección de una sub-posición recién abierta.
@@ -1446,16 +1460,21 @@ async function cancelarTodasLasOrdenes(ctx) {
 // (los stops por Ruptura EMA / Tiempo no son niveles de precio y los gestiona el server).
 // Sirven de red de seguridad: si el server se cae, el exchange igual cierra la posición.
 async function colocarProteccionExchange(ctx, sub) {
+    const estado = { tp: null, sl: null }; // null = no intentada; {ok,msg} si se intentó
     try {
         if (sub.tp) {
             const r = await ejecutarOrdenBinance(ctx,
                 buildStopUrl(ctx, sub.lado, sub.qty, sub.tp, 'TAKE_PROFIT_MARKET'), `TP-EXCH #${sub.id}`);
-            if (r.ok && r.body?.orderId) sub.tpOrderId = String(r.body.orderId);
+            const id = r.body?.algoId ?? r.body?.orderId;
+            if (r.ok && id) sub.tpOrderId = String(id);
+            estado.tp = { ok: r.ok, msg: r.body?.msg, code: r.body?.code };
         }
         if ((sub.stopType ?? 'Porcentaje') === 'Porcentaje' && sub.sl) {
             const r = await ejecutarOrdenBinance(ctx,
                 buildStopUrl(ctx, sub.lado, sub.qty, sub.sl, 'STOP_MARKET'), `SL-EXCH #${sub.id}`);
-            if (r.ok && r.body?.orderId) sub.slOrderId = String(r.body.orderId);
+            const id = r.body?.algoId ?? r.body?.orderId;
+            if (r.ok && id) sub.slOrderId = String(id);
+            estado.sl = { ok: r.ok, msg: r.body?.msg, code: r.body?.code };
         }
         await pool.query(
             `UPDATE auto_trading_entradas SET tp_order_id=$1, sl_order_id=$2 WHERE id=$3`,
@@ -1464,6 +1483,7 @@ async function colocarProteccionExchange(ctx, sub) {
     } catch (e) {
         console.error(`[AutoTrading] Error colocando protección exchange #${sub.id}: ${e.message}`);
     }
+    return estado;
 }
 
 // Cierra UNA sub-posición de la cuenta `ctx`. El llamador ya debe haberla removido del
@@ -1627,7 +1647,7 @@ async function ejecutarOrdenBinance(ctx, url, etiqueta) {
         });
         const body = await resp.json();
         if (resp.ok) {
-            console.log(`[AutoTrading u${ctx.uid}] ✅ Orden ${etiqueta} — orderId: ${body.orderId}`);
+            console.log(`[AutoTrading u${ctx.uid}] ✅ Orden ${etiqueta} — orderId: ${body.orderId ?? body.algoId ?? '—'}`);
         } else {
             console.error(`[AutoTrading u${ctx.uid}] ❌ Orden ${etiqueta} rechazada — ${body.code}: ${body.msg}`);
         }
@@ -2030,12 +2050,26 @@ app.get('/api/admin/autotrading', autenticar, soloAdmin, async (req, res) => {
 });
 
 // Endpoint de test: ejecuta una orden real en la cuenta (testnet) del propio usuario.
+// Con `prueba:true` arma una entrada de verificación: usa el precio actual de mercado,
+// TP/SL bien cortos (±0.15%) para que se gatille rápido, y una qty mínima que respeta
+// el notional mínimo de Binance. Sirve para validar de punta a punta (incluidas las
+// órdenes de protección Algo) sin tener que esperar una señal real.
 app.post('/api/autotrading/test', autenticar, async (req, res) => {
     const signal       = req.body.signal                    || 'long';
-    const entry        = parseFloat(req.body.entry)         || 95000;
-    const tp           = parseFloat(req.body.tp)            || 95475;
-    const sl           = parseFloat(req.body.sl)            || 94050;
     const positionUsdt = parseFloat(req.body.positionUsdt)  || 100;
+    let entry          = parseFloat(req.body.entry)         || 95000;
+    let tp             = parseFloat(req.body.tp)            || 95475;
+    let sl             = parseFloat(req.body.sl)            || 94050;
+
+    if (req.body.prueba) {
+        if (!ultimoPrecioFuturos) return res.status(503).json({ error: 'Aún no hay precio de mercado en vivo; probá de nuevo en unos segundos.' });
+        const ref = ultimoPrecioFuturos;
+        const pct = 0.0015; // ±0.15% → toca TP/SL en pocos minutos sin gatillarse al instante
+        entry = ref;
+        tp = signal === 'long' ? ref * (1 + pct) : ref * (1 - pct);
+        sl = signal === 'long' ? ref * (1 - pct) : ref * (1 + pct);
+    }
+
     try {
         const cr = await pool.query('SELECT * FROM cuentas_trading WHERE usuario_id = $1', [req.usuario.id]);
         if (!cr.rows.length || !cr.rows[0].api_key) return res.status(400).json({ error: 'Cargá tus claves de Binance primero' });
@@ -2044,8 +2078,16 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
         catch (e) { return res.status(500).json({ error: 'No se pudo descifrar la clave: ' + e.message }); }
         ctxActivos.set(req.usuario.id, ctx);
 
-        const qty = Math.floor((positionUsdt / entry) * 1000) / 1000;
+        let qty = Math.floor((positionUsdt / entry) * 1000) / 1000;
+        // BTCUSDT perp exige ~100 USDT de notional mínimo; redondeamos hacia arriba al
+        // step de 0.001 BTC para no caer en -4164 (min notional) en la prueba.
+        if (req.body.prueba) {
+            const minQty = Math.ceil((120 / entry) * 1000) / 1000;
+            if (qty < minQty) qty = minQty;
+        }
+
         const resEntrada = await ejecutarOrdenBinance(ctx, buildEntryUrl(ctx, signal, qty), 'ENTRADA-TEST');
+        let proteccion = null;
         if (resEntrada.ok) {
             const ins = await pool.query(
                 `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id)
@@ -2055,11 +2097,12 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
             const sub = { id: ins.rows[0].id, lado: signal, qty, entry, tp, sl, entryTs: Date.now(), stopType: 'Porcentaje' };
             posDe(req.usuario.id).push(sub);
             await sincronizarPosicionBD(req.usuario.id);
-            await colocarProteccionExchange(ctx, sub);
+            proteccion = await colocarProteccionExchange(ctx, sub);
         }
 
         res.json({
-            entrada: { ok: resEntrada.ok, orderId: resEntrada.body?.orderId, msg: resEntrada.body?.msg },
+            entrada: { ok: resEntrada.ok, orderId: resEntrada.body?.orderId, msg: resEntrada.body?.msg, code: resEntrada.body?.code },
+            proteccion,
             qty, signal, entry, tp, sl,
         });
     } catch (e) {
@@ -2213,10 +2256,13 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const deltaOkLong  = !p.useDeltaFilter || deltaRolling > 0;
     const deltaOkShort = !p.useDeltaFilter || deltaRolling < 0;
 
-    const nowMs    = Date.now();
+    // Ventana de ballenas anclada al CIERRE de la última vela 1m (tsClose), igual que el sliding
+    // window del backtest [tsClose - windowMs, tsClose]. Antes se anclaba a Date.now(), así que si
+    // el poll caía lejos del cierre de vela la ventana no coincidía con la del backtest y la señal
+    // divergía (el backtest abría con ballenas que el vivo ya no contaba, o viceversa).
     const windowMs = (p.whaleWindow ?? 30) * 60000;
     const whaleDelta = whalesArr
-        .filter(w => parseFloat(w.ts_sec) * 1000 >= nowMs - windowMs)
+        .filter(w => { const t = parseFloat(w.ts_sec) * 1000; return t >= tsClose - windowMs && t <= tsClose; })
         .reduce((s, w) => s + (w.es_venta ? -parseFloat(w.cantidad) : parseFloat(w.cantidad)), 0);
     const whaleOkLong  = !p.useWhaleFilter || whaleDelta > 0;
     const whaleOkShort = !p.useWhaleFilter || whaleDelta < 0;

@@ -184,6 +184,10 @@
     <a href="/terminal" class="back-link">← Terminal</a>
     <h2>Backtester de Estrategias</h2>
     <span style="font-size:11px;color:#94a3b8;margin-left:auto;">BTC/USDT 1m · multi-timeframe · horarios en UTC</span>
+    <span id="prueba-msg" style="font-size:11px;font-weight:bold;color:#94a3b8;white-space:nowrap;max-width:340px;overflow:hidden;text-overflow:ellipsis;"></span>
+    <button id="btn-prueba" class="btn-sm" onclick="dispararPrueba()"
+            title="Abre una entrada de prueba en tu cuenta de Binance (testnet) con TP/SL muy cortos para verificar de punta a punta que la operativa y las órdenes de protección funcionan."
+            style="white-space:nowrap;">⚡ Prueba</button>
 </div>
 
 <div id="main">
@@ -561,6 +565,52 @@
 
 <script>
     fetch('/api/auth/me', { credentials: 'same-origin' }).then(r => { if (!r.ok) window.location.replace('/'); });
+
+    // Entrada de prueba: abre una posición real en tu cuenta (testnet) con TP/SL muy cortos,
+    // para verificar de punta a punta la operativa y las órdenes de protección Algo.
+    function setPruebaMsg(texto, color) {
+        const el = document.getElementById('prueba-msg');
+        el.textContent = texto;
+        el.title = texto;
+        el.style.color = color || '#94a3b8';
+    }
+
+    async function dispararPrueba() {
+        const lado = confirm('Abrir entrada de PRUEBA en tu cuenta de Binance (testnet).\n\nAceptar = LONG · Cancelar = SHORT\n\n(Usa TP/SL de ±0.15% sobre el precio actual; se gatilla solo en pocos minutos.)')
+            ? 'long' : 'short';
+        const btn = document.getElementById('btn-prueba');
+        btn.disabled = true;
+        setPruebaMsg('Enviando entrada de prueba ' + lado.toUpperCase() + '…', '#64748b');
+        try {
+            const res = await fetch('/api/autotrading/test', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prueba: true, signal: lado }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setPruebaMsg('✗ ' + (data.error || 'Error'), '#ef5350'); return; }
+
+            if (!data.entrada?.ok) {
+                setPruebaMsg('✗ Entrada rechazada — ' + (data.entrada?.code ?? '') + ' ' + (data.entrada?.msg || ''), '#ef5350');
+                return;
+            }
+            // Resumen de la protección: ✓ si TP y SL fueron aceptados por el exchange.
+            const p = data.proteccion || {};
+            const tpOk = p.tp ? p.tp.ok : null;
+            const slOk = p.sl ? p.sl.ok : null;
+            const tag = (ok) => ok === null ? '—' : (ok ? '✓' : '✗');
+            const fallo = (p.tp && !p.tp.ok) ? p.tp : (p.sl && !p.sl.ok) ? p.sl : null;
+            const todoOk = data.entrada.ok && (tpOk !== false) && (slOk !== false);
+            const detalle = `Entrada ✓ ${lado.toUpperCase()} @ $${Math.round(data.entry).toLocaleString()} · qty ${data.qty} · TP ${tag(tpOk)} · SL ${tag(slOk)}`
+                + (fallo ? `  — protección ${fallo.code ?? ''}: ${fallo.msg || ''}` : '');
+            setPruebaMsg((todoOk ? '✓ ' : '⚠ ') + detalle, todoOk ? '#26a69a' : '#f59e0b');
+        } catch (e) {
+            setPruebaMsg('✗ ' + e.message, '#ef5350');
+        } finally {
+            btn.disabled = false;
+        }
+    }
 
     document.getElementById('p-stop-type').addEventListener('change', function() {
         document.getElementById('row-sl').style.display = this.value === 'Porcentaje' ? 'flex' : 'none';
