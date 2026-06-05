@@ -2033,8 +2033,8 @@
             // Estrategias guardadas para el live
             await cargarEstrategiasLive();
 
-            // Auto-trading (solo admin)
-            if (usuarioActual && usuarioActual.rol === 'admin') {
+            // Auto-trading: cada usuario gestiona su propia cuenta Binance.
+            if (usuarioActual) {
                 document.getElementById('at-status-bar').style.display = 'flex';
                 await actualizarStatusAutoTrading();
                 setInterval(actualizarStatusAutoTrading, 30000);
@@ -2067,6 +2067,62 @@
             } catch (_) {}
         }
 
+        // Refleja el estado de la cuenta Binance del usuario (vinculada / sin vincular).
+        async function refrescarEstadoCuenta() {
+            const estadoEl = document.getElementById('at-cuenta-estado');
+            try {
+                const r = await fetch('/api/mi-cuenta', { credentials: 'same-origin' });
+                const c = r.ok ? await r.json() : {};
+                if (c.configurada) {
+                    estadoEl.textContent = `✅ ${c.api_key_mascara} · ${c.entorno || 'testnet'}`;
+                    estadoEl.style.color = '#26a69a';
+                    // Limpiar inputs (no precargamos claves)
+                    document.getElementById('at-api-key').value = '';
+                    document.getElementById('at-api-secret').value = '';
+                    document.getElementById('at-api-key').placeholder = 'API Key (reemplazar)';
+                    document.getElementById('at-api-secret').placeholder = 'API Secret (reemplazar)';
+                    return true;
+                } else {
+                    estadoEl.textContent = '— sin vincular —';
+                    estadoEl.style.color = '#94a3b8';
+                    return false;
+                }
+            } catch (_) { return false; }
+        }
+
+        async function guardarClavesBinance() {
+            const api_key    = document.getElementById('at-api-key').value.trim();
+            const api_secret = document.getElementById('at-api-secret').value.trim();
+            const msgEl = document.getElementById('at-msg');
+            const btn   = document.getElementById('at-guardar-claves');
+            if (!api_key || !api_secret) {
+                mostrarMsgAT('Completá API Key y API Secret', true); return;
+            }
+            btn.disabled = true; btn.textContent = 'Verificando…';
+            try {
+                const res = await fetch('/api/mi-cuenta', {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+                    body: JSON.stringify({ api_key, api_secret })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'no se pudo guardar');
+                mostrarMsgAT(`✅ Claves vinculadas · balance ${Number(data.balance_usdt).toFixed(2)} USDT (${data.entorno})`, false);
+                await refrescarEstadoCuenta();
+            } catch (e) {
+                mostrarMsgAT('Error: ' + e.message, true);
+            } finally {
+                btn.disabled = false; btn.textContent = '🔒 Guardar y verificar claves';
+            }
+        }
+
+        function mostrarMsgAT(texto, esError) {
+            const msgEl = document.getElementById('at-msg');
+            msgEl.style.display = 'block';
+            msgEl.textContent = texto;
+            if (esError) { msgEl.style.background = '#fef2f2'; msgEl.style.border = '1px solid #fca5a5'; msgEl.style.color = '#dc2626'; }
+            else { msgEl.style.background = '#ecfdf5'; msgEl.style.border = '1px solid #6ee7b7'; msgEl.style.color = '#047857'; }
+        }
+
         async function abrirConfigAutoTrading() {
             // Cargar estrategias en el select
             const res  = await fetch('/api/estrategias', { credentials: 'same-origin' });
@@ -2084,6 +2140,7 @@
                 if (cfg.position_usdt) document.getElementById('at-pos-usdt').value = cfg.position_usdt;
             }
 
+            await refrescarEstadoCuenta();
             const overlay = document.getElementById('modal-at-overlay');
             overlay.style.display = 'flex';
             document.getElementById('at-msg').style.display = 'none';
@@ -2130,6 +2187,26 @@
             <h3 style="margin-bottom:18px;font-size:15px;">AutoBot — Configuración</h3>
             <div id="at-msg" style="display:none;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;"></div>
 
+            <!-- Cuenta Binance (claves API por usuario) -->
+            <div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:16px;background:#fafafa;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <span style="font-size:12px;font-weight:bold;color:#374151;">Cuenta Binance (testnet)</span>
+                    <span id="at-cuenta-estado" style="font-size:11px;font-weight:bold;color:#94a3b8;">— sin vincular —</span>
+                </div>
+                <div id="at-cuenta-form">
+                    <input type="text" id="at-api-key" placeholder="API Key" autocomplete="off"
+                        style="width:100%;padding:7px 9px;border:1px solid #d1d4dc;border-radius:5px;font-size:12px;margin-bottom:7px;box-sizing:border-box;">
+                    <input type="password" id="at-api-secret" placeholder="API Secret" autocomplete="off"
+                        style="width:100%;padding:7px 9px;border:1px solid #d1d4dc;border-radius:5px;font-size:12px;margin-bottom:8px;box-sizing:border-box;">
+                    <button onclick="guardarClavesBinance()" id="at-guardar-claves" style="width:100%;padding:8px;border:1px solid #2962FF;border-radius:5px;font-size:12px;background:#fff;color:#2962FF;cursor:pointer;font-weight:bold;">
+                        🔒 Guardar y verificar claves
+                    </button>
+                    <div style="margin-top:7px;font-size:10px;color:#94a3b8;line-height:1.4;">
+                        Las claves se guardan cifradas. Usá claves de <b>Futures Testnet</b>, sin permiso de retiro.
+                    </div>
+                </div>
+            </div>
+
             <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Estrategia</label>
             <select id="at-strat-sel" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;background:#f8fafc;"></select>
 
@@ -2145,7 +2222,7 @@
                     ▶ Activar
                 </button>
             </div>
-            <div style="margin-top:12px;font-size:10px;color:#94a3b8;text-align:center;">Solo admin · Testnet Binance Futures · Evalúa cada 60s</div>
+            <div style="margin-top:12px;font-size:10px;color:#94a3b8;text-align:center;">Tu cuenta · Testnet Binance Futures · Evalúa cada 60s</div>
         </div>
     </div>
 
