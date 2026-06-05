@@ -51,8 +51,8 @@ function enmascararClave(clave) {
 }
 
 // ── Helpers Binance por-cuenta (multi-cuenta) ─────────────────────────
-// A diferencia de binanceSign (que usa el secret global del ENV), estos reciben
-// el contexto de la cuenta { apiKey, secret, base } para operar la cuenta de cada usuario.
+// Firman y operan con el contexto de cada cuenta { apiKey, secret, base }, en vez de
+// usar claves globales del entorno (cada usuario opera su propia cuenta de Binance).
 function firmarParams(params, secret) {
     return crypto.createHmac('sha256', secret).update(params).digest('hex');
 }
@@ -1347,47 +1347,63 @@ const BINANCE_WS_PRECIO  = BINANCE_BASE.includes('testnet')
     ? 'wss://stream.binancefuture.com/ws/btcusdt@aggTrade'
     : 'wss://fstream.binance.com/ws/btcusdt@aggTrade';
 
-// Estado de sub-posiciones activas (memoria + BD). El exchange netea las posiciones de
-// un símbolo, así que cada sub-posición vive en memoria y se cierra con una orden
-// reduceOnly PARCIAL por su cantidad, replicando el pyramiding del backtest.
-let posicionesActivas = []; // [{ id, lado, qty, entry, tp, sl, entryTs, stopType }]
-let ultimoPrecioFuturos = null; // último precio del WS de futuros, para cierres a mercado
+// Estado de sub-posiciones activas POR CUENTA (uid → array). El exchange netea las
+// posiciones de un símbolo dentro de cada cuenta, así que cada sub-posición vive en memoria
+// y se cierra con una orden reduceOnly PARCIAL, replicando el pyramiding del backtest.
+const posicionesPorCuenta = new Map(); // uid -> [{ id, lado, qty, entry, tp, sl, entryTs, stopType, tpOrderId, slOrderId }]
+const ctxActivos          = new Map(); // uid -> { uid, apiKey, secret, base, marginType } (claves descifradas en memoria)
+let ultimoPrecioFuturos   = null;      // último precio del WS de futuros, para cierres a mercado
 
-// Mantiene las columnas posicion_* (posición NETA) por compatibilidad y para mostrar estado.
-async function sincronizarPosicionBD() {
-    if (posicionesActivas.length === 0) {
+function posDe(uid) {
+    let arr = posicionesPorCuenta.get(uid);
+    if (!arr) { arr = []; posicionesPorCuenta.set(uid, arr); }
+    return arr;
+}
+
+// Contexto de una cuenta (claves descifradas) a partir de su fila de cuentas_trading.
+function ctxDeCuenta(row) {
+    return {
+        uid:        row.usuario_id,
+        apiKey:     row.api_key,
+        secret:     descifrarSecreto(row.api_secret_cifrado),
+        base:       row.base_url || 'https://testnet.binancefuture.com',
+        marginType: (row.margin_type || 'CROSSED').toUpperCase(),
+    };
+}
+
+// Mantiene las columnas posicion_* (posición NETA de la cuenta) para mostrar estado en la UI.
+async function sincronizarPosicionBD(uid) {
+    const arr = posDe(uid);
+    if (arr.length === 0) {
         await pool.query(
-            `UPDATE auto_trading_config
+            `UPDATE cuentas_trading
              SET posicion_lado=NULL, posicion_qty=NULL, posicion_entry=NULL, posicion_tp=NULL, posicion_sl=NULL
-             WHERE id=1`
+             WHERE usuario_id=$1`, [uid]
         );
         return;
     }
-    const lado  = posicionesActivas[0].lado;
-    const qty   = posicionesActivas.reduce((s, p) => s + p.qty, 0);
-    const entry = posicionesActivas.reduce((s, p) => s + p.entry * p.qty, 0) / (qty || 1);
-    const tp    = posicionesActivas[0].tp;
-    const sl    = posicionesActivas[0].sl;
+    const qty   = arr.reduce((s, p) => s + p.qty, 0);
+    const entry = arr.reduce((s, p) => s + p.entry * p.qty, 0) / (qty || 1);
     await pool.query(
-        `UPDATE auto_trading_config
+        `UPDATE cuentas_trading
          SET posicion_lado=$1, posicion_qty=$2, posicion_entry=$3, posicion_tp=$4, posicion_sl=$5
-         WHERE id=1`,
-        [lado, qty, entry, tp, sl]
+         WHERE usuario_id=$6`,
+        [arr[0].lado, qty, entry, arr[0].tp, arr[0].sl, uid]
     );
 }
 
-function buildCloseUrl(lado, qty) {
+function buildCloseUrl(ctx, lado, qty) {
     const side = lado === 'long' ? 'SELL' : 'BUY';
     const ts   = Date.now();
     const p    = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&reduceOnly=true&timestamp=${ts}`;
-    return `${BINANCE_BASE}/fapi/v1/order?${p}&signature=${binanceSign(p)}`;
+    return `${ctx.base}/fapi/v1/order?${p}&signature=${firmarParams(p, ctx.secret)}`;
 }
 
-function buildEntryUrl(lado, qty) {
+function buildEntryUrl(ctx, lado, qty) {
     const side = lado === 'long' ? 'BUY' : 'SELL';
     const ts   = Date.now();
     const p    = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&timestamp=${ts}`;
-    return `${BINANCE_BASE}/fapi/v1/order?${p}&signature=${binanceSign(p)}`;
+    return `${ctx.base}/fapi/v1/order?${p}&signature=${firmarParams(p, ctx.secret)}`;
 }
 
 // BTCUSDT perp tiene tick size 0.1 → los stopPrice deben redondearse a 1 decimal.
@@ -1397,31 +1413,31 @@ function redondearPrecio(precio) {
 
 // Orden de protección reduceOnly en el exchange (TAKE_PROFIT_MARKET o STOP_MARKET).
 // Disparada por MARK_PRICE para evitar wicks de precio last. Cierra solo su qty.
-function buildStopUrl(lado, qty, stopPrice, tipo) {
+function buildStopUrl(ctx, lado, qty, stopPrice, tipo) {
     const side = lado === 'long' ? 'SELL' : 'BUY';
     const sp   = redondearPrecio(stopPrice);
     const ts   = Date.now();
     const p    = `symbol=BTCUSDT&side=${side}&type=${tipo}&quantity=${qty}&stopPrice=${sp}&reduceOnly=true&workingType=MARK_PRICE&timestamp=${ts}`;
-    return `${BINANCE_BASE}/fapi/v1/order?${p}&signature=${binanceSign(p)}`;
+    return `${ctx.base}/fapi/v1/order?${p}&signature=${firmarParams(p, ctx.secret)}`;
 }
 
-async function cancelarOrden(orderId) {
+async function cancelarOrden(ctx, orderId) {
     if (!orderId) return;
     try {
         const ts  = Date.now();
         const q   = `symbol=BTCUSDT&orderId=${orderId}&timestamp=${ts}`;
-        const url = `${BINANCE_BASE}/fapi/v1/order?${q}&signature=${binanceSign(q)}`;
-        await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+        const url = `${ctx.base}/fapi/v1/order?${q}&signature=${firmarParams(q, ctx.secret)}`;
+        await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
     } catch (e) { console.error(`[AutoTrading] Error cancelando orden ${orderId}: ${e.message}`); }
 }
 
 // Barrido: cancela todas las órdenes abiertas del símbolo (al quedar plano / reconciliar).
-async function cancelarTodasLasOrdenes() {
+async function cancelarTodasLasOrdenes(ctx) {
     try {
         const ts  = Date.now();
         const q   = `symbol=BTCUSDT&timestamp=${ts}`;
-        const url = `${BINANCE_BASE}/fapi/v1/allOpenOrders?${q}&signature=${binanceSign(q)}`;
-        await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+        const url = `${ctx.base}/fapi/v1/allOpenOrders?${q}&signature=${firmarParams(q, ctx.secret)}`;
+        await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
     } catch (e) { console.error(`[AutoTrading] Error cancelando órdenes abiertas: ${e.message}`); }
 }
 
@@ -1429,16 +1445,16 @@ async function cancelarTodasLasOrdenes() {
 // El TP siempre es un nivel fijo; el SL solo se coloca si el stop es por Porcentaje
 // (los stops por Ruptura EMA / Tiempo no son niveles de precio y los gestiona el server).
 // Sirven de red de seguridad: si el server se cae, el exchange igual cierra la posición.
-async function colocarProteccionExchange(sub) {
+async function colocarProteccionExchange(ctx, sub) {
     try {
         if (sub.tp) {
-            const r = await ejecutarOrdenBinance(
-                buildStopUrl(sub.lado, sub.qty, sub.tp, 'TAKE_PROFIT_MARKET'), BINANCE_API_KEY, `TP-EXCH #${sub.id}`);
+            const r = await ejecutarOrdenBinance(ctx,
+                buildStopUrl(ctx, sub.lado, sub.qty, sub.tp, 'TAKE_PROFIT_MARKET'), `TP-EXCH #${sub.id}`);
             if (r.ok && r.body?.orderId) sub.tpOrderId = String(r.body.orderId);
         }
         if ((sub.stopType ?? 'Porcentaje') === 'Porcentaje' && sub.sl) {
-            const r = await ejecutarOrdenBinance(
-                buildStopUrl(sub.lado, sub.qty, sub.sl, 'STOP_MARKET'), BINANCE_API_KEY, `SL-EXCH #${sub.id}`);
+            const r = await ejecutarOrdenBinance(ctx,
+                buildStopUrl(ctx, sub.lado, sub.qty, sub.sl, 'STOP_MARKET'), `SL-EXCH #${sub.id}`);
             if (r.ok && r.body?.orderId) sub.slOrderId = String(r.body.orderId);
         }
         await pool.query(
@@ -1450,80 +1466,78 @@ async function colocarProteccionExchange(sub) {
     }
 }
 
-// Cierra UNA sub-posición. El llamador ya debe haberla removido de posicionesActivas de
-// forma síncrona (antes de cualquier await) para evitar dobles cierres por ticks concurrentes.
-async function cerrarSubPosicion(pos, razon, precio) {
-    console.log(`[AutoTrading] ${razon} sub-pos #${pos.id} ${pos.lado.toUpperCase()} qty ${pos.qty} @ $${precio.toFixed(1)}`);
+// Cierra UNA sub-posición de la cuenta `ctx`. El llamador ya debe haberla removido del
+// array de la cuenta (síncrono, antes de awaits) para evitar dobles cierres por ticks.
+async function cerrarSubPosicion(ctx, pos, razon, precio) {
+    const arr = posDe(ctx.uid);
+    console.log(`[AutoTrading u${ctx.uid}] ${razon} sub-pos #${pos.id} ${pos.lado.toUpperCase()} qty ${pos.qty} @ $${precio.toFixed(1)}`);
     const ahoraMs = Date.now();
     await pool.query(
         `UPDATE auto_trading_entradas SET estado='cerrada', precio_cierre=$1, razon_cierre=$2, ts_cierre=$3 WHERE id=$4`,
         [precio, razon, ahoraMs, pos.id]
     );
-    await pool.query(`UPDATE auto_trading_config SET ultima_cierre_ts=$1 WHERE id=1`, [ahoraMs]);
-    // Al quedar plano, resetear la última señal para poder re-entrar en la próxima señal
-    if (posicionesActivas.length === 0) {
-        await pool.query(`UPDATE auto_trading_config SET ultima_senal=NULL WHERE id=1`);
+    await pool.query(`UPDATE cuentas_trading SET ultima_cierre_ts=$1 WHERE usuario_id=$2`, [ahoraMs, ctx.uid]);
+    // Al quedar plana, resetear la última señal para poder re-entrar en la próxima señal.
+    if (arr.length === 0) {
+        await pool.query(`UPDATE cuentas_trading SET ultima_senal=NULL WHERE usuario_id=$1`, [ctx.uid]);
     }
-    await sincronizarPosicionBD();
+    await sincronizarPosicionBD(ctx.uid);
     // Cancelar las órdenes de protección de esta sub-posición ANTES del cierre a mercado,
-    // para no dejar stops huérfanos en el exchange. Si una ya se ejecutó, el cancel falla
-    // silenciosamente. El cierre reduceOnly que sigue es benigno si el exchange ya cerró
-    // la posición (Binance lo rechaza con -2022, sin sobre-vender).
-    await cancelarOrden(pos.tpOrderId);
-    await cancelarOrden(pos.slOrderId);
-    await ejecutarOrdenBinance(buildCloseUrl(pos.lado, pos.qty), BINANCE_API_KEY, `CIERRE-${razon}`);
-    // Barrido final al quedar plano: limpia cualquier stop residual del exchange.
-    if (posicionesActivas.length === 0) await cancelarTodasLasOrdenes();
+    // para no dejar stops huérfanos. Si una ya se ejecutó, el cancel falla silenciosamente.
+    // El cierre reduceOnly que sigue es benigno si el exchange ya cerró (Binance lo rechaza -2022).
+    await cancelarOrden(ctx, pos.tpOrderId);
+    await cancelarOrden(ctx, pos.slOrderId);
+    await ejecutarOrdenBinance(ctx, buildCloseUrl(ctx, pos.lado, pos.qty), `CIERRE-${razon}`);
+    // Barrido final al quedar plana: limpia cualquier stop residual del exchange.
+    if (arr.length === 0) await cancelarTodasLasOrdenes(ctx);
 }
 
-// TP/SL por tick para cada sub-posición. El SL fijo por tick solo aplica a stop por
-// Porcentaje; el stop por Ruptura EMA es dinámico (lo gestiona gestionarPosicionAbierta).
+// TP/SL por tick para TODAS las cuentas con posiciones. El SL fijo por tick solo aplica a
+// stop por Porcentaje; el stop por Ruptura EMA es dinámico (lo gestiona el ciclo de 1 min).
 async function chequearSalida(precio) {
     ultimoPrecioFuturos = precio;
-    if (posicionesActivas.length === 0) return;
+    for (const [uid, arr] of posicionesPorCuenta) {
+        if (!arr.length) continue;
+        const ctx = ctxActivos.get(uid);
+        if (!ctx) continue; // sin claves en memoria no podemos cerrar; el exchange igual tiene el TP/SL
 
-    const aCerrar = [];
-    for (let i = posicionesActivas.length - 1; i >= 0; i--) {
-        const pos = posicionesActivas[i];
-        const golpeTP   = pos.lado === 'long' ? precio >= pos.tp : precio <= pos.tp;
-        const slPorTick = (pos.stopType ?? 'Porcentaje') === 'Porcentaje';
-        const golpeSL   = slPorTick && (pos.lado === 'long' ? precio <= pos.sl : precio >= pos.sl);
-        if (golpeTP || golpeSL) {
-            posicionesActivas.splice(i, 1); // remover síncronamente antes de awaits
-            aCerrar.push({ pos, razon: golpeTP ? 'TP' : 'SL' });
+        const aCerrar = [];
+        for (let i = arr.length - 1; i >= 0; i--) {
+            const pos = arr[i];
+            const golpeTP   = pos.lado === 'long' ? precio >= pos.tp : precio <= pos.tp;
+            const slPorTick = (pos.stopType ?? 'Porcentaje') === 'Porcentaje';
+            const golpeSL   = slPorTick && (pos.lado === 'long' ? precio <= pos.sl : precio >= pos.sl);
+            if (golpeTP || golpeSL) {
+                arr.splice(i, 1); // remover síncronamente antes de awaits
+                aCerrar.push({ pos, razon: golpeTP ? 'TP' : 'SL' });
+            }
         }
+        for (const { pos, razon } of aCerrar) await cerrarSubPosicion(ctx, pos, razon, precio);
     }
-    for (const { pos, razon } of aCerrar) await cerrarSubPosicion(pos, razon, precio);
 }
 
-// Cada ciclo (1 min): salida por tiempo máximo y stop EMA dinámico, por sub-posición.
-// Replica lo que el backtest hace al cierre de vela 1m.
-async function gestionarPosicionAbierta(p) {
-    if (posicionesActivas.length === 0) return;
+// Cada ciclo (1 min): salida por tiempo máximo y stop EMA dinámico, por sub-posición de la
+// cuenta `ctx`. Usa los klines 1m compartidos del ciclo. Replica el backtest al cierre de vela.
+async function gestionarPosicionAbierta(ctx, p, bars1m) {
+    const arr = posDe(ctx.uid);
+    if (arr.length === 0) return;
     const ahora = Date.now();
 
-    // Precio/EMA de referencia (cierre de la última vela 1m), calculados una sola vez.
     const stopEMA = (p.stopType === 'Ruptura EMA 200' || p.stopType === 'Ruptura EMA 500');
     let precioActual = ultimoPrecioFuturos, emaVal = null;
-    if (stopEMA) {
-        const bars1m = await fetchKlinesBatch('1m', 600);
-        if (bars1m.length >= 510) {
-            const c1m = bars1m.map(b => parseFloat(b[4]));
-            const emaArr = calcEMA(c1m, p.stopType === 'Ruptura EMA 200' ? 200 : 500);
-            const last = bars1m.length - 1;
-            emaVal = emaArr[last];
-            precioActual = c1m[last]; // decisión al cierre de vela, igual que el backtest
-        }
+    if (stopEMA && bars1m && bars1m.length >= 510) {
+        const c1m = bars1m.map(b => parseFloat(b[4]));
+        const emaArr = calcEMA(c1m, p.stopType === 'Ruptura EMA 200' ? 200 : 500);
+        const last = bars1m.length - 1;
+        emaVal = emaArr[last];
+        precioActual = c1m[last]; // decisión al cierre de vela, igual que el backtest
     }
-    if (!precioActual) {
-        const b = await fetchKlinesBatch('1m', 2);
-        if (b.length) precioActual = parseFloat(b[b.length - 1][4]);
-    }
+    if (!precioActual && bars1m && bars1m.length) precioActual = parseFloat(bars1m[bars1m.length - 1][4]);
     if (!precioActual) return;
 
     const aCerrar = [];
-    for (let i = posicionesActivas.length - 1; i >= 0; i--) {
-        const pos = posicionesActivas[i];
+    for (let i = arr.length - 1; i >= 0; i--) {
+        const pos = arr[i];
         let razon = null;
         if (p.useMaxTradeTime && pos.entryTs && (ahora - pos.entryTs) / 60000 >= (p.maxTradeMinutes ?? 15)) {
             razon = 'Tiempo';
@@ -1532,42 +1546,27 @@ async function gestionarPosicionAbierta(p) {
             if (rompe) razon = 'EMA';
         }
         if (razon) {
-            posicionesActivas.splice(i, 1);
+            arr.splice(i, 1);
             aCerrar.push({ pos, razon });
         }
     }
-    for (const { pos, razon } of aCerrar) await cerrarSubPosicion(pos, razon, precioActual);
+    for (const { pos, razon } of aCerrar) await cerrarSubPosicion(ctx, pos, razon, precioActual);
 }
 
-// ── Sizing: balance real y nocional según la estrategia ───────────
-async function obtenerBalanceUSDT() {
-    const ts  = Date.now();
-    const q   = `timestamp=${ts}&recvWindow=10000`;
-    const url = `${BINANCE_BASE}/fapi/v2/balance?${q}&signature=${binanceSign(q)}`;
-    const r    = await fetch(url, { headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
-    const body = await r.json();
-    if (!Array.isArray(body)) throw new Error(body && body.msg ? body.msg : 'balance no disponible');
-    const usdt = body.find(b => b.asset === 'USDT');
-    return {
-        wallet:    usdt ? parseFloat(usdt.balance) : 0,
-        disponible: usdt ? parseFloat(usdt.availableBalance) : 0,
-    };
-}
-
-// Devuelve el NOCIONAL (USDT) de la orden de entrada según el tamaño de posición de la
-// estrategia. En el backtest posicionValor es el MARGEN; la exposición = margen × palanca.
-async function calcularNocionalEntrada(p, cfg) {
-    const tipo   = p.posicionTipo  || 'porc_capital_actual';
-    const valor  = p.posicionValor ?? 100;
+// Devuelve el NOCIONAL (USDT) de la orden de entrada según el sizing de la estrategia, sobre
+// el balance de la cuenta `ctx`. En el backtest posicionValor es el MARGEN; exposición = margen × palanca.
+async function calcularNocionalEntrada(ctx, p, row) {
+    const tipo    = p.posicionTipo  || 'porc_capital_actual';
+    const valor   = p.posicionValor ?? 100;
     const palanca = (p.palancaActivo && p.palancaValor > 1) ? p.palancaValor : 1;
 
     let bal;
-    try { bal = await obtenerBalanceUSDT(); }
+    try { bal = await balanceDeCuenta(ctx); }
     catch (e) { return { ok: false, motivo: 'no se pudo leer balance: ' + e.message }; }
 
     let margin;
     if (tipo === 'monto_fijo')                margin = valor;
-    else if (tipo === 'porc_capital_inicial') margin = (parseFloat(cfg.capital_inicial_ref) || bal.wallet) * (valor / 100);
+    else if (tipo === 'porc_capital_inicial') margin = (parseFloat(row.capital_inicial_ref) || bal.wallet) * (valor / 100);
     else                                      margin = bal.wallet * (valor / 100); // porc_capital_actual
 
     if (!(margin > 0)) return { ok: false, motivo: 'monto calculado <= 0' };
@@ -1615,337 +1614,360 @@ function iniciarMonitorPrecio() {
 // Log de estado al arrancar
 setTimeout(() => {
     const modo = BINANCE_BASE.includes('testnet') ? '🧪 TESTNET (plata virtual)' : '🔴 REAL (plata de verdad)';
-    console.log(`[AutoTrading] Entorno Binance: ${modo} — ${BINANCE_BASE}`);
+    console.log(`[AutoTrading] Entorno Binance (base por defecto): ${modo} — ${BINANCE_BASE}`);
+    console.log(`[AutoTrading] ENCRYPTION_KEY: ${ENCRYPTION_KEY ? '✅ configurada' : '❌ FALTA — no se pueden guardar/usar claves de cuentas'}`);
     console.log(`[AutoTrading] N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL ? '✅ configurado (opcional)' : '➖ no configurado (opcional)'}`);
-    console.log(`[AutoTrading] Clave_API_Binance: ${BINANCE_API_KEY ? '✅ configurada' : '❌ falta'}`);
-    console.log(`[AutoTrading] Clave_secreta_Binance: ${BINANCE_SECRET ? '✅ configurada' : '❌ falta'}`);
 }, 3000);
 
-function binanceSign(params) {
-    if (!BINANCE_SECRET) throw new Error('Clave_secreta_Binance no configurada en el entorno del servidor');
-    return crypto.createHmac('sha256', BINANCE_SECRET).update(params).digest('hex');
-}
-
-async function ejecutarOrdenBinance(url, apiKey, etiqueta) {
+async function ejecutarOrdenBinance(ctx, url, etiqueta) {
     try {
         const resp = await fetch(url, {
             method: 'POST',
-            headers: { 'X-MBX-APIKEY': apiKey, 'Content-Type': 'application/x-www-form-urlencoded' },
+            headers: { 'X-MBX-APIKEY': ctx.apiKey, 'Content-Type': 'application/x-www-form-urlencoded' },
         });
         const body = await resp.json();
         if (resp.ok) {
-            console.log(`[AutoTrading] ✅ Orden ${etiqueta} ejecutada — orderId: ${body.orderId}`);
+            console.log(`[AutoTrading u${ctx.uid}] ✅ Orden ${etiqueta} — orderId: ${body.orderId}`);
         } else {
-            console.error(`[AutoTrading] ❌ Orden ${etiqueta} rechazada — ${body.code}: ${body.msg}`);
+            console.error(`[AutoTrading u${ctx.uid}] ❌ Orden ${etiqueta} rechazada — ${body.code}: ${body.msg}`);
         }
         return { ok: resp.ok, body };
     } catch (e) {
-        console.error(`[AutoTrading] ❌ Error red orden ${etiqueta}: ${e.message}`);
+        console.error(`[AutoTrading u${ctx.uid}] ❌ Error red orden ${etiqueta}: ${e.message}`);
         return { ok: false, error: e.message };
     }
 }
 
-// Setea el apalancamiento real del símbolo en Binance para que la posición tenga el
-// perfil de riesgo (margen / liquidación) que se asumió en el backtest.
-async function setBinanceLeverage(leverage) {
+// Setea el apalancamiento real del símbolo para la cuenta `ctx` (perfil de riesgo del backtest).
+async function setBinanceLeverage(ctx, leverage) {
     const ts = Date.now();
     const q  = `symbol=BTCUSDT&leverage=${Math.round(leverage)}&timestamp=${ts}`;
-    const url = `${BINANCE_BASE}/fapi/v1/leverage?${q}&signature=${binanceSign(q)}`;
-    const r = await ejecutarOrdenBinance(url, BINANCE_API_KEY, `LEVERAGE-${Math.round(leverage)}x`);
+    const url = `${ctx.base}/fapi/v1/leverage?${q}&signature=${firmarParams(q, ctx.secret)}`;
+    const r = await ejecutarOrdenBinance(ctx, url, `LEVERAGE-${Math.round(leverage)}x`);
     return r.ok;
 }
 
-// Asegura que la cuenta esté en el modo que asume el bot:
-//  - Modo de posición One-way (no Hedge): las órdenes reduceOnly sin positionSide solo
-//    funcionan en One-way; en Hedge serían rechazadas.
-//  - Margin type del símbolo (CROSSED por defecto; configurable con BINANCE_MARGIN_TYPE).
-// Se ejecuta al arrancar, con la cuenta plana. Los códigos -4059 / -4046 significan
-// "no hace falta cambiar" y se tratan como éxito.
-async function asegurarConfiguracionCuenta() {
-    if (!BINANCE_API_KEY || !BINANCE_SECRET) return;
-
+// Asegura que la cuenta `ctx` esté en One-way (no Hedge) y con su margin type. Los códigos
+// -4059 / -4046 significan "no hace falta cambiar" y se tratan como éxito.
+async function asegurarConfiguracionCuenta(ctx) {
     // Modo One-way
     try {
         const ts  = Date.now();
         const q   = `dualSidePosition=false&timestamp=${ts}`;
-        const url = `${BINANCE_BASE}/fapi/v1/positionSide/dual?${q}&signature=${binanceSign(q)}`;
-        const r   = await fetch(url, { method: 'POST', headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+        const url = `${ctx.base}/fapi/v1/positionSide/dual?${q}&signature=${firmarParams(q, ctx.secret)}`;
+        const r   = await fetch(url, { method: 'POST', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
         const b   = await r.json();
-        if (r.ok || b.code === -4059) console.log('[AutoTrading] Modo de posición: One-way ✅');
-        else console.warn(`[AutoTrading] ⚠️ No se pudo fijar modo One-way: ${b.code} ${b.msg}`);
-    } catch (e) { console.error('[AutoTrading] Error fijando modo de posición:', e.message); }
+        if (r.ok || b.code === -4059) console.log(`[AutoTrading u${ctx.uid}] Modo de posición: One-way ✅`);
+        else console.warn(`[AutoTrading u${ctx.uid}] ⚠️ No se pudo fijar One-way: ${b.code} ${b.msg}`);
+    } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error modo de posición:`, e.message); }
 
     // Margin type
     try {
-        const mt  = (process.env.BINANCE_MARGIN_TYPE || 'CROSSED').toUpperCase();
+        const mt  = ctx.marginType || 'CROSSED';
         const ts  = Date.now();
         const q   = `symbol=BTCUSDT&marginType=${mt}&timestamp=${ts}`;
-        const url = `${BINANCE_BASE}/fapi/v1/marginType?${q}&signature=${binanceSign(q)}`;
-        const r   = await fetch(url, { method: 'POST', headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+        const url = `${ctx.base}/fapi/v1/marginType?${q}&signature=${firmarParams(q, ctx.secret)}`;
+        const r   = await fetch(url, { method: 'POST', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
         const b   = await r.json();
-        if (r.ok || b.code === -4046) console.log(`[AutoTrading] Margin type: ${mt} ✅`);
-        else console.warn(`[AutoTrading] ⚠️ No se pudo fijar margin type: ${b.code} ${b.msg}`);
-    } catch (e) { console.error('[AutoTrading] Error fijando margin type:', e.message); }
+        if (r.ok || b.code === -4046) console.log(`[AutoTrading u${ctx.uid}] Margin type: ${mt} ✅`);
+        else console.warn(`[AutoTrading u${ctx.uid}] ⚠️ No se pudo fijar margin type: ${b.code} ${b.msg}`);
+    } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error margin type:`, e.message); }
 }
 
-// Posición NETA real del símbolo en el exchange (positionAmt con signo). Para reconciliar
-// el libro local con el exchange tras un reinicio.
-async function obtenerPosicionExchange() {
+// Posición NETA real del símbolo en el exchange de la cuenta `ctx` (positionAmt con signo).
+async function obtenerPosicionExchange(ctx) {
     const ts  = Date.now();
     const q   = `symbol=BTCUSDT&timestamp=${ts}&recvWindow=10000`;
-    const url = `${BINANCE_BASE}/fapi/v2/positionRisk?${q}&signature=${binanceSign(q)}`;
-    const r    = await fetch(url, { headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+    const url = `${ctx.base}/fapi/v2/positionRisk?${q}&signature=${firmarParams(q, ctx.secret)}`;
+    const r    = await fetch(url, { headers: { 'X-MBX-APIKEY': ctx.apiKey } });
     const body = await r.json();
     if (!Array.isArray(body)) throw new Error(body && body.msg ? body.msg : 'positionRisk no disponible');
     const pos = body.find(x => x.symbol === 'BTCUSDT');
     return pos ? parseFloat(pos.positionAmt) : 0;
 }
 
-let autoTradingCorriendo = false;
+// Migración una-vez: pasa la config global antigua (auto_trading_config id=1, que usaba las
+// claves del ENV) a una fila de cuentas_trading para su usuario, cifrando el secret del ENV.
+// Así el bot que ya venía corriendo sigue operando como cuenta de ese usuario.
+async function migrarConfigGlobal() {
+    if (!ENCRYPTION_KEY || !BINANCE_API_KEY || !BINANCE_SECRET) return;
+    const cfg = (await pool.query('SELECT * FROM auto_trading_config WHERE id=1')).rows[0];
+    if (!cfg || !cfg.usuario_id) return;
+    const existe = await pool.query('SELECT 1 FROM cuentas_trading WHERE usuario_id=$1', [cfg.usuario_id]);
+    if (existe.rows.length) return; // ya migrado
+    await pool.query(
+        `INSERT INTO cuentas_trading
+            (usuario_id, api_key, api_secret_cifrado, base_url, margin_type, estrategia_nombre,
+             position_usdt, habilitado, posicion_lado, posicion_qty, posicion_entry, posicion_tp, posicion_sl,
+             ultima_senal, ultima_senal_ts, ultima_cierre_ts, capital_inicial_ref)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+        [cfg.usuario_id, BINANCE_API_KEY, cifrarSecreto(BINANCE_SECRET), BINANCE_BASE,
+         (process.env.BINANCE_MARGIN_TYPE || 'CROSSED').toUpperCase(), cfg.estrategia_nombre,
+         cfg.position_usdt, cfg.habilitado, cfg.posicion_lado, cfg.posicion_qty, cfg.posicion_entry,
+         cfg.posicion_tp, cfg.posicion_sl, cfg.ultima_senal, cfg.ultima_senal_ts, cfg.ultima_cierre_ts, cfg.capital_inicial_ref]
+    );
+    console.log(`[AutoTrading] Config global migrada a la cuenta del usuario ${cfg.usuario_id}.`);
+}
+
+let cicloCorriendo = false;
 async function ejecutarAutoTrading() {
-    // n8n es opcional (solo notificación/logging); el bot opera sin él. Lo que sí es
-    // imprescindible son las claves de Binance para poder firmar y ejecutar órdenes.
-    if (!BINANCE_API_KEY || !BINANCE_SECRET) return;
-    if (autoTradingCorriendo) return; // evita solapamiento de ciclos (entradas duplicadas)
-    autoTradingCorriendo = true;
+    if (!ENCRYPTION_KEY) return;        // sin master key no podemos descifrar las claves de las cuentas
+    if (cicloCorriendo) return;         // evita solapamiento de ciclos (entradas duplicadas)
+    cicloCorriendo = true;
     try {
-        const cfgRes = await pool.query('SELECT * FROM auto_trading_config WHERE id = 1');
-        const cfg = cfgRes.rows[0];
-        if (!cfg || !cfg.habilitado || !cfg.estrategia_nombre) return;
-
-        const stratQuery = cfg.usuario_id
-            ? `SELECT params FROM estrategias_guardadas WHERE nombre = $1 AND usuario_id = $2 LIMIT 1`
-            : `SELECT params FROM estrategias_guardadas WHERE nombre = $1 LIMIT 1`;
-        const stratParams = cfg.usuario_id ? [cfg.estrategia_nombre, cfg.usuario_id] : [cfg.estrategia_nombre];
-        const stratRes = await pool.query(stratQuery, stratParams);
-        if (!stratRes.rows.length) return;
-        const p = stratRes.rows[0].params;
-
-        // Gestionar salidas de las sub-posiciones abiertas (tiempo / EMA dinámico).
-        // El WS de precio cubre TP/SL fijos en paralelo.
-        if (posicionesActivas.length > 0) {
-            await gestionarPosicionAbierta(p);
+        // Cuentas a procesar: habilitadas con estrategia + claves, MÁS las que tengan posiciones
+        // abiertas aunque estén apagadas (para gestionarles las salidas).
+        const habil = await pool.query(
+            `SELECT * FROM cuentas_trading WHERE habilitado = true AND estrategia_nombre IS NOT NULL AND api_key IS NOT NULL`
+        );
+        const rowsByUid = new Map(habil.rows.map(r => [r.usuario_id, r]));
+        for (const uid of posicionesPorCuenta.keys()) {
+            if (posDe(uid).length && !rowsByUid.has(uid)) {
+                const r = await pool.query('SELECT * FROM cuentas_trading WHERE usuario_id=$1', [uid]);
+                if (r.rows.length && r.rows[0].api_key) rowsByUid.set(uid, r.rows[0]);
+            }
         }
+        if (rowsByUid.size === 0) return;
 
-        // ¿Se permite abrir entrada? Sin posiciones, o con pyramiding habilitado.
-        if (posicionesActivas.length > 0 && !p.allowMultipleEntries) return;
-
-        const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
-            // Suficientes velas para que EMA/MACD/RSI/ADX (incluso de período alto en HTF)
-            // converjan igual que en el backtest y no diverja la señal en vivo.
+        // Datos de mercado COMPARTIDOS: se descargan una sola vez por ciclo (BTCUSDT es igual
+        // para todas las cuentas). Velas suficientes para que EMA/MACD/RSI/ADX converjan.
+        const [bars1m, bars5m, bars15m] = await Promise.all([
             fetchKlinesBatch('1m',  3000),
             fetchKlinesBatch('5m',  800),
             fetchKlinesBatch('15m', 800),
-            pool.query(
-                `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
-                 FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 ORDER BY fecha ASC`,
-                [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5]
-            ),
         ]);
 
-        // Cooldown: no entrar si pasó menos tiempo del configurado desde el último cierre
-        if (p.useCooldown && cfg.ultima_cierre_ts) {
-            const minutosDescierre = (Date.now() - parseInt(cfg.ultima_cierre_ts)) / 60000;
-            if (minutosDescierre < (p.cooldownMinutes ?? 45)) {
-                console.log(`[AutoTrading] Cooldown activo — faltan ${((p.cooldownMinutes ?? 45) - minutosDescierre).toFixed(1)} min`);
-                return;
-            }
+        for (const [uid, row] of rowsByUid) {
+            try { await procesarCuenta(row, bars1m, bars5m, bars15m); }
+            catch (e) { console.error(`[AutoTrading u${uid}] Error procesando cuenta:`, e.message); }
         }
-
-        const resultado = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p);
-        const nuevaSenal = resultado.signal;
-
-        // Filtro opcional: no apilar nuevas entradas mientras alguna sub-posición abierta
-        // esté en pérdida (PnL no realizado < 0). Filtra rachas perdedoras (igual que el backtest).
-        if (p.allowMultipleEntries && p.blockMultipleIfLosing && posicionesActivas.length > 0) {
-            const precioRef = resultado.entry || ultimoPrecioFuturos;
-            const enPerdida = precioRef && posicionesActivas.some(pos =>
-                (pos.lado === 'long' ? precioRef - pos.entry : pos.entry - precioRef) < 0
-            );
-            if (enPerdida) {
-                console.log(`[AutoTrading] Entrada múltiple omitida — posiciones abiertas en pérdida @ $${precioRef.toFixed(1)}`);
-                return;
-            }
-        }
-
-        // Dedup: en modo de una sola posición evitamos reenviar la misma señal. En
-        // pyramiding permitimos apilar mientras se cumplan condiciones (lo limita el capital).
-        if (!p.allowMultipleEntries && nuevaSenal === cfg.ultima_senal) return;
-
-        await pool.query(
-            `UPDATE auto_trading_config SET ultima_senal = $1, ultima_senal_ts = $2 WHERE id = 1`,
-            [nuevaSenal, Date.now()]
-        );
-
-        if (!nuevaSenal) {
-            if (posicionesActivas.length === 0) console.log(`[AutoTrading] Sin señal`);
-            return;
-        }
-
-        // Binance netea posiciones: si ya hay sub-posiciones, solo se apila del MISMO lado.
-        if (posicionesActivas.length > 0 && posicionesActivas[0].lado !== nuevaSenal) {
-            console.log(`[AutoTrading] Señal ${nuevaSenal} opuesta a posiciones abiertas (${posicionesActivas[0].lado}) — omitida`);
-            return;
-        }
-
-        // Tamaño de posición según la estrategia (margen × palanca → nocional de la orden)
-        const sizing = await calcularNocionalEntrada(p, cfg);
-        if (!sizing.ok) { console.log(`[AutoTrading] Entrada omitida — ${sizing.motivo}`); return; }
-        const qty = Math.floor((sizing.nocional / resultado.entry) * 1000) / 1000;
-        if (qty < 0.001) { console.log(`[AutoTrading] qty ${qty} < mínimo 0.001 BTC — omitida`); return; }
-
-        console.log(`[AutoTrading] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${qty} BTC`);
-
-        // Setear apalancamiento real antes de entrar si la estrategia lo usa
-        if (p.palancaActivo && p.palancaValor > 1) {
-            await setBinanceLeverage(p.palancaValor);
-        }
-
-        const ordenEntrada = await ejecutarOrdenBinance(buildEntryUrl(nuevaSenal, qty), BINANCE_API_KEY, 'ENTRADA');
-        if (ordenEntrada.ok) {
-            const stopType = p.stopType ?? 'Porcentaje';
-            const ins = await pool.query(
-                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8) RETURNING id`,
-                [Date.now(), nuevaSenal, resultado.entry, resultado.tp, resultado.sl, qty, stopType, cfg.usuario_id || null]
-            );
-            const sub = {
-                id: ins.rows[0].id, lado: nuevaSenal, qty, entry: resultado.entry,
-                tp: resultado.tp, sl: resultado.sl, entryTs: Date.now(), stopType,
-            };
-            posicionesActivas.push(sub);
-            await sincronizarPosicionBD();
-            // Red de seguridad: TP/SL reales en el exchange para que cierre la posición
-            // aunque el server se caiga. El monitoreo por server sigue siendo el primario.
-            await colocarProteccionExchange(sub);
-            console.log(`[AutoTrading] Sub-posición #${ins.rows[0].id} abierta — abiertas: ${posicionesActivas.length}`);
-        }
-
-        // Notificar a n8n (opcional, solo logging)
-        if (N8N_WEBHOOK_URL) {
-            fetch(N8N_WEBHOOK_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    signal: nuevaSenal, entry: resultado.entry,
-                    tp: resultado.tp, sl: resultado.sl,
-                    qty, estrategia: cfg.estrategia_nombre,
-                    ordenOk: ordenEntrada.ok,
-                }),
-            }).catch(() => {});
-        }
-
     } catch (e) {
         console.error('[AutoTrading] Error en loop:', e.message);
     } finally {
-        autoTradingCorriendo = false;
+        cicloCorriendo = false;
+    }
+}
+
+// Procesa UNA cuenta: gestiona salidas y evalúa/abre entrada según su estrategia, usando los
+// datos de mercado compartidos del ciclo. Aislada por try/catch en el llamador.
+async function procesarCuenta(row, bars1m, bars5m, bars15m) {
+    let ctx;
+    try { ctx = ctxDeCuenta(row); }
+    catch (e) { console.error(`[AutoTrading u${row.usuario_id}] No se pudo descifrar la clave:`, e.message); return; }
+    ctxActivos.set(row.usuario_id, ctx);
+
+    const stratRes = await pool.query(
+        'SELECT params FROM estrategias_guardadas WHERE nombre = $1 AND usuario_id = $2 LIMIT 1',
+        [row.estrategia_nombre, row.usuario_id]
+    );
+    if (!stratRes.rows.length) return;
+    const p   = stratRes.rows[0].params;
+    const arr = posDe(row.usuario_id);
+
+    // Gestionar salidas de sub-posiciones abiertas (tiempo / EMA). El WS cubre TP/SL fijos.
+    if (arr.length > 0) await gestionarPosicionAbierta(ctx, p, bars1m);
+
+    // Cuenta apagada: solo gestionar salidas, no abrir nuevas entradas.
+    if (!row.habilitado) return;
+
+    // ¿Se permite abrir entrada? Sin posiciones, o con pyramiding habilitado.
+    if (arr.length > 0 && !p.allowMultipleEntries) return;
+
+    const whaleRes = await pool.query(
+        `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
+         FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 ORDER BY fecha ASC`,
+        [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5]
+    );
+
+    // Cooldown: no entrar si pasó menos del tiempo configurado desde el último cierre.
+    if (p.useCooldown && row.ultima_cierre_ts) {
+        const min = (Date.now() - parseInt(row.ultima_cierre_ts)) / 60000;
+        if (min < (p.cooldownMinutes ?? 45)) {
+            console.log(`[AutoTrading u${row.usuario_id}] Cooldown — faltan ${((p.cooldownMinutes ?? 45) - min).toFixed(1)} min`);
+            return;
+        }
+    }
+
+    const resultado  = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p);
+    const nuevaSenal = resultado.signal;
+
+    // Filtro opcional: no apilar entradas mientras alguna sub-posición esté en pérdida.
+    if (p.allowMultipleEntries && p.blockMultipleIfLosing && arr.length > 0) {
+        const precioRef = resultado.entry || ultimoPrecioFuturos;
+        const enPerdida = precioRef && arr.some(pos =>
+            (pos.lado === 'long' ? precioRef - pos.entry : pos.entry - precioRef) < 0);
+        if (enPerdida) { console.log(`[AutoTrading u${row.usuario_id}] Entrada múltiple omitida — en pérdida`); return; }
+    }
+
+    // Dedup en modo una-sola-posición.
+    if (!p.allowMultipleEntries && nuevaSenal === row.ultima_senal) return;
+
+    await pool.query('UPDATE cuentas_trading SET ultima_senal=$1, ultima_senal_ts=$2 WHERE usuario_id=$3',
+        [nuevaSenal, Date.now(), row.usuario_id]);
+
+    if (!nuevaSenal) {
+        if (arr.length === 0) console.log(`[AutoTrading u${row.usuario_id}] Sin señal`);
+        return;
+    }
+
+    // Binance netea: si ya hay sub-posiciones, solo se apila del MISMO lado.
+    if (arr.length > 0 && arr[0].lado !== nuevaSenal) {
+        console.log(`[AutoTrading u${row.usuario_id}] Señal ${nuevaSenal} opuesta a ${arr[0].lado} — omitida`);
+        return;
+    }
+
+    const sizing = await calcularNocionalEntrada(ctx, p, row);
+    if (!sizing.ok) { console.log(`[AutoTrading u${row.usuario_id}] Entrada omitida — ${sizing.motivo}`); return; }
+    const qty = Math.floor((sizing.nocional / resultado.entry) * 1000) / 1000;
+    if (qty < 0.001) { console.log(`[AutoTrading u${row.usuario_id}] qty ${qty} < 0.001 BTC — omitida`); return; }
+
+    console.log(`[AutoTrading u${row.usuario_id}] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${qty} BTC`);
+
+    if (p.palancaActivo && p.palancaValor > 1) await setBinanceLeverage(ctx, p.palancaValor);
+
+    const ordenEntrada = await ejecutarOrdenBinance(ctx, buildEntryUrl(ctx, nuevaSenal, qty), 'ENTRADA');
+    if (ordenEntrada.ok) {
+        const stopType = p.stopType ?? 'Porcentaje';
+        const ins = await pool.query(
+            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8, $8) RETURNING id`,
+            [Date.now(), nuevaSenal, resultado.entry, resultado.tp, resultado.sl, qty, stopType, row.usuario_id]
+        );
+        const sub = {
+            id: ins.rows[0].id, lado: nuevaSenal, qty, entry: resultado.entry,
+            tp: resultado.tp, sl: resultado.sl, entryTs: Date.now(), stopType,
+        };
+        arr.push(sub);
+        await sincronizarPosicionBD(row.usuario_id);
+        // Red de seguridad: TP/SL reales en el exchange aunque el server se caiga.
+        await colocarProteccionExchange(ctx, sub);
+        console.log(`[AutoTrading u${row.usuario_id}] Sub-posición #${ins.rows[0].id} abierta — abiertas: ${arr.length}`);
+    }
+
+    if (N8N_WEBHOOK_URL) {
+        fetch(N8N_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                usuario_id: row.usuario_id, signal: nuevaSenal, entry: resultado.entry,
+                tp: resultado.tp, sl: resultado.sl, qty, estrategia: row.estrategia_nombre,
+                ordenOk: ordenEntrada.ok,
+            }),
+        }).catch(() => {});
     }
 }
 
 // Arrancar loop después de que la BD esté lista
 setTimeout(async () => {
-    // Recuperar TODAS las sub-posiciones abiertas si el servidor se reinició con posición.
-    try {
-        // stopType de respaldo desde la estrategia configurada (para filas legacy sin stop_type)
-        let stopTypeCfg = 'Porcentaje';
-        try {
-            const cfgR = await pool.query('SELECT estrategia_nombre, usuario_id FROM auto_trading_config WHERE id = 1');
-            const c = cfgR.rows[0];
-            if (c && c.estrategia_nombre) {
-                const sQ = c.usuario_id
-                    ? 'SELECT params FROM estrategias_guardadas WHERE nombre = $1 AND usuario_id = $2 LIMIT 1'
-                    : 'SELECT params FROM estrategias_guardadas WHERE nombre = $1 LIMIT 1';
-                const sP = c.usuario_id ? [c.estrategia_nombre, c.usuario_id] : [c.estrategia_nombre];
-                const sR = await pool.query(sQ, sP);
-                if (sR.rows.length && sR.rows[0].params) stopTypeCfg = sR.rows[0].params.stopType || 'Porcentaje';
-            }
-        } catch (_) {}
+    // 0. Migrar la config global antigua a cuentas_trading (una sola vez), para no perder el
+    //    bot que ya venía corriendo con las claves del ENV.
+    try { await migrarConfigGlobal(); } catch (e) { console.error('[AutoTrading] Error migrando config global:', e.message); }
 
+    // 1. Recuperar sub-posiciones abiertas agrupadas por cuenta (usuario_id).
+    try {
         const openRows = await pool.query(
-            `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, tp_order_id, sl_order_id
+            `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, tp_order_id, sl_order_id, usuario_id
              FROM auto_trading_entradas WHERE estado = 'abierta' ORDER BY ts ASC`
         );
-        posicionesActivas = [];
         for (const row of openRows.rows) {
+            const uid = row.usuario_id;
+            if (!uid) { console.warn(`[AutoTrading] Entrada #${row.id} sin usuario_id — no se gestiona.`); continue; }
             const qty = parseFloat(row.qty);
-            if (!(qty > 0)) {
-                console.warn(`[AutoTrading] Sub-pos #${row.id} sin qty válida — no se gestionará automáticamente. Revisar manualmente.`);
-                continue;
-            }
-            posicionesActivas.push({
+            if (!(qty > 0)) { console.warn(`[AutoTrading] Sub-pos #${row.id} sin qty válida — revisar manualmente.`); continue; }
+            posDe(uid).push({
                 id: row.id, lado: row.lado, qty,
                 entry: parseFloat(row.precio_entrada), tp: parseFloat(row.precio_tp), sl: parseFloat(row.precio_sl),
-                entryTs: parseInt(row.ts), stopType: row.stop_type || stopTypeCfg,
+                entryTs: parseInt(row.ts), stopType: row.stop_type || 'Porcentaje',
                 tpOrderId: row.tp_order_id || null, slOrderId: row.sl_order_id || null,
             });
         }
-        await sincronizarPosicionBD();
-        if (posicionesActivas.length) {
-            console.log(`[AutoTrading] ${posicionesActivas.length} sub-posición(es) recuperada(s): ${posicionesActivas.map(x => `#${x.id} ${x.lado} ${x.qty}`).join(', ')}`);
-        }
 
-        // Reconciliar con el exchange: si mientras el server estuvo caído los stops del
-        // exchange cerraron la posición, el libro local quedó desactualizado.
-        if (posicionesActivas.length > 0 && BINANCE_API_KEY && BINANCE_SECRET) {
+        // 2. Por cada cuenta con posiciones: ctx, reconciliar con el exchange y fijar el modo.
+        for (const uid of posicionesPorCuenta.keys()) {
+            const arr = posDe(uid);
+            if (!arr.length) continue;
+            const cr = await pool.query('SELECT * FROM cuentas_trading WHERE usuario_id=$1', [uid]);
+            if (!cr.rows.length || !cr.rows[0].api_key) {
+                console.warn(`[AutoTrading u${uid}] ${arr.length} posición(es) abiertas pero la cuenta no tiene claves — no se gestionarán.`);
+                continue;
+            }
+            let ctx;
+            try { ctx = ctxDeCuenta(cr.rows[0]); }
+            catch (e) { console.error(`[AutoTrading u${uid}] No se pudo descifrar clave:`, e.message); continue; }
+            ctxActivos.set(uid, ctx);
+            await sincronizarPosicionBD(uid);
+            console.log(`[AutoTrading u${uid}] ${arr.length} sub-posición(es) recuperada(s).`);
+
+            // Reconciliar: si el exchange está plano, los stops cerraron la posición con el server caído.
             try {
-                const amt = await obtenerPosicionExchange();
+                const amt = await obtenerPosicionExchange(ctx);
                 if (Math.abs(amt) < 1e-8) {
-                    console.warn(`[AutoTrading] ⚠️ Exchange PLANO pero el libro tenía ${posicionesActivas.length} sub-posición(es) — cerradas por el exchange con el server caído. Reconciliando...`);
+                    console.warn(`[AutoTrading u${uid}] ⚠️ Exchange PLANO pero el libro tenía ${arr.length} — reconciliando (cerradas por el exchange).`);
                     const ahoraMs = Date.now();
-                    for (const pos of posicionesActivas) {
-                        await pool.query(
-                            `UPDATE auto_trading_entradas SET estado='cerrada', razon_cierre='Exchange', ts_cierre=$1 WHERE id=$2`,
-                            [ahoraMs, pos.id]
-                        );
+                    for (const pos of arr) {
+                        await pool.query(`UPDATE auto_trading_entradas SET estado='cerrada', razon_cierre='Exchange', ts_cierre=$1 WHERE id=$2`, [ahoraMs, pos.id]);
                     }
-                    posicionesActivas = [];
-                    await cancelarTodasLasOrdenes();
-                    await pool.query(`UPDATE auto_trading_config SET ultima_senal=NULL, ultima_cierre_ts=$1 WHERE id=1`, [ahoraMs]);
-                    await sincronizarPosicionBD();
+                    posicionesPorCuenta.set(uid, []);
+                    await cancelarTodasLasOrdenes(ctx);
+                    await pool.query(`UPDATE cuentas_trading SET ultima_senal=NULL, ultima_cierre_ts=$1 WHERE usuario_id=$2`, [ahoraMs, uid]);
+                    await sincronizarPosicionBD(uid);
                 } else {
-                    const sumLibro = posicionesActivas.reduce((s, p) => s + p.qty, 0) * (posicionesActivas[0].lado === 'long' ? 1 : -1);
+                    const sumLibro = arr.reduce((s, p) => s + p.qty, 0) * (arr[0].lado === 'long' ? 1 : -1);
                     if (Math.abs(amt - sumLibro) > 0.0005) {
-                        console.warn(`[AutoTrading] ⚠️ Discrepancia: posición exchange ${amt} BTC vs libro ${sumLibro} BTC. Revisar manualmente.`);
+                        console.warn(`[AutoTrading u${uid}] ⚠️ Discrepancia: exchange ${amt} BTC vs libro ${sumLibro} BTC. Revisar manualmente.`);
                     }
-                    // Recolocar protección a sub-posiciones legacy que no tengan órdenes en el exchange.
-                    for (const sub of posicionesActivas) {
-                        if (!sub.tpOrderId && !sub.slOrderId) await colocarProteccionExchange(sub);
+                    // Recolocar protección a sub-posiciones legacy sin órdenes en el exchange.
+                    for (const sub of arr) {
+                        if (!sub.tpOrderId && !sub.slOrderId) await colocarProteccionExchange(ctx, sub);
                     }
                 }
-            } catch (e) {
-                console.error('[AutoTrading] Error reconciliando con exchange:', e.message);
-            }
+            } catch (e) { console.error(`[AutoTrading u${uid}] Error reconciliando:`, e.message); }
+
+            try { await asegurarConfiguracionCuenta(ctx); } catch (_) {}
         }
     } catch (e) {
         console.error('[AutoTrading] Error cargando posiciones desde BD:', e.message);
     }
-
-    // Forzar modo One-way + margin type antes de operar (cuenta normalmente plana al arrancar).
-    await asegurarConfiguracionCuenta();
 
     iniciarMonitorPrecio();
     ejecutarAutoTrading();
     setInterval(ejecutarAutoTrading, 60 * 1000);
 }, 5000);
 
-// ── Endpoints de Auto-Trading ─────────────────────────────────
-app.get('/api/autotrading', autenticar, soloAdmin, async (req, res) => {
+// ── Endpoints de Auto-Trading (per-usuario; alias de /api/mi-cuenta para la UI actual) ──
+app.get('/api/autotrading', autenticar, async (req, res) => {
     try {
-        const r = await pool.query('SELECT * FROM auto_trading_config WHERE id = 1');
-        res.json(r.rows[0] || {});
+        const r = await pool.query(
+            `SELECT habilitado, estrategia_nombre, position_usdt, (api_key IS NOT NULL) AS configurada
+             FROM cuentas_trading WHERE usuario_id = $1`, [req.usuario.id]
+        );
+        res.json(r.rows[0] || { configurada: false, habilitado: false });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/autotrading', autenticar, soloAdmin, async (req, res) => {
+app.put('/api/autotrading', autenticar, async (req, res) => {
     const { habilitado, estrategia_nombre, position_usdt } = req.body;
     try {
+        const cuenta = await pool.query(
+            'SELECT api_key, api_secret_cifrado, base_url FROM cuentas_trading WHERE usuario_id = $1',
+            [req.usuario.id]
+        );
+        if (!cuenta.rows.length || !cuenta.rows[0].api_key) {
+            return res.status(400).json({ error: 'Primero cargá tus claves de Binance' });
+        }
+        if (habilitado === true && !estrategia_nombre) {
+            return res.status(400).json({ error: 'Seleccioná una estrategia para encender el bot' });
+        }
+        if (estrategia_nombre) {
+            const s = await pool.query('SELECT 1 FROM estrategias_guardadas WHERE nombre=$1 AND usuario_id=$2', [estrategia_nombre, req.usuario.id]);
+            if (!s.rows.length) return res.status(400).json({ error: 'Estrategia no encontrada' });
+        }
         await pool.query(
-            `UPDATE auto_trading_config
-             SET habilitado = COALESCE($1, habilitado),
-                 estrategia_nombre = COALESCE($2, estrategia_nombre),
-                 position_usdt = COALESCE($3, position_usdt),
-                 usuario_id = $4
-             WHERE id = 1`,
+            `UPDATE cuentas_trading SET
+                habilitado        = COALESCE($1, habilitado),
+                estrategia_nombre = COALESCE($2, estrategia_nombre),
+                position_usdt     = COALESCE($3, position_usdt)
+             WHERE usuario_id = $4`,
             [
                 habilitado !== undefined ? habilitado : null,
                 estrategia_nombre !== undefined ? estrategia_nombre : null,
@@ -1953,19 +1975,17 @@ app.put('/api/autotrading', autenticar, soloAdmin, async (req, res) => {
                 req.usuario.id,
             ]
         );
-        // Reset señal cuando se cambia config para re-evaluar
         if (estrategia_nombre !== undefined || habilitado === true) {
-            await pool.query(`UPDATE auto_trading_config SET ultima_senal = NULL WHERE id = 1`);
+            await pool.query('UPDATE cuentas_trading SET ultima_senal = NULL WHERE usuario_id = $1', [req.usuario.id]);
         }
-        // Snapshot del capital inicial al ACTIVAR el autobot (base para "% capital inicial").
-        // Se refresca cada vez que se enciende, para que la referencia sea el balance vigente.
         if (habilitado === true) {
             try {
-                const bal = await obtenerBalanceUSDT();
-                await pool.query(`UPDATE auto_trading_config SET capital_inicial_ref = $1 WHERE id = 1`, [bal.wallet]);
-                console.log(`[AutoTrading] Capital inicial de referencia: ${bal.wallet} USDT`);
+                const c = cuenta.rows[0];
+                const bal = await balanceDeCuenta({ apiKey: c.api_key, secret: descifrarSecreto(c.api_secret_cifrado), base: c.base_url });
+                await pool.query('UPDATE cuentas_trading SET capital_inicial_ref = $1 WHERE usuario_id = $2', [bal.wallet, req.usuario.id]);
+                console.log(`[AutoTrading u${req.usuario.id}] Capital inicial de referencia: ${bal.wallet} USDT`);
             } catch (e) {
-                console.error('[AutoTrading] No se pudo snapshotear capital inicial:', e.message);
+                console.error(`[AutoTrading u${req.usuario.id}] No se pudo snapshotear capital inicial:`, e.message);
             }
         }
         res.json({ ok: true });
@@ -1975,7 +1995,8 @@ app.put('/api/autotrading', autenticar, soloAdmin, async (req, res) => {
 app.get('/api/autotrading/status', autenticar, async (req, res) => {
     try {
         const r = await pool.query(
-            'SELECT habilitado, estrategia_nombre, ultima_senal, ultima_senal_ts, position_usdt FROM auto_trading_config WHERE id = 1'
+            'SELECT habilitado, estrategia_nombre, ultima_senal, ultima_senal_ts, position_usdt FROM cuentas_trading WHERE usuario_id = $1',
+            [req.usuario.id]
         );
         res.json(r.rows[0] || { habilitado: false });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1995,35 +2016,46 @@ app.get('/api/autotrading/entradas', autenticar, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Endpoint de test: ejecuta órdenes reales en Binance Testnet (solo admin)
-app.post('/api/autotrading/test', autenticar, soloAdmin, async (req, res) => {
+// Overview de admin: estado de las cuentas de todos los usuarios.
+app.get('/api/admin/autotrading', autenticar, soloAdmin, async (req, res) => {
+    try {
+        const r = await pool.query(
+            `SELECT c.usuario_id, u.username, c.habilitado, c.estrategia_nombre, c.position_usdt,
+                    c.ultima_senal, c.posicion_lado, c.posicion_qty, (c.api_key IS NOT NULL) AS tiene_claves
+             FROM cuentas_trading c JOIN usuarios u ON u.id = c.usuario_id
+             ORDER BY u.username ASC`
+        );
+        res.json(r.rows);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Endpoint de test: ejecuta una orden real en la cuenta (testnet) del propio usuario.
+app.post('/api/autotrading/test', autenticar, async (req, res) => {
     const signal       = req.body.signal                    || 'long';
     const entry        = parseFloat(req.body.entry)         || 95000;
     const tp           = parseFloat(req.body.tp)            || 95475;
     const sl           = parseFloat(req.body.sl)            || 94050;
     const positionUsdt = parseFloat(req.body.positionUsdt)  || 100;
     try {
+        const cr = await pool.query('SELECT * FROM cuentas_trading WHERE usuario_id = $1', [req.usuario.id]);
+        if (!cr.rows.length || !cr.rows[0].api_key) return res.status(400).json({ error: 'Cargá tus claves de Binance primero' });
+        let ctx;
+        try { ctx = ctxDeCuenta(cr.rows[0]); }
+        catch (e) { return res.status(500).json({ error: 'No se pudo descifrar la clave: ' + e.message }); }
+        ctxActivos.set(req.usuario.id, ctx);
+
         const qty = Math.floor((positionUsdt / entry) * 1000) / 1000;
-        const resEntrada = await ejecutarOrdenBinance(buildEntryUrl(signal, qty), BINANCE_API_KEY, 'ENTRADA-TEST');
+        const resEntrada = await ejecutarOrdenBinance(ctx, buildEntryUrl(ctx, signal, qty), 'ENTRADA-TEST');
         if (resEntrada.ok) {
             const ins = await pool.query(
-                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'Porcentaje', 'abierta', $7) RETURNING id`,
-                [Date.now(), signal, entry, tp, sl, qty, req.usuario.id || null]
+                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'Porcentaje', 'abierta', $7, $7) RETURNING id`,
+                [Date.now(), signal, entry, tp, sl, qty, req.usuario.id]
             );
             const sub = { id: ins.rows[0].id, lado: signal, qty, entry, tp, sl, entryTs: Date.now(), stopType: 'Porcentaje' };
-            posicionesActivas.push(sub);
-            await sincronizarPosicionBD();
-            await colocarProteccionExchange(sub);
-        }
-
-        // Notificar n8n si está configurado
-        if (N8N_WEBHOOK_URL) {
-            fetch(N8N_WEBHOOK_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ signal, entry, tp, sl, qty, estrategia: 'TEST', ordenOk: resEntrada.ok }),
-            }).catch(() => {});
+            posDe(req.usuario.id).push(sub);
+            await sincronizarPosicionBD(req.usuario.id);
+            await colocarProteccionExchange(ctx, sub);
         }
 
         res.json({
