@@ -2075,7 +2075,9 @@
                 const c = r.ok ? await r.json() : {};
                 if (c.configurada) {
                     estadoEl.textContent = `✅ ${c.api_key_mascara} · ${c.entorno || 'testnet'}`;
-                    estadoEl.style.color = '#26a69a';
+                    estadoEl.style.color = c.entorno === 'real' ? '#ef5350' : '#26a69a';
+                    document.getElementById('at-entorno').value = c.entorno === 'real' ? 'real' : 'testnet';
+                    actualizarAvisoEntorno();
                     // Limpiar inputs (no precargamos claves)
                     document.getElementById('at-api-key').value = '';
                     document.getElementById('at-api-secret').value = '';
@@ -2093,16 +2095,18 @@
         async function guardarClavesBinance() {
             const api_key    = document.getElementById('at-api-key').value.trim();
             const api_secret = document.getElementById('at-api-secret').value.trim();
+            const entorno    = document.getElementById('at-entorno').value;
             const msgEl = document.getElementById('at-msg');
             const btn   = document.getElementById('at-guardar-claves');
             if (!api_key || !api_secret) {
                 mostrarMsgAT('Completá API Key y API Secret', true); return;
             }
+            if (entorno === 'real' && !confirm('Vas a vincular una cuenta REAL: las órdenes usan plata de verdad. ¿Continuar?')) return;
             btn.disabled = true; btn.textContent = 'Verificando…';
             try {
                 const res = await fetch('/api/mi-cuenta', {
                     method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-                    body: JSON.stringify({ api_key, api_secret })
+                    body: JSON.stringify({ api_key, api_secret, entorno })
                 });
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.error || 'no se pudo guardar');
@@ -2112,6 +2116,19 @@
                 mostrarMsgAT('Error: ' + e.message, true);
             } finally {
                 btn.disabled = false; btn.textContent = '🔒 Guardar y verificar claves';
+            }
+        }
+
+        // Ajusta el texto de ayuda según el entorno elegido (testnet vs real).
+        function actualizarAvisoEntorno() {
+            const entorno = document.getElementById('at-entorno').value;
+            const aviso = document.getElementById('at-aviso-entorno');
+            if (entorno === 'real') {
+                aviso.innerHTML = 'Las claves se guardan cifradas. Usá claves de <b>Futures REAL</b> (fapi.binance.com), sin permiso de retiro. ⚠️ Opera con plata de verdad.';
+                aviso.style.color = '#ef5350';
+            } else {
+                aviso.innerHTML = 'Las claves se guardan cifradas. Usá claves de <b>Futures Testnet</b>, sin permiso de retiro.';
+                aviso.style.color = '#94a3b8';
             }
         }
 
@@ -2190,10 +2207,16 @@
             <!-- Cuenta Binance (claves API por usuario) -->
             <div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:16px;background:#fafafa;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                    <span style="font-size:12px;font-weight:bold;color:#374151;">Cuenta Binance (testnet)</span>
+                    <span style="font-size:12px;font-weight:bold;color:#374151;">Cuenta Binance</span>
                     <span id="at-cuenta-estado" style="font-size:11px;font-weight:bold;color:#94a3b8;">— sin vincular —</span>
                 </div>
                 <div id="at-cuenta-form">
+                    <label style="display:block;font-size:11px;font-weight:bold;color:#374151;margin-bottom:4px;">Entorno</label>
+                    <select id="at-entorno" onchange="actualizarAvisoEntorno()"
+                        style="width:100%;padding:7px 9px;border:1px solid #d1d4dc;border-radius:5px;font-size:12px;margin-bottom:7px;box-sizing:border-box;background:#f8fafc;">
+                        <option value="testnet">🧪 Testnet (plata virtual)</option>
+                        <option value="real">🔴 Real (plata de verdad)</option>
+                    </select>
                     <input type="text" id="at-api-key" placeholder="API Key" autocomplete="off"
                         style="width:100%;padding:7px 9px;border:1px solid #d1d4dc;border-radius:5px;font-size:12px;margin-bottom:7px;box-sizing:border-box;">
                     <input type="password" id="at-api-secret" placeholder="API Secret" autocomplete="off"
@@ -2201,7 +2224,7 @@
                     <button onclick="guardarClavesBinance()" id="at-guardar-claves" style="width:100%;padding:8px;border:1px solid #2962FF;border-radius:5px;font-size:12px;background:#fff;color:#2962FF;cursor:pointer;font-weight:bold;">
                         🔒 Guardar y verificar claves
                     </button>
-                    <div style="margin-top:7px;font-size:10px;color:#94a3b8;line-height:1.4;">
+                    <div id="at-aviso-entorno" style="margin-top:7px;font-size:10px;color:#94a3b8;line-height:1.4;">
                         Las claves se guardan cifradas. Usá claves de <b>Futures Testnet</b>, sin permiso de retiro.
                     </div>
                 </div>

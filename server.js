@@ -1348,16 +1348,25 @@ const BINANCE_SECRET     = process.env.Clave_secreta_Binance;
 // Por defecto testnet (plata virtual). Para operar en real, definir en el entorno
 // BINANCE_BASE=https://fapi.binance.com (y usar claves API de la cuenta real).
 const BINANCE_BASE       = process.env.BINANCE_BASE || 'https://testnet.binancefuture.com';
-const BINANCE_WS_PRECIO  = BINANCE_BASE.includes('testnet')
-    ? 'wss://stream.binancefuture.com/ws/btcusdt@aggTrade'
-    : 'wss://fstream.binance.com/ws/btcusdt@aggTrade';
+// Testnet y real son mercados distintos con precios distintos. Como un usuario puede operar
+// en testnet y otro en real al mismo tiempo, mantenemos un feed de precio por entorno y nunca
+// evaluamos los stops de una cuenta con el precio del otro mercado.
+const WS_PRECIO_POR_ENTORNO = {
+    testnet: 'wss://stream.binancefuture.com/ws/btcusdt@aggTrade',
+    real:    'wss://fstream.binance.com/ws/btcusdt@aggTrade',
+};
 
 // Estado de sub-posiciones activas POR CUENTA (uid → array). El exchange netea las
 // posiciones de un símbolo dentro de cada cuenta, así que cada sub-posición vive en memoria
 // y se cierra con una orden reduceOnly PARCIAL, replicando el pyramiding del backtest.
 const posicionesPorCuenta = new Map(); // uid -> [{ id, lado, qty, entry, tp, sl, entryTs, stopType, tpOrderId, slOrderId }]
 const ctxActivos          = new Map(); // uid -> { uid, apiKey, secret, base, marginType } (claves descifradas en memoria)
-let ultimoPrecioFuturos   = null;      // último precio del WS de futuros, para cierres a mercado
+const ultimoPrecioPorEntorno = { testnet: null, real: null }; // último precio del WS de futuros por entorno
+
+// El entorno de una cuenta se deduce de su base_url (testnet vs producción).
+function entornoDeBase(base) { return String(base).includes('testnet') ? 'testnet' : 'real'; }
+// Último precio de futuros del mercado en el que opera la cuenta.
+function precioDeCtx(ctx) { return ultimoPrecioPorEntorno[entornoDeBase(ctx.base)]; }
 
 function posDe(uid) {
     let arr = posicionesPorCuenta.get(uid);
@@ -1514,12 +1523,13 @@ async function cerrarSubPosicion(ctx, pos, razon, precio) {
 
 // TP/SL por tick para TODAS las cuentas con posiciones. El SL fijo por tick solo aplica a
 // stop por Porcentaje; el stop por Ruptura EMA es dinámico (lo gestiona el ciclo de 1 min).
-async function chequearSalida(precio) {
-    ultimoPrecioFuturos = precio;
+async function chequearSalida(precio, entorno) {
+    ultimoPrecioPorEntorno[entorno] = precio;
     for (const [uid, arr] of posicionesPorCuenta) {
         if (!arr.length) continue;
         const ctx = ctxActivos.get(uid);
         if (!ctx) continue; // sin claves en memoria no podemos cerrar; el exchange igual tiene el TP/SL
+        if (entornoDeBase(ctx.base) !== entorno) continue; // este feed es del otro mercado: no aplica
 
         const aCerrar = [];
         for (let i = arr.length - 1; i >= 0; i--) {
@@ -1544,7 +1554,7 @@ async function gestionarPosicionAbierta(ctx, p, bars1m) {
     const ahora = Date.now();
 
     const stopEMA = (p.stopType === 'Ruptura EMA 200' || p.stopType === 'Ruptura EMA 500');
-    let precioActual = ultimoPrecioFuturos, emaVal = null;
+    let precioActual = precioDeCtx(ctx), emaVal = null;
     if (stopEMA && bars1m && bars1m.length >= 510) {
         const c1m = bars1m.map(b => parseFloat(b[4]));
         const emaArr = calcEMA(c1m, p.stopType === 'Ruptura EMA 200' ? 200 : 500);
@@ -1597,37 +1607,38 @@ async function calcularNocionalEntrada(ctx, p, row) {
     return { ok: true, nocional: margin * palanca };
 }
 
-// WebSocket de precio futuros para monitoreo TP/SL en tiempo real
-let wsPrecioConectando = false;
+// WebSocket de precio futuros para monitoreo TP/SL en tiempo real. Un monitor por entorno
+// (testnet y real), porque cada mercado tiene su propio precio y sus propias cuentas.
+const monitorConectando = new Set(); // entornos con una conexión en curso (evita doble-connect)
 
-function iniciarMonitorPrecio() {
-    if (wsPrecioConectando) return;
-    wsPrecioConectando = true;
+function iniciarMonitorPrecio(wsUrl, entorno) {
+    if (monitorConectando.has(entorno)) return;
+    monitorConectando.add(entorno);
 
-    const ws = new WebSocket(BINANCE_WS_PRECIO);
+    const ws = new WebSocket(wsUrl);
 
     ws.on('open', () => {
-        wsPrecioConectando = false;
-        console.log('✅ Monitor de precio futuros conectado.');
+        monitorConectando.delete(entorno);
+        console.log(`✅ Monitor de precio futuros (${entorno}) conectado.`);
     });
 
     ws.on('message', async (data) => {
         try {
             const evento = JSON.parse(data);
-            await chequearSalida(parseFloat(evento.p));
+            await chequearSalida(parseFloat(evento.p), entorno);
         } catch (e) {
-            console.error('Error en monitor de precio:', e.message);
+            console.error(`Error en monitor de precio (${entorno}):`, e.message);
         }
     });
 
     ws.on('error', (err) => {
-        console.error('Error WebSocket precio:', err.message);
+        console.error(`Error WebSocket precio (${entorno}):`, err.message);
         ws.terminate();
     });
 
     ws.on('close', () => {
-        wsPrecioConectando = false;
-        setTimeout(iniciarMonitorPrecio, 5000);
+        monitorConectando.delete(entorno);
+        setTimeout(() => iniciarMonitorPrecio(wsUrl, entorno), 5000);
     });
 }
 
@@ -1813,7 +1824,7 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
 
     // Filtro opcional: no apilar entradas mientras alguna sub-posición esté en pérdida.
     if (p.allowMultipleEntries && p.blockMultipleIfLosing && arr.length > 0) {
-        const precioRef = resultado.entry || ultimoPrecioFuturos;
+        const precioRef = resultado.entry || precioDeCtx(ctx);
         const enPerdida = precioRef && arr.some(pos =>
             (pos.lado === 'long' ? precioRef - pos.entry : pos.entry - precioRef) < 0);
         if (enPerdida) { console.log(`[AutoTrading u${row.usuario_id}] Entrada múltiple omitida — en pérdida`); return; }
@@ -1949,7 +1960,8 @@ setTimeout(async () => {
         console.error('[AutoTrading] Error cargando posiciones desde BD:', e.message);
     }
 
-    iniciarMonitorPrecio();
+    iniciarMonitorPrecio(WS_PRECIO_POR_ENTORNO.testnet, 'testnet');
+    iniciarMonitorPrecio(WS_PRECIO_POR_ENTORNO.real,    'real');
     ejecutarAutoTrading();
     setInterval(ejecutarAutoTrading, 60 * 1000);
 }, 5000);
@@ -2061,15 +2073,6 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
     let tp             = parseFloat(req.body.tp)            || 95475;
     let sl             = parseFloat(req.body.sl)            || 94050;
 
-    if (req.body.prueba) {
-        if (!ultimoPrecioFuturos) return res.status(503).json({ error: 'Aún no hay precio de mercado en vivo; probá de nuevo en unos segundos.' });
-        const ref = ultimoPrecioFuturos;
-        const pct = 0.0015; // ±0.15% → toca TP/SL en pocos minutos sin gatillarse al instante
-        entry = ref;
-        tp = signal === 'long' ? ref * (1 + pct) : ref * (1 - pct);
-        sl = signal === 'long' ? ref * (1 - pct) : ref * (1 + pct);
-    }
-
     try {
         const cr = await pool.query('SELECT * FROM cuentas_trading WHERE usuario_id = $1', [req.usuario.id]);
         if (!cr.rows.length || !cr.rows[0].api_key) return res.status(400).json({ error: 'Cargá tus claves de Binance primero' });
@@ -2077,6 +2080,16 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
         try { ctx = ctxDeCuenta(cr.rows[0]); }
         catch (e) { return res.status(500).json({ error: 'No se pudo descifrar la clave: ' + e.message }); }
         ctxActivos.set(req.usuario.id, ctx);
+
+        if (req.body.prueba) {
+            // Precio de referencia del mercado de ESTA cuenta (testnet o real), no de un feed global.
+            const ref = precioDeCtx(ctx);
+            if (!ref) return res.status(503).json({ error: 'Aún no hay precio de mercado en vivo para tu entorno; probá de nuevo en unos segundos.' });
+            const pct = 0.0015; // ±0.15% → toca TP/SL en pocos minutos sin gatillarse al instante
+            entry = ref;
+            tp = signal === 'long' ? ref * (1 + pct) : ref * (1 - pct);
+            sl = signal === 'long' ? ref * (1 - pct) : ref * (1 + pct);
+        }
 
         let qty = Math.floor((positionUsdt / entry) * 1000) / 1000;
         // BTCUSDT perp exige ~100 USDT de notional mínimo; redondeamos hacia arriba al
@@ -2421,9 +2434,13 @@ app.put('/api/mi-cuenta', autenticar, async (req, res) => {
     if (!apiKey || !apiSecret) return res.status(400).json({ error: 'api_key y api_secret requeridos' });
     if (!ENCRYPTION_KEY) return res.status(503).json({ error: 'El servidor no tiene ENCRYPTION_KEY configurada; no se pueden guardar claves de forma segura' });
 
-    const base = 'https://testnet.binancefuture.com'; // testnet fijo por ahora
+    // Entorno elegido por el usuario. 'real' opera con plata de verdad; cualquier valor no
+    // reconocido cae en testnet por seguridad (nunca asumir real sin que lo pidan explícito).
+    const entorno = String(req.body.entorno || 'testnet').toLowerCase() === 'real' ? 'real' : 'testnet';
+    const base = entorno === 'real' ? 'https://fapi.binance.com' : 'https://testnet.binancefuture.com';
     try {
         // Verificar las claves contra Binance antes de persistir (evita guardar claves rotas).
+        // Se valida contra la base del entorno elegido: una clave de testnet no sirve en real.
         let balance;
         try { balance = await balanceDeCuenta({ apiKey, secret: apiSecret, base }); }
         catch (e) { return res.status(400).json({ error: 'Las claves no pasaron la verificación con Binance: ' + e.message }); }
@@ -2438,7 +2455,7 @@ app.put('/api/mi-cuenta', autenticar, async (req, res) => {
                     base_url = EXCLUDED.base_url`,
             [req.usuario.id, apiKey, secretCifrado, base]
         );
-        res.json({ ok: true, entorno: 'testnet', balance_usdt: balance.wallet });
+        res.json({ ok: true, entorno, balance_usdt: balance.wallet });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
