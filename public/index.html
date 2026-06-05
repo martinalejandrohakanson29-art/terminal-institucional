@@ -664,7 +664,17 @@
             shortName: 'RSI',
             calcParams: [14, 70, 30, 60, 40],
             figures: [
-                { key: 'rsi',        title: 'RSI: ', type: 'line', styles: () => ({ color: configRSI.color, size: 1 }) },
+                { key: 'rsi',        title: 'RSI: ', type: 'line', styles: (data) => {
+                    // Color por tramo segun bandas de momentum: verde si esta por encima,
+                    // rojo si esta por debajo, gris si esta entre ambas bandas.
+                    const v = data && data.current && data.current.indicatorData ? data.current.indicatorData.rsi : null;
+                    let color = '#787b86';
+                    if (v != null) {
+                        if (v >= configRSI.momentumAlto) color = '#26a69a';
+                        else if (v <= configRSI.momentumBajo) color = '#ef5350';
+                    }
+                    return { color, size: 1 };
+                } },
                 { key: 'overbought', title: '',      type: 'line', styles: () => ({ color: 'rgba(239,83,80,0.45)', size: 1, style: 'dashed', dashedValue: [4, 2] }) },
                 { key: 'oversold',   title: '',      type: 'line', styles: () => ({ color: 'rgba(38,166,154,0.45)', size: 1, style: 'dashed', dashedValue: [4, 2] }) },
                 { key: 'momHigh',    title: '',      type: 'line', styles: () => ({ color: 'rgba(120,123,134,0.55)', size: 1, style: 'dashed', dashedValue: [2, 3] }) },
