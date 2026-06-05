@@ -142,16 +142,8 @@ async function inicializarBaseDeDatos() {
                 ADD COLUMN IF NOT EXISTS ultima_cierre_ts BIGINT,
                 ADD COLUMN IF NOT EXISTS usuario_id      INTEGER REFERENCES usuarios(id)
         `);
-        // Migración: usuario_id en auto_trading_entradas
-        await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS usuario_id INTEGER REFERENCES usuarios(id)`);
-        // Migración: qty y stop_type por entrada (para gestionar sub-posiciones / pyramiding en vivo)
-        await pool.query(`
-            ALTER TABLE auto_trading_entradas
-                ADD COLUMN IF NOT EXISTS qty       NUMERIC,
-                ADD COLUMN IF NOT EXISTS stop_type VARCHAR(20)
-        `);
-        // Migración: referencia de capital inicial para sizing "% capital inicial" en vivo
-        await pool.query(`ALTER TABLE auto_trading_config ADD COLUMN IF NOT EXISTS capital_inicial_ref NUMERIC`);
+        // La tabla de entradas debe existir ANTES de los ALTER que la modifican (en una BD
+        // nueva, alterar una tabla inexistente abortaría toda la inicialización).
         await pool.query(`
             CREATE TABLE IF NOT EXISTS auto_trading_entradas (
                 id           SERIAL PRIMARY KEY,
@@ -166,6 +158,23 @@ async function inicializarBaseDeDatos() {
                 ts_cierre    BIGINT
             )
         `);
+        // Migración: usuario_id en auto_trading_entradas
+        await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS usuario_id INTEGER REFERENCES usuarios(id)`);
+        // Migración: qty y stop_type por entrada (para gestionar sub-posiciones / pyramiding en vivo)
+        await pool.query(`
+            ALTER TABLE auto_trading_entradas
+                ADD COLUMN IF NOT EXISTS qty       NUMERIC,
+                ADD COLUMN IF NOT EXISTS stop_type VARCHAR(20)
+        `);
+        // Migración: IDs de las órdenes de protección (TP/SL) colocadas en el exchange,
+        // para poder cancelarlas al cerrar la sub-posición y evitar órdenes huérfanas.
+        await pool.query(`
+            ALTER TABLE auto_trading_entradas
+                ADD COLUMN IF NOT EXISTS tp_order_id VARCHAR(32),
+                ADD COLUMN IF NOT EXISTS sl_order_id VARCHAR(32)
+        `);
+        // Migración: referencia de capital inicial para sizing "% capital inicial" en vivo
+        await pool.query(`ALTER TABLE auto_trading_config ADD COLUMN IF NOT EXISTS capital_inicial_ref NUMERIC`);
         await pool.query(`INSERT INTO configuracion (clave, valor) VALUES ('limite_bd', 1.0) ON CONFLICT (clave) DO NOTHING`);
 
         const configRes = await pool.query(`SELECT valor FROM configuracion WHERE clave = 'limite_bd'`);
@@ -1246,7 +1255,9 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
 const N8N_WEBHOOK_URL    = process.env.N8N_WEBHOOK_URL;
 const BINANCE_API_KEY    = process.env.Clave_API_Binance;
 const BINANCE_SECRET     = process.env.Clave_secreta_Binance;
-const BINANCE_BASE       = 'https://testnet.binancefuture.com';
+// Por defecto testnet (plata virtual). Para operar en real, definir en el entorno
+// BINANCE_BASE=https://fapi.binance.com (y usar claves API de la cuenta real).
+const BINANCE_BASE       = process.env.BINANCE_BASE || 'https://testnet.binancefuture.com';
 const BINANCE_WS_PRECIO  = BINANCE_BASE.includes('testnet')
     ? 'wss://stream.binancefuture.com/ws/btcusdt@aggTrade'
     : 'wss://fstream.binance.com/ws/btcusdt@aggTrade';
@@ -1294,6 +1305,66 @@ function buildEntryUrl(lado, qty) {
     return `${BINANCE_BASE}/fapi/v1/order?${p}&signature=${binanceSign(p)}`;
 }
 
+// BTCUSDT perp tiene tick size 0.1 → los stopPrice deben redondearse a 1 decimal.
+function redondearPrecio(precio) {
+    return Math.round(precio * 10) / 10;
+}
+
+// Orden de protección reduceOnly en el exchange (TAKE_PROFIT_MARKET o STOP_MARKET).
+// Disparada por MARK_PRICE para evitar wicks de precio last. Cierra solo su qty.
+function buildStopUrl(lado, qty, stopPrice, tipo) {
+    const side = lado === 'long' ? 'SELL' : 'BUY';
+    const sp   = redondearPrecio(stopPrice);
+    const ts   = Date.now();
+    const p    = `symbol=BTCUSDT&side=${side}&type=${tipo}&quantity=${qty}&stopPrice=${sp}&reduceOnly=true&workingType=MARK_PRICE&timestamp=${ts}`;
+    return `${BINANCE_BASE}/fapi/v1/order?${p}&signature=${binanceSign(p)}`;
+}
+
+async function cancelarOrden(orderId) {
+    if (!orderId) return;
+    try {
+        const ts  = Date.now();
+        const q   = `symbol=BTCUSDT&orderId=${orderId}&timestamp=${ts}`;
+        const url = `${BINANCE_BASE}/fapi/v1/order?${q}&signature=${binanceSign(q)}`;
+        await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+    } catch (e) { console.error(`[AutoTrading] Error cancelando orden ${orderId}: ${e.message}`); }
+}
+
+// Barrido: cancela todas las órdenes abiertas del símbolo (al quedar plano / reconciliar).
+async function cancelarTodasLasOrdenes() {
+    try {
+        const ts  = Date.now();
+        const q   = `symbol=BTCUSDT&timestamp=${ts}`;
+        const url = `${BINANCE_BASE}/fapi/v1/allOpenOrders?${q}&signature=${binanceSign(q)}`;
+        await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+    } catch (e) { console.error(`[AutoTrading] Error cancelando órdenes abiertas: ${e.message}`); }
+}
+
+// Coloca en el exchange las órdenes de protección de una sub-posición recién abierta.
+// El TP siempre es un nivel fijo; el SL solo se coloca si el stop es por Porcentaje
+// (los stops por Ruptura EMA / Tiempo no son niveles de precio y los gestiona el server).
+// Sirven de red de seguridad: si el server se cae, el exchange igual cierra la posición.
+async function colocarProteccionExchange(sub) {
+    try {
+        if (sub.tp) {
+            const r = await ejecutarOrdenBinance(
+                buildStopUrl(sub.lado, sub.qty, sub.tp, 'TAKE_PROFIT_MARKET'), BINANCE_API_KEY, `TP-EXCH #${sub.id}`);
+            if (r.ok && r.body?.orderId) sub.tpOrderId = String(r.body.orderId);
+        }
+        if ((sub.stopType ?? 'Porcentaje') === 'Porcentaje' && sub.sl) {
+            const r = await ejecutarOrdenBinance(
+                buildStopUrl(sub.lado, sub.qty, sub.sl, 'STOP_MARKET'), BINANCE_API_KEY, `SL-EXCH #${sub.id}`);
+            if (r.ok && r.body?.orderId) sub.slOrderId = String(r.body.orderId);
+        }
+        await pool.query(
+            `UPDATE auto_trading_entradas SET tp_order_id=$1, sl_order_id=$2 WHERE id=$3`,
+            [sub.tpOrderId || null, sub.slOrderId || null, sub.id]
+        );
+    } catch (e) {
+        console.error(`[AutoTrading] Error colocando protección exchange #${sub.id}: ${e.message}`);
+    }
+}
+
 // Cierra UNA sub-posición. El llamador ya debe haberla removido de posicionesActivas de
 // forma síncrona (antes de cualquier await) para evitar dobles cierres por ticks concurrentes.
 async function cerrarSubPosicion(pos, razon, precio) {
@@ -1309,7 +1380,15 @@ async function cerrarSubPosicion(pos, razon, precio) {
         await pool.query(`UPDATE auto_trading_config SET ultima_senal=NULL WHERE id=1`);
     }
     await sincronizarPosicionBD();
+    // Cancelar las órdenes de protección de esta sub-posición ANTES del cierre a mercado,
+    // para no dejar stops huérfanos en el exchange. Si una ya se ejecutó, el cancel falla
+    // silenciosamente. El cierre reduceOnly que sigue es benigno si el exchange ya cerró
+    // la posición (Binance lo rechaza con -2022, sin sobre-vender).
+    await cancelarOrden(pos.tpOrderId);
+    await cancelarOrden(pos.slOrderId);
     await ejecutarOrdenBinance(buildCloseUrl(pos.lado, pos.qty), BINANCE_API_KEY, `CIERRE-${razon}`);
+    // Barrido final al quedar plano: limpia cualquier stop residual del exchange.
+    if (posicionesActivas.length === 0) await cancelarTodasLasOrdenes();
 }
 
 // TP/SL por tick para cada sub-posición. El SL fijo por tick solo aplica a stop por
@@ -1450,7 +1529,9 @@ function iniciarMonitorPrecio() {
 
 // Log de estado al arrancar
 setTimeout(() => {
-    console.log(`[AutoTrading] N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL ? '✅ configurado' : '❌ falta'}`);
+    const modo = BINANCE_BASE.includes('testnet') ? '🧪 TESTNET (plata virtual)' : '🔴 REAL (plata de verdad)';
+    console.log(`[AutoTrading] Entorno Binance: ${modo} — ${BINANCE_BASE}`);
+    console.log(`[AutoTrading] N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL ? '✅ configurado (opcional)' : '➖ no configurado (opcional)'}`);
     console.log(`[AutoTrading] Clave_API_Binance: ${BINANCE_API_KEY ? '✅ configurada' : '❌ falta'}`);
     console.log(`[AutoTrading] Clave_secreta_Binance: ${BINANCE_SECRET ? '✅ configurada' : '❌ falta'}`);
 }, 3000);
@@ -1489,9 +1570,57 @@ async function setBinanceLeverage(leverage) {
     return r.ok;
 }
 
+// Asegura que la cuenta esté en el modo que asume el bot:
+//  - Modo de posición One-way (no Hedge): las órdenes reduceOnly sin positionSide solo
+//    funcionan en One-way; en Hedge serían rechazadas.
+//  - Margin type del símbolo (CROSSED por defecto; configurable con BINANCE_MARGIN_TYPE).
+// Se ejecuta al arrancar, con la cuenta plana. Los códigos -4059 / -4046 significan
+// "no hace falta cambiar" y se tratan como éxito.
+async function asegurarConfiguracionCuenta() {
+    if (!BINANCE_API_KEY || !BINANCE_SECRET) return;
+
+    // Modo One-way
+    try {
+        const ts  = Date.now();
+        const q   = `dualSidePosition=false&timestamp=${ts}`;
+        const url = `${BINANCE_BASE}/fapi/v1/positionSide/dual?${q}&signature=${binanceSign(q)}`;
+        const r   = await fetch(url, { method: 'POST', headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+        const b   = await r.json();
+        if (r.ok || b.code === -4059) console.log('[AutoTrading] Modo de posición: One-way ✅');
+        else console.warn(`[AutoTrading] ⚠️ No se pudo fijar modo One-way: ${b.code} ${b.msg}`);
+    } catch (e) { console.error('[AutoTrading] Error fijando modo de posición:', e.message); }
+
+    // Margin type
+    try {
+        const mt  = (process.env.BINANCE_MARGIN_TYPE || 'CROSSED').toUpperCase();
+        const ts  = Date.now();
+        const q   = `symbol=BTCUSDT&marginType=${mt}&timestamp=${ts}`;
+        const url = `${BINANCE_BASE}/fapi/v1/marginType?${q}&signature=${binanceSign(q)}`;
+        const r   = await fetch(url, { method: 'POST', headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+        const b   = await r.json();
+        if (r.ok || b.code === -4046) console.log(`[AutoTrading] Margin type: ${mt} ✅`);
+        else console.warn(`[AutoTrading] ⚠️ No se pudo fijar margin type: ${b.code} ${b.msg}`);
+    } catch (e) { console.error('[AutoTrading] Error fijando margin type:', e.message); }
+}
+
+// Posición NETA real del símbolo en el exchange (positionAmt con signo). Para reconciliar
+// el libro local con el exchange tras un reinicio.
+async function obtenerPosicionExchange() {
+    const ts  = Date.now();
+    const q   = `symbol=BTCUSDT&timestamp=${ts}&recvWindow=10000`;
+    const url = `${BINANCE_BASE}/fapi/v2/positionRisk?${q}&signature=${binanceSign(q)}`;
+    const r    = await fetch(url, { headers: { 'X-MBX-APIKEY': BINANCE_API_KEY } });
+    const body = await r.json();
+    if (!Array.isArray(body)) throw new Error(body && body.msg ? body.msg : 'positionRisk no disponible');
+    const pos = body.find(x => x.symbol === 'BTCUSDT');
+    return pos ? parseFloat(pos.positionAmt) : 0;
+}
+
 let autoTradingCorriendo = false;
 async function ejecutarAutoTrading() {
-    if (!N8N_WEBHOOK_URL) return;
+    // n8n es opcional (solo notificación/logging); el bot opera sin él. Lo que sí es
+    // imprescindible son las claves de Binance para poder firmar y ejecutar órdenes.
+    if (!BINANCE_API_KEY || !BINANCE_SECRET) return;
     if (autoTradingCorriendo) return; // evita solapamiento de ciclos (entradas duplicadas)
     autoTradingCorriendo = true;
     try {
@@ -1595,11 +1724,15 @@ async function ejecutarAutoTrading() {
                  VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8) RETURNING id`,
                 [Date.now(), nuevaSenal, resultado.entry, resultado.tp, resultado.sl, qty, stopType, cfg.usuario_id || null]
             );
-            posicionesActivas.push({
+            const sub = {
                 id: ins.rows[0].id, lado: nuevaSenal, qty, entry: resultado.entry,
                 tp: resultado.tp, sl: resultado.sl, entryTs: Date.now(), stopType,
-            });
+            };
+            posicionesActivas.push(sub);
             await sincronizarPosicionBD();
+            // Red de seguridad: TP/SL reales en el exchange para que cierre la posición
+            // aunque el server se caiga. El monitoreo por server sigue siendo el primario.
+            await colocarProteccionExchange(sub);
             console.log(`[AutoTrading] Sub-posición #${ins.rows[0].id} abierta — abiertas: ${posicionesActivas.length}`);
         }
 
@@ -1644,7 +1777,7 @@ setTimeout(async () => {
         } catch (_) {}
 
         const openRows = await pool.query(
-            `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type
+            `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, tp_order_id, sl_order_id
              FROM auto_trading_entradas WHERE estado = 'abierta' ORDER BY ts ASC`
         );
         posicionesActivas = [];
@@ -1658,15 +1791,52 @@ setTimeout(async () => {
                 id: row.id, lado: row.lado, qty,
                 entry: parseFloat(row.precio_entrada), tp: parseFloat(row.precio_tp), sl: parseFloat(row.precio_sl),
                 entryTs: parseInt(row.ts), stopType: row.stop_type || stopTypeCfg,
+                tpOrderId: row.tp_order_id || null, slOrderId: row.sl_order_id || null,
             });
         }
         await sincronizarPosicionBD();
         if (posicionesActivas.length) {
             console.log(`[AutoTrading] ${posicionesActivas.length} sub-posición(es) recuperada(s): ${posicionesActivas.map(x => `#${x.id} ${x.lado} ${x.qty}`).join(', ')}`);
         }
+
+        // Reconciliar con el exchange: si mientras el server estuvo caído los stops del
+        // exchange cerraron la posición, el libro local quedó desactualizado.
+        if (posicionesActivas.length > 0 && BINANCE_API_KEY && BINANCE_SECRET) {
+            try {
+                const amt = await obtenerPosicionExchange();
+                if (Math.abs(amt) < 1e-8) {
+                    console.warn(`[AutoTrading] ⚠️ Exchange PLANO pero el libro tenía ${posicionesActivas.length} sub-posición(es) — cerradas por el exchange con el server caído. Reconciliando...`);
+                    const ahoraMs = Date.now();
+                    for (const pos of posicionesActivas) {
+                        await pool.query(
+                            `UPDATE auto_trading_entradas SET estado='cerrada', razon_cierre='Exchange', ts_cierre=$1 WHERE id=$2`,
+                            [ahoraMs, pos.id]
+                        );
+                    }
+                    posicionesActivas = [];
+                    await cancelarTodasLasOrdenes();
+                    await pool.query(`UPDATE auto_trading_config SET ultima_senal=NULL, ultima_cierre_ts=$1 WHERE id=1`, [ahoraMs]);
+                    await sincronizarPosicionBD();
+                } else {
+                    const sumLibro = posicionesActivas.reduce((s, p) => s + p.qty, 0) * (posicionesActivas[0].lado === 'long' ? 1 : -1);
+                    if (Math.abs(amt - sumLibro) > 0.0005) {
+                        console.warn(`[AutoTrading] ⚠️ Discrepancia: posición exchange ${amt} BTC vs libro ${sumLibro} BTC. Revisar manualmente.`);
+                    }
+                    // Recolocar protección a sub-posiciones legacy que no tengan órdenes en el exchange.
+                    for (const sub of posicionesActivas) {
+                        if (!sub.tpOrderId && !sub.slOrderId) await colocarProteccionExchange(sub);
+                    }
+                }
+            } catch (e) {
+                console.error('[AutoTrading] Error reconciliando con exchange:', e.message);
+            }
+        }
     } catch (e) {
         console.error('[AutoTrading] Error cargando posiciones desde BD:', e.message);
     }
+
+    // Forzar modo One-way + margin type antes de operar (cuenta normalmente plana al arrancar).
+    await asegurarConfiguracionCuenta();
 
     iniciarMonitorPrecio();
     ejecutarAutoTrading();
@@ -1756,8 +1926,10 @@ app.post('/api/autotrading/test', autenticar, soloAdmin, async (req, res) => {
                  VALUES ($1, $2, $3, $4, $5, $6, 'Porcentaje', 'abierta', $7) RETURNING id`,
                 [Date.now(), signal, entry, tp, sl, qty, req.usuario.id || null]
             );
-            posicionesActivas.push({ id: ins.rows[0].id, lado: signal, qty, entry, tp, sl, entryTs: Date.now(), stopType: 'Porcentaje' });
+            const sub = { id: ins.rows[0].id, lado: signal, qty, entry, tp, sl, entryTs: Date.now(), stopType: 'Porcentaje' };
+            posicionesActivas.push(sub);
             await sincronizarPosicionBD();
+            await colocarProteccionExchange(sub);
         }
 
         // Notificar n8n si está configurado

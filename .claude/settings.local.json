@@ -48,7 +48,16 @@
       "Bash(wsl grep *)",
       "Bash(powershell -Command \"Select-String -Path 'C:\\\\Users\\\\User\\\\Desktop\\\\claude\\\\terminal\\\\public\\\\index.html' -Pattern 'estrategia|VWAP.*activ|filtro.*activ|Activar' | Select-Object LineNumber, Line | Format-Table -AutoSize | Out-String -Width 300\")",
       "Bash(cat)",
-      "Bash(rm -f .git/CMSG_TMP)"
+      "Bash(rm -f .git/CMSG_TMP)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\marti\\\\Desktop\\\\proyectos\\\\trading\" -Depth 2 | Where-Object { !$_.PSIsContainer } | Select-Object FullName | Where-Object { $_.FullName -notmatch \"node_modules\" })",
+      "PowerShell(git -C \"C:\\\\Users\\\\marti\\\\Desktop\\\\proyectos\\\\trading\" commit -m $msg)",
+      "Bash(git commit -m '@ *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\marti\\\\Desktop\\\\proyectos\\\\trading\" -Recurse -File)",
+      "Bash(Select-Object FullName)",
+      "PowerShell(head *)",
+      "Bash(git fetch *)",
+      "Bash(git rev-list *)",
+      "Bash(git merge *)"
     ]
   }
 }
