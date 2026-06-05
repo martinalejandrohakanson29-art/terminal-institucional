@@ -46,7 +46,7 @@
         #main-content { display: flex; flex: 1; min-height: 0; }
         #chart-container { flex-grow: 1; position: relative; overflow: hidden; background-color: #f0f2f5; }
 
-        #rsi-15m-display, #delta-vol-display {
+        #rsi-15m-display, #delta-vol-display, #ema-ang-display {
             position: absolute;
             left: 10px;
             z-index: 100;
@@ -62,6 +62,7 @@
         }
         #rsi-15m-display  { top: 65px; }
         #delta-vol-display { top: 100px; }
+        #ema-ang-display  { top: 135px; }
 
         #orderbook-container {
             width: 320px; min-width: 320px; flex-shrink: 0; background-color: #ffffff; border-left: 1px solid #d1d4dc; display: flex; flex-direction: column; font-size: 13px; overflow-y: auto;
@@ -215,6 +216,57 @@
                 <input type="number" id="rsi-mom-bajo" class="input-rango" value="40" min="0" max="100" style="width:60px; font-size:13px;">
             </div>
             <button class="btn-tiempo" onclick="aplicarRSI(); toggleRSIConfig();" style="background:#2962FF; color:white; border:none; width:100%; height:30px; font-size:12px;">Aplicar</button>
+        </div>
+    </div>
+
+    <div id="emaang-config-panel" style="display:none; position:absolute; top:65px; left:440px; background:white; border:1px solid #d1d4dc; padding:14px; border-radius:8px; z-index:2000; box-shadow:0 4px 12px rgba(0,0,0,0.15); width:240px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h4 style="margin:0; font-size:13px;">Angulación EMA — Config</h4>
+            <span onclick="toggleEMAangConfig()" style="cursor:pointer; color:#64748b; font-size:18px; font-weight:bold;">&times;</span>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; width:120px;">EMA Length</span>
+                <input type="number" id="emaang-len" class="input-rango" value="200" min="2" max="1000" style="width:70px; font-size:13px;">
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; width:120px;">Velas pendiente</span>
+                <input type="number" id="emaang-slopebars" class="input-rango" value="10" min="1" max="200" style="width:70px; font-size:13px;">
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; width:120px;">ATR Length</span>
+                <input type="number" id="emaang-atr" class="input-rango" value="14" min="1" max="200" style="width:70px; font-size:13px;">
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; width:120px;">Pendiente mínima</span>
+                <input type="number" id="emaang-minslope" class="input-rango" value="0.25" min="0" step="0.05" style="width:70px; font-size:13px;">
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; width:120px;">Pendiente fuerte</span>
+                <input type="number" id="emaang-strongslope" class="input-rango" value="0.60" min="0" step="0.05" style="width:70px; font-size:13px;">
+            </div>
+            <div style="border-top:1px solid #eef1f5; margin:2px 0 0;"></div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; width:120px;">🟢 Long fuerte</span>
+                <input type="color" id="emaang-c-bullstrong" value="#00e676" style="width:28px; height:24px; border:1px solid #d1d4dc; padding:0; cursor:pointer; border-radius:3px;">
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; width:120px;">🟢 Long ok</span>
+                <input type="color" id="emaang-c-bullok" value="#26a69a" style="width:28px; height:24px; border:1px solid #d1d4dc; padding:0; cursor:pointer; border-radius:3px;">
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; width:120px;">🟡 Lateral</span>
+                <input type="color" id="emaang-c-flat" value="#ffeb3b" style="width:28px; height:24px; border:1px solid #d1d4dc; padding:0; cursor:pointer; border-radius:3px;">
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; width:120px;">🔴 Short ok</span>
+                <input type="color" id="emaang-c-bearok" value="#ef5350" style="width:28px; height:24px; border:1px solid #d1d4dc; padding:0; cursor:pointer; border-radius:3px;">
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:#64748b; width:120px;">🔴 Short fuerte</span>
+                <input type="color" id="emaang-c-bearstrong" value="#8b0000" style="width:28px; height:24px; border:1px solid #d1d4dc; padding:0; cursor:pointer; border-radius:3px;">
+            </div>
+            <button class="btn-tiempo" onclick="aplicarEMAang(); toggleEMAangConfig();" style="background:#2962FF; color:white; border:none; width:100%; height:30px; font-size:12px;">Aplicar</button>
         </div>
     </div>
 
@@ -373,6 +425,7 @@
         <div id="chart-container">
             <div id="rsi-15m-display">RSI 15m: —</div>
             <div id="delta-vol-display">Δ Vol: —</div>
+            <div id="ema-ang-display">EMA∠: —</div>
         </div>
         <div id="orderbook-container">
             <div style="padding: 8px 10px; border-bottom: 1px solid #d1d4dc; background: #ffffff; flex-shrink: 0;">
@@ -711,6 +764,121 @@
                         rsi = serie[j].rsi + (serie[j + 1].rsi - serie[j].rsi) * frac;
                     }
                     res[i] = { rsi, ...niveles };
+                }
+                return res;
+            }
+        });
+
+        // Angulación de EMA con temporalidad propia (MTF). La EMA se pinta segun
+        // la pendiente normalizada por ATR: slopeNorm = (ema - ema[slopeBars]) / atr.
+        // Mismo cálculo reutilizable en backtesting como filtro de tendencia.
+        const configEMAang = {
+            emaLen: 200, timeframe: '15m', slopeBars: 10, atrLen: 14,
+            minSlope: 0.25, strongSlope: 0.60,
+            cBullStrong: '#00e676', cBullOk: '#26a69a', cFlat: '#ffeb3b',
+            cBearOk: '#ef5350', cBearStrong: '#8b0000'
+        };
+        const EMAANG_TF_MS = { '1m': 60000, '5m': 300000, '15m': 900000, '1h': 3600000 };
+
+        // Devuelve el color de la EMA segun la pendiente normalizada.
+        function colorEMAang(s) {
+            if (s == null || !isFinite(s)) return configEMAang.cFlat;
+            if (s >=  configEMAang.strongSlope) return configEMAang.cBullStrong;
+            if (s >=  configEMAang.minSlope)    return configEMAang.cBullOk;
+            if (s >  -configEMAang.minSlope)    return configEMAang.cFlat;
+            if (s >  -configEMAang.strongSlope) return configEMAang.cBearOk;
+            return configEMAang.cBearStrong;
+        }
+
+        // Devuelve {txt, color} para el semaforo de estado en pantalla.
+        function estadoEMAang(s) {
+            if (s == null || !isFinite(s)) return { txt: '—', color: configEMAang.cFlat };
+            if (s >=  configEMAang.strongSlope) return { txt: '🟢 FUERTE LONG', color: configEMAang.cBullStrong };
+            if (s >=  configEMAang.minSlope)    return { txt: '🟢 LONG OK',     color: configEMAang.cBullOk };
+            if (s >  -configEMAang.minSlope)    return { txt: '🟡 LATERAL',     color: configEMAang.cFlat };
+            if (s >  -configEMAang.strongSlope) return { txt: '🔴 SHORT OK',    color: configEMAang.cBearOk };
+            return { txt: '🔴 FUERTE SHORT', color: configEMAang.cBearStrong };
+        }
+
+        // Serie de EMA + pendiente normalizada sobre las velas de la temporalidad
+        // propia del indicador. Devuelve [{ ts, ema, slope }] ancladas a la apertura.
+        function calcularSerieEMAang(velas) {
+            const { emaLen, atrLen, slopeBars } = configEMAang;
+            const n = velas.length;
+            const out = [];
+            if (n < emaLen + slopeBars + 1) return out;
+
+            // EMA exponencial
+            const k = 2 / (emaLen + 1);
+            const ema = new Array(n).fill(null);
+            let e = 0;
+            for (let i = 0; i < emaLen; i++) e += velas[i].close;
+            e /= emaLen;
+            ema[emaLen - 1] = e;
+            for (let i = emaLen; i < n; i++) { e = velas[i].close * k + e * (1 - k); ema[i] = e; }
+
+            // ATR de Wilder
+            const atr = new Array(n).fill(null);
+            const tr = new Array(n).fill(0);
+            for (let i = 1; i < n; i++) {
+                tr[i] = Math.max(
+                    velas[i].high - velas[i].low,
+                    Math.abs(velas[i].high - velas[i - 1].close),
+                    Math.abs(velas[i].low  - velas[i - 1].close)
+                );
+            }
+            if (n <= atrLen) return out;
+            let a = 0;
+            for (let i = 1; i <= atrLen; i++) a += tr[i];
+            a /= atrLen;
+            atr[atrLen] = a;
+            for (let i = atrLen + 1; i < n; i++) { a = (a * (atrLen - 1) + tr[i]) / atrLen; atr[i] = a; }
+
+            for (let i = 0; i < n; i++) {
+                if (ema[i] == null || atr[i] == null || atr[i] === 0) continue;
+                if (i < slopeBars || ema[i - slopeBars] == null) continue;
+                const slope = (ema[i] - ema[i - slopeBars]) / atr[i];
+                out.push({ ts: velas[i].timestamp, ema: ema[i], slope });
+            }
+            return out;
+        }
+
+        klinecharts.registerIndicator({
+            name: 'EMA_ANGULO',
+            shortName: 'EMA∠',
+            // calcParams solo se usa para forzar el recálculo al cambiar la config;
+            // los valores reales se leen de configEMAang dentro de calc().
+            calcParams: [200, 10, 14],
+            figures: [
+                { key: 'ema', title: 'EMA∠: ', type: 'line', styles: (data) => {
+                    const s = data && data.current && data.current.indicatorData
+                        ? data.current.indicatorData.slope : null;
+                    return { color: colorEMAang(s), size: 2 };
+                } }
+            ],
+            calc: (dataList) => {
+                const tfMs = EMAANG_TF_MS[configEMAang.timeframe] || 900000;
+                const serie = calcularSerieEMAang(velasEMAang);
+                const m = serie.length;
+                const anchors = serie.map(p => p.ts + tfMs);
+
+                // Interpola el valor de la EMA entre anclas (línea continua) y arrastra
+                // la pendiente del bucket vigente para colorear cada tramo.
+                const res = new Array(dataList.length);
+                let j = 0;
+                for (let i = 0; i < dataList.length; i++) {
+                    const t = dataList[i].timestamp;
+                    if (m === 0 || t < anchors[0]) { res[i] = {}; continue; }
+                    while (j < m - 1 && anchors[j + 1] <= t) j++;
+                    let ema, slope;
+                    if (j >= m - 1) {
+                        ema = serie[m - 1].ema; slope = serie[m - 1].slope;
+                    } else {
+                        const frac = (t - anchors[j]) / (anchors[j + 1] - anchors[j]);
+                        ema = serie[j].ema + (serie[j + 1].ema - serie[j].ema) * frac;
+                        slope = serie[j].slope;
+                    }
+                    res[i] = { ema, slope };
                 }
                 return res;
             }
@@ -1134,12 +1302,52 @@
             }
         }
 
+        // --- ANGULACIÓN EMA CONFIG ---
+        function toggleEMAangConfig() {
+            const p = document.getElementById('emaang-config-panel');
+            p.style.display = p.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function initEMAangUI() {
+            document.getElementById('emaang-len').value           = configEMAang.emaLen;
+            document.getElementById('emaang-slopebars').value     = configEMAang.slopeBars;
+            document.getElementById('emaang-atr').value           = configEMAang.atrLen;
+            document.getElementById('emaang-minslope').value      = configEMAang.minSlope;
+            document.getElementById('emaang-strongslope').value   = configEMAang.strongSlope;
+            document.getElementById('emaang-c-bullstrong').value  = configEMAang.cBullStrong;
+            document.getElementById('emaang-c-bullok').value      = configEMAang.cBullOk;
+            document.getElementById('emaang-c-flat').value        = configEMAang.cFlat;
+            document.getElementById('emaang-c-bearok').value      = configEMAang.cBearOk;
+            document.getElementById('emaang-c-bearstrong').value  = configEMAang.cBearStrong;
+        }
+
+        const emaAngCalcParams = () => [configEMAang.emaLen, configEMAang.slopeBars, configEMAang.atrLen];
+
+        function aplicarEMAang() {
+            configEMAang.emaLen      = Math.max(2, parseInt(document.getElementById('emaang-len').value) || 200);
+            configEMAang.slopeBars   = Math.max(1, parseInt(document.getElementById('emaang-slopebars').value) || 10);
+            configEMAang.atrLen      = Math.max(1, parseInt(document.getElementById('emaang-atr').value) || 14);
+            configEMAang.minSlope    = Math.max(0, parseFloat(document.getElementById('emaang-minslope').value) || 0.25);
+            configEMAang.strongSlope = Math.max(0, parseFloat(document.getElementById('emaang-strongslope').value) || 0.60);
+            configEMAang.cBullStrong = document.getElementById('emaang-c-bullstrong').value;
+            configEMAang.cBullOk     = document.getElementById('emaang-c-bullok').value;
+            configEMAang.cFlat       = document.getElementById('emaang-c-flat').value;
+            configEMAang.cBearOk     = document.getElementById('emaang-c-bearok').value;
+            configEMAang.cBearStrong = document.getElementById('emaang-c-bearstrong').value;
+            guardarConfigServidor('configEMAang', configEMAang).catch(() => {});
+            if (emaAngVisible) {
+                chart.overrideIndicator({ name: 'EMA_ANGULO', calcParams: emaAngCalcParams() }, 'candle_pane');
+                actualizarDisplayEMAang();
+            }
+        }
+
         // --- TOGGLE INDICADORES ---
         let vwapPeriod = 60;
         let vwapVisible = true, deltaVisible = true, deltaSumVisible = true, oiVisible = true, macdVisible = true;
         let deltaVolVisible = false, deltaVolVelas = 20;
         let adxVisible = false;
         let rsiVisible = false;
+        let emaAngVisible = false;
 
         function actualizarDisplayDeltaVol() {
             const el = document.getElementById('delta-vol-display');
@@ -1165,6 +1373,7 @@
             { id: '3EMA',      label: '3EMA',      config: 'ema'       },
             { id: 'ADX',       label: 'ADX',       config: null        },
             { id: 'RSI',       label: 'RSI',       config: 'rsi'       },
+            { id: 'EMA_ANG',   label: 'EMA∠',      config: 'emaang'    },
         ];
 
         function indicadorEsVisible(id) {
@@ -1177,6 +1386,7 @@
             if (id === '3EMA')      return maVisible;
             if (id === 'ADX')       return adxVisible;
             if (id === 'RSI')       return rsiVisible;
+            if (id === 'EMA_ANG')   return emaAngVisible;
             return false;
         }
 
@@ -1212,7 +1422,15 @@
                            <option value="1h"  ${configRSI.timeframe==='1h'  ?'selected':''}>1H</option>
                        </select>`
                     : '';
-                return `<span class="chip-ind">${d.label}${vwapSelHtml}${rsiSelHtml}${gearHtml}<span class="chip-x" onclick="toggleDesdeChip('${d.id}')" title="Quitar">&times;</span></span>`;
+                const emaAngSelHtml = d.id === 'EMA_ANG'
+                    ? `<select onchange="cambiarTimeframeEMAang(this.value)" title="Temporalidad EMA∠">
+                           <option value="1m"  ${configEMAang.timeframe==='1m'  ?'selected':''}>1m</option>
+                           <option value="5m"  ${configEMAang.timeframe==='5m'  ?'selected':''}>5m</option>
+                           <option value="15m" ${configEMAang.timeframe==='15m' ?'selected':''}>15m</option>
+                           <option value="1h"  ${configEMAang.timeframe==='1h'  ?'selected':''}>1H</option>
+                       </select>`
+                    : '';
+                return `<span class="chip-ind">${d.label}${vwapSelHtml}${rsiSelHtml}${emaAngSelHtml}${gearHtml}<span class="chip-x" onclick="toggleDesdeChip('${d.id}')" title="Quitar">&times;</span></span>`;
             }).join('');
             renderIndicadorList();
         }
@@ -1256,6 +1474,7 @@
             if (tipo === 'deltasum') toggleDeltaSumConfig();
             else if (tipo === 'ema') toggleMAConfig();
             else if (tipo === 'rsi') toggleRSIConfig();
+            else if (tipo === 'emaang') toggleEMAangConfig();
         }
 
         // Cerrar dropdown al click fuera
@@ -1303,6 +1522,17 @@
                     chart.removeIndicator('pane_rsi', 'RSI_CUSTOM');
                     desactivarFuentesRSI();
                 }
+            } else if (tipo === 'EMA_ANG') {
+                emaAngVisible = !emaAngVisible;
+                if (emaAngVisible) {
+                    chart.createIndicator('EMA_ANGULO', true, { id: 'candle_pane' });
+                    activarFuentesEMAang();
+                    aplicarEMAang();
+                } else {
+                    chart.removeIndicator('candle_pane', 'EMA_ANGULO');
+                    desactivarFuentesEMAang();
+                    actualizarDisplayEMAang();
+                }
             }
             renderChips();
         }
@@ -1348,6 +1578,7 @@
 
         initMAUI();
         initRSIUI();
+        initEMAangUI();
         renderChips();
 
         // --- TOGGLE BALLENAS ---
@@ -1851,9 +2082,10 @@
                 temporalidad:   temporalidadActual,
                 panelVisible:   document.getElementById('orderbook-container').style.display !== 'none',
                 ballenasVisibles,
-                vwapVisible, deltaVisible, deltaSumVisible, deltaVolVisible, deltaVolVelas, oiVisible, maVisible, macdVisible, adxVisible, rsiVisible,
+                vwapVisible, deltaVisible, deltaSumVisible, deltaVolVisible, deltaVolVelas, oiVisible, maVisible, macdVisible, adxVisible, rsiVisible, emaAngVisible,
                 configMA:       { ...configMA },
                 configRSI:      { ...configRSI },
+                configEMAang:   { ...configEMAang },
                 vwapReset:      vwapPeriod,
                 deltaSumPeriod: parseInt(document.getElementById('input-deltasum').value),
                 dibujos:        registroDibujos
@@ -2044,6 +2276,87 @@
             renderChips();
         }
 
+        // ============================================================
+        // ANGULACIÓN EMA — fuente de datos con temporalidad propia (OHLC para ATR)
+        // ============================================================
+        let velasEMAang = [];
+        let socketEMAang = null;
+        let socketEMAangIntencional = false;
+
+        function actualizarDisplayEMAang() {
+            const el = document.getElementById('ema-ang-display');
+            if (!el) return;
+            if (!emaAngVisible) { el.style.display = 'none'; return; }
+            const serie = calcularSerieEMAang(velasEMAang);
+            el.style.display = 'block';
+            if (serie.length === 0) { el.textContent = `EMA∠ ${configEMAang.emaLen} ${configEMAang.timeframe}: …`; el.style.color = '#64748b'; return; }
+            const s = serie[serie.length - 1].slope;
+            const est = estadoEMAang(s);
+            el.textContent = `EMA∠ ${configEMAang.emaLen} ${configEMAang.timeframe}: ${est.txt}  (${s.toFixed(2)})`;
+            el.style.color = est.color;
+        }
+
+        function refrescarEMAang() {
+            if (!emaAngVisible) return;
+            if (velasActuales.length > 0) chart.updateData(velasActuales[velasActuales.length - 1]);
+            actualizarDisplayEMAang();
+        }
+
+        async function cargarVelasEMAang() {
+            const tf = configEMAang.timeframe;
+            try {
+                const resp = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${tf}&limit=1000`);
+                const datos = await resp.json();
+                if (configEMAang.timeframe !== tf) return;
+                velasEMAang = datos.map(v => ({
+                    timestamp: v[0],
+                    high: parseFloat(v[2]), low: parseFloat(v[3]), close: parseFloat(v[4])
+                }));
+                refrescarEMAang();
+            } catch (e) { console.error('Error cargando velas EMA∠:', e); }
+        }
+
+        function iniciarSocketEMAang() {
+            if (socketEMAang && socketEMAang.readyState <= 1) { socketEMAangIntencional = true; socketEMAang.close(); }
+            const tf = configEMAang.timeframe;
+            socketEMAangIntencional = false;
+            socketEMAang = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${tf}`);
+            socketEMAang.onmessage = function(e) {
+                if (configEMAang.timeframe !== tf) return;
+                const k = JSON.parse(e.data).k;
+                const ts = k.t;
+                const vela = { timestamp: ts, high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c) };
+                const ult = velasEMAang.length > 0 ? velasEMAang[velasEMAang.length - 1] : null;
+                if (ult && ult.timestamp === ts) { ult.high = vela.high; ult.low = vela.low; ult.close = vela.close; }
+                else velasEMAang.push(vela);
+                refrescarEMAang();
+            };
+            socketEMAang.onclose = () => { if (!socketEMAangIntencional) setTimeout(iniciarSocketEMAang, 5000); };
+            socketEMAang.onerror = (e) => console.error('Error socket EMA∠:', e);
+        }
+
+        function activarFuentesEMAang() {
+            cargarVelasEMAang();
+            iniciarSocketEMAang();
+        }
+
+        function desactivarFuentesEMAang() {
+            if (socketEMAang && socketEMAang.readyState <= 1) { socketEMAangIntencional = true; socketEMAang.close(); }
+            socketEMAang = null;
+        }
+
+        function cambiarTimeframeEMAang(tf) {
+            if (!EMAANG_TF_MS[tf]) return;
+            configEMAang.timeframe = tf;
+            guardarConfigServidor('configEMAang', configEMAang).catch(() => {});
+            velasEMAang = [];
+            if (emaAngVisible) {
+                activarFuentesEMAang();
+                chart.overrideIndicator({ name: 'EMA_ANGULO', calcParams: emaAngCalcParams() }, 'candle_pane');
+            }
+            renderChips();
+        }
+
         // ── Estrategia en Vivo ────────────────────────────────────────
         let estrategiaLiveActiva = false;
         let estrategiaLiveInterval = null;
@@ -2188,6 +2501,9 @@
                 // RSI
                 if (cfg.configRSI) { Object.assign(configRSI, cfg.configRSI); initRSIUI(); }
 
+                // Angulación EMA
+                if (cfg.configEMAang) { Object.assign(configEMAang, cfg.configEMAang); initEMAangUI(); }
+
                 // VWAP reset
                 if (cfg.vwapReset) vwapPeriod = parseInt(cfg.vwapReset);
 
@@ -2245,6 +2561,12 @@
                     chart.overrideIndicator({ name: 'RSI_CUSTOM', calcParams: rsiCalcParams() }, 'pane_rsi');
                     activarFuentesRSI();
                 }
+                if (cfg.emaAngVisible === true) {
+                    emaAngVisible = true;
+                    chart.createIndicator('EMA_ANGULO', true, { id: 'candle_pane' });
+                    chart.overrideIndicator({ name: 'EMA_ANGULO', calcParams: emaAngCalcParams() }, 'candle_pane');
+                    activarFuentesEMAang();
+                }
 
                 if (cfg.maVisible === true) {
                     maVisible = true;
@@ -2270,6 +2592,8 @@
                 if (cfgMA) { Object.assign(configMA, cfgMA); initMAUI(); }
                 const cfgRSI = cfgGet('configRSI', null);
                 if (cfgRSI) { Object.assign(configRSI, cfgRSI); initRSIUI(); }
+                const cfgEMAang = cfgGet('configEMAang', null);
+                if (cfgEMAang) { Object.assign(configEMAang, cfgEMAang); initEMAangUI(); }
                 const vwapReset = cfgGet('vwapReset', null);
                 if (vwapReset) vwapPeriod = parseInt(vwapReset);
                 renderChips();
