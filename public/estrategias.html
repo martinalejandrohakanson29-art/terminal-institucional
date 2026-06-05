@@ -380,6 +380,46 @@
                 <label>Umbral Short (≤)</label>
                 <input type="number" id="p-rsi-short" class="form-input" value="40" min="1" max="99" step="1">
             </div>
+            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">Angulación EMA</div>
+            <div class="form-row">
+                <label>Activar filtro</label>
+                <input type="checkbox" id="p-emaang" class="form-check">
+            </div>
+            <div class="form-row">
+                <label>Temporalidad</label>
+                <select id="p-emaang-tf" class="form-select">
+                    <option value="1m">1m</option>
+                    <option value="5m">5m</option>
+                    <option value="15m" selected>15m</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>EMA Length</label>
+                <input type="number" id="p-emaang-len" class="form-input" value="200" min="2" max="1000">
+            </div>
+            <div class="form-row">
+                <label>Velas pendiente</label>
+                <input type="number" id="p-emaang-slopebars" class="form-input" value="10" min="1" max="200">
+            </div>
+            <div class="form-row">
+                <label>ATR Length</label>
+                <input type="number" id="p-emaang-atr" class="form-input" value="14" min="1" max="200">
+            </div>
+            <div class="form-row">
+                <label>Pendiente mínima</label>
+                <input type="number" id="p-emaang-minslope" class="form-input" value="0.25" step="0.05" min="0">
+            </div>
+            <div class="form-row">
+                <label>Pendiente fuerte</label>
+                <input type="number" id="p-emaang-strongslope" class="form-input" value="0.60" step="0.05" min="0">
+            </div>
+            <div class="form-row">
+                <label>Exigir</label>
+                <select id="p-emaang-mode" class="form-select">
+                    <option value="min" selected>Pendiente mínima</option>
+                    <option value="strong">Pendiente fuerte</option>
+                </select>
+            </div>
             <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">MACD</div>
             <div class="form-row">
                 <label>Activar filtro</label>
@@ -706,6 +746,14 @@
             rsiPeriod:         parseInt(document.getElementById('p-rsi-period').value) || 14,
             rsiLongMin:        numOrDefault('p-rsi-long', 60),
             rsiShortMax:       numOrDefault('p-rsi-short', 40),
+            useEmaAngFilter:   document.getElementById('p-emaang').checked,
+            emaAngTf:          document.getElementById('p-emaang-tf').value,
+            emaAngLen:         parseInt(document.getElementById('p-emaang-len').value)       || 200,
+            emaAngSlopeBars:   parseInt(document.getElementById('p-emaang-slopebars').value) || 10,
+            emaAngAtr:         parseInt(document.getElementById('p-emaang-atr').value)       || 14,
+            emaAngMinSlope:    numOrDefault('p-emaang-minslope', 0.25),
+            emaAngStrongSlope: numOrDefault('p-emaang-strongslope', 0.60),
+            emaAngMode:        document.getElementById('p-emaang-mode').value,
             useMacdFilter:     document.getElementById('p-macd').checked,
             macdTf:            document.getElementById('p-macd-tf').value,
             macdFast:          parseInt(document.getElementById('p-macd-fast').value)   || 12,
@@ -908,6 +956,8 @@
         const filtros = [
             { label: `RSI ${params.rsiTf||'15m'}`, activo: params.useRsiFilter !== false, desc: `≥${params.rsiLongMin??60} L / ≤${params.rsiShortMax??40} S · per.${params.rsiPeriod||14}` },
             { label: `MACD ${params.macdTf||'5m'}`, activo: params.useMacdFilter !== false, desc: `${params.macdFast||12}/${params.macdSlow||26}/${params.macdSignal||9}` },
+            { label: `EMA∠ ${params.emaAngTf||'15m'}`, activo: params.useEmaAngFilter === true,
+              desc: `EMA${params.emaAngLen||200} · ${params.emaAngMode==='strong'?`≥${params.emaAngStrongSlope??0.6}`:`≥${params.emaAngMinSlope??0.25}`} · ${params.emaAngSlopeBars||10}v/ATR${params.emaAngAtr||14}` },
             { label: 'Pullback EMAs', activo: params.usePullbackFilter,  desc: `≤${params.pullbackPerc}% · ${(params.pullbackEMAs||[]).map(e=>`EMA${e.period} ${e.tf}`).join(', ')}` },
             { label: 'Alineamiento',  activo: params.useEmaAlignment,    desc: 'EMA ordenadas' },
             { label: 'Cooldown',      activo: params.useCooldown,         desc: `${params.cooldownMinutes}m` },
@@ -1095,6 +1145,14 @@
         document.getElementById('p-rsi-period').value    = p.rsiPeriod   ?? 14;
         document.getElementById('p-rsi-long').value      = p.rsiLongMin  ?? 60;
         document.getElementById('p-rsi-short').value     = p.rsiShortMax ?? 40;
+        document.getElementById('p-emaang').checked              = !!p.useEmaAngFilter;
+        document.getElementById('p-emaang-tf').value            = p.emaAngTf       || '15m';
+        document.getElementById('p-emaang-len').value          = p.emaAngLen       ?? 200;
+        document.getElementById('p-emaang-slopebars').value    = p.emaAngSlopeBars ?? 10;
+        document.getElementById('p-emaang-atr').value          = p.emaAngAtr       ?? 14;
+        document.getElementById('p-emaang-minslope').value     = p.emaAngMinSlope    ?? 0.25;
+        document.getElementById('p-emaang-strongslope').value  = p.emaAngStrongSlope ?? 0.60;
+        document.getElementById('p-emaang-mode').value         = p.emaAngMode || 'min';
         document.getElementById('p-macd').checked         = p.useMacdFilter !== false;
         document.getElementById('p-macd-tf').value       = p.macdTf      || '5m';
         document.getElementById('p-macd-fast').value     = p.macdFast    ?? 12;

@@ -734,6 +734,41 @@ function calcADX(highs, lows, closes, period = 14) {
     return result;
 }
 
+// ATR de Wilder. Devuelve array alineado a los closes (null hasta calentar).
+function calcATR(highs, lows, closes, period = 14) {
+    const n = closes.length;
+    const atr = new Array(n).fill(null);
+    if (n <= period) return atr;
+    const tr = new Array(n).fill(0);
+    for (let i = 1; i < n; i++) {
+        tr[i] = Math.max(
+            highs[i] - lows[i],
+            Math.abs(highs[i] - closes[i - 1]),
+            Math.abs(lows[i]  - closes[i - 1])
+        );
+    }
+    let a = 0;
+    for (let i = 1; i <= period; i++) a += tr[i];
+    a /= period;
+    atr[period] = a;
+    for (let i = period + 1; i < n; i++) { a = (a * (period - 1) + tr[i]) / period; atr[i] = a; }
+    return atr;
+}
+
+// Pendiente de la EMA normalizada por ATR: slopeNorm = (ema[i] - ema[i-slopeBars]) / atr[i].
+// Mismo cálculo que el indicador "Angulación EMA" del terminal (público/index.html).
+function calcEMAangSlope(closes, highs, lows, emaLen = 200, atrLen = 14, slopeBars = 10) {
+    const n = closes.length;
+    const slope = new Array(n).fill(null);
+    const ema = calcEMA(closes, emaLen);
+    const atr = calcATR(highs, lows, closes, atrLen);
+    for (let i = slopeBars; i < n; i++) {
+        if (ema[i] == null || ema[i - slopeBars] == null || atr[i] == null || atr[i] === 0) continue;
+        slope[i] = (ema[i] - ema[i - slopeBars]) / atr[i];
+    }
+    return slope;
+}
+
 function calcVWAP(bars, session = 'daily') {
     const n = bars.length;
     const result = new Array(n).fill(null);
@@ -1041,6 +1076,33 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
     const adx15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), adxArr15m[i]]));
     const tsAdx15m = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
 
+    // Angulación de EMA — pendiente normalizada por ATR, con temporalidad propia.
+    // gate = umbral mínimo de pendiente; 'strong' exige la banda fuerte. Long pide
+    // slope >= +gate (alcista), Short pide slope <= -gate (bajista). Default OFF.
+    const useEmaAngFilter = p.useEmaAngFilter === true;
+    const emaAngTf        = p.emaAngTf        || '15m';
+    const emaAngLen       = p.emaAngLen       || 200;
+    const emaAngSlopeBars = p.emaAngSlopeBars || 10;
+    const emaAngAtr       = p.emaAngAtr       || 14;
+    const emaAngGate      = p.emaAngMode === 'strong'
+        ? (p.emaAngStrongSlope ?? 0.60)
+        : (p.emaAngMinSlope    ?? 0.25);
+    let emaAngDirect = null, emaAngByTs = null, tsEmaAng = null;
+    if (useEmaAngFilter) {
+        if (emaAngTf === '1m') {
+            emaAngDirect = calcEMAangSlope(c1m, bars1m.map(b => parseFloat(b[2])), bars1m.map(b => parseFloat(b[3])), emaAngLen, emaAngAtr, emaAngSlopeBars);
+        } else if (emaAngTf === '5m') {
+            const h5m = bars5m.map(b => parseFloat(b[2])), l5m = bars5m.map(b => parseFloat(b[3]));
+            const arr = calcEMAangSlope(c5m_pb, h5m, l5m, emaAngLen, emaAngAtr, emaAngSlopeBars);
+            emaAngByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), arr[i]]));
+            tsEmaAng   = bars5m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+        } else {
+            const arr = calcEMAangSlope(c15m, h15m, l15m, emaAngLen, emaAngAtr, emaAngSlopeBars);
+            emaAngByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), arr[i]]));
+            tsEmaAng   = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+        }
+    }
+
     // VWAP — configurable timeframe y sesión
     const vwapTf_bt      = p.vwapTf      || '5m';
     const vwapSession_bt = p.vwapSession || 'daily';
@@ -1239,7 +1301,13 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                     (!p.vwapUsePullback  || Math.abs(close - vwapVal_bt) / close * 100 <= (p.vwapPullbackPerc ?? 0.3))
                 );
 
-                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong) {
+                // Angulación de EMA — pendiente de la EMA en su temporalidad propia
+                const emaAngSlope = !useEmaAngFilter ? null
+                    : emaAngTf === '1m' ? emaAngDirect[i] : lookupHTF(tsEmaAng, emaAngByTs, tsClose);
+                const emaAngOkLong  = !useEmaAngFilter || (emaAngSlope !== null && emaAngSlope >=  emaAngGate);
+                const emaAngOkShort = !useEmaAngFilter || (emaAngSlope !== null && emaAngSlope <= -emaAngGate);
+
+                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong && emaAngOkLong) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1247,7 +1315,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                         const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
                         posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
                     }
-                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort) {
+                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -2182,6 +2250,30 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const adxTs15m   = [...adxByTs15m.keys()].sort((a, b) => a - b);
     const adxValue   = lookupHTF(adxTs15m, adxByTs15m, parseInt(bars1m[bars1m.length - 1][6]));
 
+    // Angulación de EMA — pendiente normalizada por ATR (idéntico al backtest)
+    const useEmaAngFilter_sn = p.useEmaAngFilter === true;
+    const emaAngTf_sn        = p.emaAngTf        || '15m';
+    const emaAngLen_sn       = p.emaAngLen       || 200;
+    const emaAngSlopeBars_sn = p.emaAngSlopeBars || 10;
+    const emaAngAtr_sn       = p.emaAngAtr       || 14;
+    const emaAngGate_sn      = p.emaAngMode === 'strong'
+        ? (p.emaAngStrongSlope ?? 0.60)
+        : (p.emaAngMinSlope    ?? 0.25);
+    let emaAngSnDirect = null, emaAngSnByTs = null, emaAngSnTs = null;
+    if (useEmaAngFilter_sn) {
+        if (emaAngTf_sn === '1m') {
+            emaAngSnDirect = calcEMAangSlope(c1m, bars1m.map(b => parseFloat(b[2])), bars1m.map(b => parseFloat(b[3])), emaAngLen_sn, emaAngAtr_sn, emaAngSlopeBars_sn);
+        } else if (emaAngTf_sn === '5m') {
+            const arr = calcEMAangSlope(c5m_sn, bars5m.map(b => parseFloat(b[2])), bars5m.map(b => parseFloat(b[3])), emaAngLen_sn, emaAngAtr_sn, emaAngSlopeBars_sn);
+            emaAngSnByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), arr[i]]));
+            emaAngSnTs   = [...emaAngSnByTs.keys()].sort((a, b) => a - b);
+        } else {
+            const arr = calcEMAangSlope(c15m_sn, bars15m.map(b => parseFloat(b[2])), bars15m.map(b => parseFloat(b[3])), emaAngLen_sn, emaAngAtr_sn, emaAngSlopeBars_sn);
+            emaAngSnByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), arr[i]]));
+            emaAngSnTs   = [...emaAngSnByTs.keys()].sort((a, b) => a - b);
+        }
+    }
+
     // VWAP — configurable timeframe y sesión
     const vwapTf_sn      = p.vwapTf      || '5m';
     const vwapSession_sn = p.vwapSession || 'daily';
@@ -2297,10 +2389,16 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
         (!p.vwapUsePullback  || Math.abs(close - vwapVal_sn) / close * 100 <= (p.vwapPullbackPerc ?? 0.3))
     );
 
+    // Angulación de EMA — pendiente de la EMA en su temporalidad propia
+    const emaAngSlope_sn = !useEmaAngFilter_sn ? null
+        : emaAngTf_sn === '1m' ? emaAngSnDirect[i] : lookupHTF(emaAngSnTs, emaAngSnByTs, tsClose);
+    const emaAngOkLong_sn  = !useEmaAngFilter_sn || (emaAngSlope_sn !== null && emaAngSlope_sn >=  emaAngGate_sn);
+    const emaAngOkShort_sn = !useEmaAngFilter_sn || (emaAngSlope_sn !== null && emaAngSlope_sn <= -emaAngGate_sn);
+
     let signal = null;
-    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn)
+    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn && emaAngOkLong_sn)
         signal = 'long';
-    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn)
+    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn && emaAngOkShort_sn)
         signal = 'short';
 
     const tpPerc = p.tpPerc ?? 0.5;
@@ -2320,7 +2418,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
 
     return {
         signal, timestamp: ts, entry: close, tp, sl,
-        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
+        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
     };
 }
 
@@ -2572,6 +2670,14 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             rsiPeriod:         parseInt(req.body.rsiPeriod) || 14,
             rsiLongMin:        req.body.rsiLongMin  != null ? parseFloat(req.body.rsiLongMin)  : 60,
             rsiShortMax:       req.body.rsiShortMax != null ? parseFloat(req.body.rsiShortMax) : 40,
+            useEmaAngFilter:   req.body.useEmaAngFilter === true,
+            emaAngTf:          ['1m','5m','15m'].includes(req.body.emaAngTf) ? req.body.emaAngTf : '15m',
+            emaAngLen:         parseInt(req.body.emaAngLen)       || 200,
+            emaAngSlopeBars:   parseInt(req.body.emaAngSlopeBars) || 10,
+            emaAngAtr:         parseInt(req.body.emaAngAtr)       || 14,
+            emaAngMinSlope:    Number.isFinite(parseFloat(req.body.emaAngMinSlope))    ? parseFloat(req.body.emaAngMinSlope)    : 0.25,
+            emaAngStrongSlope: Number.isFinite(parseFloat(req.body.emaAngStrongSlope)) ? parseFloat(req.body.emaAngStrongSlope) : 0.60,
+            emaAngMode:        req.body.emaAngMode === 'strong' ? 'strong' : 'min',
             useMacdFilter:     req.body.useMacdFilter !== false,
             macdTf:            ['1m','5m','15m'].includes(req.body.macdTf) ? req.body.macdTf : '5m',
             macdFast:          parseInt(req.body.macdFast)   || 12,
