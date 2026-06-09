@@ -100,6 +100,16 @@ async function inicializarBaseDeDatos() {
             valor NUMERIC NOT NULL
         );
     `;
+    // Ratios de posicionamiento (Binance futures/data): top_pos = top traders por tamaño de
+    // posición (smart money), global_acc = cuentas long/short global (retail). Ambos a 5m,
+    // últimos ~30 días disponibles. Una fila por timestamp con las dos métricas.
+    const queryTablaLSR = `
+        CREATE TABLE IF NOT EXISTS long_short_ratio (
+            tiempo BIGINT PRIMARY KEY,
+            top_pos NUMERIC,
+            global_acc NUMERIC
+        );
+    `;
     // Cache de velas 1m de BTCUSDT para los backtests de /estrategias. Guardamos solo el
     // timeframe de 1m; 5m y 15m se derivan agregando en SQL (ver fetchKlinesDesdeBD).
     const queryTablaKlines = `
@@ -167,6 +177,7 @@ async function inicializarBaseDeDatos() {
         await pool.query(queryTablaBallenas);
         await pool.query(queryTablaConfig);
         await pool.query(queryTablaOI);
+        await pool.query(queryTablaLSR);
         await pool.query(queryTablaKlines);
         await pool.query(queryTablaUsuarios);
         await pool.query(queryTablaConfigUsuario);
@@ -357,6 +368,76 @@ async function backfillOpenInterestHistorico() {
     }
 }
 setTimeout(backfillOpenInterestHistorico, 5000);
+
+// --- RECOLECTOR DE RATIOS DE POSICIONAMIENTO (top traders + retail) ---
+// Los endpoints futures/data se actualizan cada 5m, así que polleamos a ese ritmo.
+async function guardarLongShortRatio() {
+    try {
+        const [topR, globR] = await Promise.all([
+            fetch('https://fapi.binance.com/futures/data/topLongShortPositionRatio?symbol=BTCUSDT&period=5m&limit=1').then(r => r.json()),
+            fetch('https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=1').then(r => r.json()),
+        ]);
+        const t = Array.isArray(topR) && topR[0], g = Array.isArray(globR) && globR[0];
+        if (t && g) {
+            const tiempo = Math.floor(Number(t.timestamp) / 60000) * 60;
+            await pool.query(
+                `INSERT INTO long_short_ratio (tiempo, top_pos, global_acc) VALUES ($1,$2,$3)
+                 ON CONFLICT (tiempo) DO UPDATE SET top_pos = EXCLUDED.top_pos, global_acc = EXCLUDED.global_acc`,
+                [tiempo, parseFloat(t.longShortRatio), parseFloat(g.longShortRatio)]
+            );
+        }
+    } catch (e) {
+        console.error('Error al guardar Long/Short ratio:', e.message);
+    }
+}
+setInterval(guardarLongShortRatio, 5 * 60000);
+guardarLongShortRatio();
+
+// Backfill histórico de ratios (~30 días, 5m). Mismo límite duro que el OI: Binance solo
+// expone los últimos ~30 días de futures/data. Top y global se alinean por timestamp.
+async function backfillLongShortRatio() {
+    try {
+        const PERIOD = '5m', LIMIT = 500, STEP_MS = 5 * 60000;
+        const limiteInferior = Date.now() - 30 * 86400000;
+        const cob = await pool.query('SELECT MIN(tiempo) AS min FROM long_short_ratio');
+        const minSeg = cob.rows[0] && cob.rows[0].min ? Number(cob.rows[0].min) : null;
+        if (minSeg && minSeg * 1000 <= limiteInferior + 2 * 86400000) return;
+        let endTime = Date.now(), pedidos = 0, insertados = 0;
+        while (endTime > limiteInferior && pedidos < 25) {
+            const [topR, globR] = await Promise.all([
+                fetch(`https://fapi.binance.com/futures/data/topLongShortPositionRatio?symbol=BTCUSDT&period=${PERIOD}&limit=${LIMIT}&endTime=${endTime}`).then(r => r.json()),
+                fetch(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=BTCUSDT&period=${PERIOD}&limit=${LIMIT}&endTime=${endTime}`).then(r => r.json()),
+            ]);
+            if (!Array.isArray(topR) || topR.length === 0) break;
+            const globMap = new Map((Array.isArray(globR) ? globR : [])
+                .map(g => [Math.floor(Number(g.timestamp) / 60000) * 60, parseFloat(g.longShortRatio)]));
+            const placeholders = [], params = [];
+            for (const d of topR) {
+                const tiempo  = Math.floor(Number(d.timestamp) / 60000) * 60;
+                const topVal  = parseFloat(d.longShortRatio);
+                const globVal = globMap.has(tiempo) ? globMap.get(tiempo) : null;
+                if (isNaN(tiempo) || isNaN(topVal)) continue;
+                const o = params.length;
+                placeholders.push(`($${o + 1},$${o + 2},$${o + 3})`);
+                params.push(tiempo, topVal, globVal);
+            }
+            if (params.length) {
+                const r = await pool.query(
+                    `INSERT INTO long_short_ratio (tiempo, top_pos, global_acc) VALUES ${placeholders.join(',')}
+                     ON CONFLICT (tiempo) DO NOTHING`,
+                    params
+                );
+                insertados += r.rowCount;
+            }
+            endTime = Number(topR[0].timestamp) - STEP_MS;
+            pedidos++;
+        }
+        console.log(`[LSR] Backfill histórico: ${insertados} puntos nuevos en ${pedidos} requests (~30 días).`);
+    } catch (e) {
+        console.error('[LSR] Error en backfill histórico:', e.message);
+    }
+}
+setTimeout(backfillLongShortRatio, 7000);
 
 // --- CAZADOR DE BALLENAS ---
 let wsConectando = false;
@@ -1048,7 +1129,7 @@ function costoOperacion(p, palanca, minutesHeld) {
     return fees + slip + fund;
 }
 
-function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr) {
+function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const c1m = bars1m.map(b => parseFloat(b[4]));
     const e50 = calcEMA(c1m, 50), e100 = calcEMA(c1m, 100),
           e200 = calcEMA(c1m, 200), e500 = calcEMA(c1m, 500);
@@ -1184,6 +1265,26 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr) {
         oiByTs = new Map();
         for (const o of oiArr) oiByTs.set(Number(o.tiempo) * 1000, parseFloat(o.valor));
         oiTs = [...oiByTs.keys()].sort((a, b) => a - b);
+    }
+
+    // Posicionamiento de traders — a diferencia del OI, importa el NIVEL actual del ratio, no el
+    // cambio: lookupHTF toma la última muestra (5m) ≤ tsClose. Top traders = seguir smart money
+    // (long si están netos long); retail (global) = fade contrarian (no comprar si el retail está
+    // sobrecargado long). Umbrales simétricos alrededor del neutro 1.0 (ratio long/short).
+    const useTopTraderFilter = p.useTopTraderFilter === true;
+    const useRetailFilter    = p.useRetailFilter === true;
+    const topTraderRatio = Number.isFinite(p.topTraderRatio) ? p.topTraderRatio : 1.05;
+    const retailExtreme  = Number.isFinite(p.retailExtreme)  ? p.retailExtreme  : 2.0;
+    let topTs = null, topByTs = null, globTs = null, globByTs = null;
+    if ((useTopTraderFilter || useRetailFilter) && Array.isArray(lsArr) && lsArr.length) {
+        topByTs = new Map(); globByTs = new Map();
+        for (const r of lsArr) {
+            const tms = Number(r.tiempo) * 1000;
+            if (r.top_pos    != null) topByTs.set(tms, parseFloat(r.top_pos));
+            if (r.global_acc != null) globByTs.set(tms, parseFloat(r.global_acc));
+        }
+        topTs  = [...topByTs.keys()].sort((a, b) => a - b);
+        globTs = [...globByTs.keys()].sort((a, b) => a - b);
     }
 
     // Delta de volumen — prefix sum para rolling sum O(1) por barra
@@ -1381,7 +1482,15 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr) {
                            ((oiNow - oiPast) / oiPast * 100) >= oiThreshold;
                 }
 
-                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong && emaAngOkLong && oiOk) {
+                // Posicionamiento — top traders (seguir) y retail global (fade), por nivel.
+                const topRatioVal  = useTopTraderFilter && topTs  ? lookupHTF(topTs,  topByTs,  tsClose) : null;
+                const globRatioVal = useRetailFilter    && globTs ? lookupHTF(globTs, globByTs, tsClose) : null;
+                const topOkLong    = !useTopTraderFilter || (topRatioVal  != null && topRatioVal  >= topTraderRatio);
+                const topOkShort   = !useTopTraderFilter || (topRatioVal  != null && topRatioVal  <= 1 / topTraderRatio);
+                const retailOkLong  = !useRetailFilter || (globRatioVal != null && globRatioVal <= retailExtreme);
+                const retailOkShort = !useRetailFilter || (globRatioVal != null && globRatioVal >= 1 / retailExtreme);
+
+                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong && emaAngOkLong && oiOk && topOkLong && retailOkLong) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1389,7 +1498,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr) {
                         const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
                         posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
                     }
-                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort && oiOk) {
+                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort && oiOk && topOkShort && retailOkShort) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1959,6 +2068,12 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
           )).rows
         : [];
 
+    const lsRows = (p.useTopTraderFilter || p.useRetailFilter)
+        ? (await pool.query(
+            'SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - 1800 ORDER BY tiempo ASC'
+          )).rows
+        : [];
+
     // Cooldown: no entrar si pasó menos del tiempo configurado desde el último cierre.
     if (p.useCooldown && row.ultima_cierre_ts) {
         const min = (Date.now() - parseInt(row.ultima_cierre_ts)) / 60000;
@@ -1968,7 +2083,7 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
         }
     }
 
-    const resultado  = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRows);
+    const resultado  = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRows, lsRows);
     const nuevaSenal = resultado.signal;
 
     // Filtro opcional: no apilar entradas mientras alguna sub-posición esté en pérdida.
@@ -2273,7 +2388,7 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
 });
 
 // ── Evaluación de señal en tiempo real ────────────────────────
-function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr) {
+function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     if (bars1m.length < 510) return { signal: null, reason: 'datos_insuficientes' };
 
     const c1m  = bars1m.map(b => parseFloat(b[4]));
@@ -2493,10 +2608,33 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr) {
         }
     }
 
+    // Posicionamiento de traders — por nivel del ratio (idéntico al backtest).
+    const useTopTraderFilter_sn = p.useTopTraderFilter === true;
+    const useRetailFilter_sn    = p.useRetailFilter === true;
+    const topTraderRatio_sn = Number.isFinite(p.topTraderRatio) ? p.topTraderRatio : 1.05;
+    const retailExtreme_sn  = Number.isFinite(p.retailExtreme)  ? p.retailExtreme  : 2.0;
+    let topRatioVal_sn = null, globRatioVal_sn = null;
+    if ((useTopTraderFilter_sn || useRetailFilter_sn) && Array.isArray(lsArr) && lsArr.length) {
+        const topByTs_sn = new Map(), globByTs_sn = new Map();
+        for (const r of lsArr) {
+            const tms = Number(r.tiempo) * 1000;
+            if (r.top_pos    != null) topByTs_sn.set(tms, parseFloat(r.top_pos));
+            if (r.global_acc != null) globByTs_sn.set(tms, parseFloat(r.global_acc));
+        }
+        const topTs_sn  = [...topByTs_sn.keys()].sort((a, b) => a - b);
+        const globTs_sn = [...globByTs_sn.keys()].sort((a, b) => a - b);
+        if (useTopTraderFilter_sn && topTs_sn.length)  topRatioVal_sn  = lookupHTF(topTs_sn,  topByTs_sn,  tsClose);
+        if (useRetailFilter_sn    && globTs_sn.length) globRatioVal_sn = lookupHTF(globTs_sn, globByTs_sn, tsClose);
+    }
+    const topOkLong_sn    = !useTopTraderFilter_sn || (topRatioVal_sn  != null && topRatioVal_sn  >= topTraderRatio_sn);
+    const topOkShort_sn   = !useTopTraderFilter_sn || (topRatioVal_sn  != null && topRatioVal_sn  <= 1 / topTraderRatio_sn);
+    const retailOkLong_sn  = !useRetailFilter_sn || (globRatioVal_sn != null && globRatioVal_sn <= retailExtreme_sn);
+    const retailOkShort_sn = !useRetailFilter_sn || (globRatioVal_sn != null && globRatioVal_sn >= 1 / retailExtreme_sn);
+
     let signal = null;
-    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn && emaAngOkLong_sn && oiOk_sn)
+    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn && emaAngOkLong_sn && oiOk_sn && topOkLong_sn && retailOkLong_sn)
         signal = 'long';
-    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn && emaAngOkShort_sn && oiOk_sn)
+    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn && emaAngOkShort_sn && oiOk_sn && topOkShort_sn && retailOkShort_sn)
         signal = 'short';
 
     const tpPerc = p.tpPerc ?? 0.5;
@@ -2516,7 +2654,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr) {
 
     return {
         signal, timestamp: ts, entry: close, tp, sl,
-        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, oiSlope: oiSlope_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
+        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, oiSlope: oiSlope_sn, topRatio: topRatioVal_sn, globalRatio: globRatioVal_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
     };
 }
 
@@ -2531,7 +2669,7 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
         if (stratRes.rows.length === 0) return res.status(404).json({ error: 'Estrategia no encontrada' });
         const p = stratRes.rows[0].params;
 
-        const [bars1m, bars5m, bars15m, whaleRes, oiRes] = await Promise.all([
+        const [bars1m, bars5m, bars15m, whaleRes, oiRes, lsRes] = await Promise.all([
             // Suficientes velas para que EMA/MACD/RSI/ADX (incluso de período alto en HTF)
             // converjan igual que en el backtest y no diverja la señal en vivo.
             fetchKlinesBatch('1m',  3000),
@@ -2548,9 +2686,12 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
                     [((parseInt(p.oiLookbackMin) || 30) + 10) * 60]
                   )
                 : Promise.resolve({ rows: [] }),
+            (p.useTopTraderFilter || p.useRetailFilter)
+                ? pool.query('SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - 1800 ORDER BY tiempo ASC')
+                : Promise.resolve({ rows: [] }),
         ]);
 
-        res.json(evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows));
+        res.json(evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows, lsRes.rows));
     } catch (e) {
         console.error('Error signal:', e);
         res.status(500).json({ error: e.message });
@@ -2785,6 +2926,10 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             useOIFilter:       req.body.useOIFilter === true,
             oiLookbackMin:     Math.min(Math.max(parseInt(req.body.oiLookbackMin) || 30, 5), 1440),
             oiThreshold:       Number.isFinite(parseFloat(req.body.oiThreshold)) ? parseFloat(req.body.oiThreshold) : 0.5,
+            useTopTraderFilter: req.body.useTopTraderFilter === true,
+            topTraderRatio:     Number.isFinite(parseFloat(req.body.topTraderRatio)) ? parseFloat(req.body.topTraderRatio) : 1.05,
+            useRetailFilter:    req.body.useRetailFilter === true,
+            retailExtreme:      Number.isFinite(parseFloat(req.body.retailExtreme)) ? parseFloat(req.body.retailExtreme) : 2.0,
             useMacdFilter:     req.body.useMacdFilter !== false,
             macdTf:            ['1m','5m','15m'].includes(req.body.macdTf) ? req.body.macdTf : '5m',
             macdFast:          parseInt(req.body.macdFast)   || 12,
@@ -2831,7 +2976,7 @@ app.post('/api/backtest', autenticar, async (req, res) => {
         // Serie de OI del período (solo si el filtro está activo). Traemos un poco antes del inicio
         // para que el lookback de las primeras velas tenga muestra previa.
         const oiDesdeSeg = Math.floor((periodStart.getTime() - (p.oiLookbackMin || 30) * 60000) / 1000);
-        const [bars1m, bars5m, bars15m, whaleRes, oiRes] = await Promise.all([
+        const [bars1m, bars5m, bars15m, whaleRes, oiRes, lsRes] = await Promise.all([
             cargarKlines('1m',  days * 1440),
             cargarKlines('5m',  days * 288),
             cargarKlines('15m', days * 96),
@@ -2843,11 +2988,14 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             p.useOIFilter
                 ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= $1 ORDER BY tiempo ASC', [oiDesdeSeg])
                 : Promise.resolve({ rows: [] }),
+            (p.useTopTraderFilter || p.useRetailFilter)
+                ? pool.query('SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= $1 ORDER BY tiempo ASC', [Math.floor(periodStart.getTime() / 1000)])
+                : Promise.resolve({ rows: [] }),
         ]);
         if (fuente === 'bd' && bars1m.length === 0) {
             throw new Error('La BD todavía no tiene velas cacheadas (el backfill inicial puede tardar unos minutos). Probá de nuevo en un rato o cambiá la fuente a Binance.');
         }
-        const resultado = runBacktest(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows);
+        const resultado = runBacktest(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows, lsRes.rows);
         resultado.fuenteDatos = fuente;
         resultado.barsUsadas = { m1: bars1m.length, m5: bars5m.length, m15: bars15m.length };
 
@@ -2877,6 +3025,16 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             } else if (primeraOI > periodStart.getTime()) {
                 const diasCubiertos = Math.max(0, (Date.now() - primeraOI) / 86400000);
                 warnings.push(`Filtro de Open Interest activo: solo hay datos de OI desde ${new Date(primeraOI).toISOString().slice(0, 16).replace('T', ' ')} UTC (~${diasCubiertos.toFixed(1)} días). Binance solo expone OI de los últimos ~30 días, así que el tramo anterior del período NO genera trades; las métricas reflejan solo el subperíodo con cobertura de OI.`);
+            }
+        }
+        if (p.useTopTraderFilter || p.useRetailFilter) {
+            const lsCov = await pool.query('SELECT MIN(tiempo) AS primera, COUNT(*)::int AS n FROM long_short_ratio');
+            const primeraLS = lsCov.rows[0] && lsCov.rows[0].primera ? Number(lsCov.rows[0].primera) * 1000 : null;
+            if (!primeraLS || lsCov.rows[0].n === 0) {
+                warnings.push('Filtro de Posicionamiento activo pero no hay datos de ratios guardados: ningún trade pasará el filtro.');
+            } else if (primeraLS > periodStart.getTime()) {
+                const diasCubiertos = Math.max(0, (Date.now() - primeraLS) / 86400000);
+                warnings.push(`Filtro de Posicionamiento activo: solo hay datos de ratios desde ${new Date(primeraLS).toISOString().slice(0, 16).replace('T', ' ')} UTC (~${diasCubiertos.toFixed(1)} días). Binance solo expone los últimos ~30 días, así que el tramo anterior NO genera trades; las métricas reflejan solo el subperíodo con cobertura.`);
             }
         }
         resultado.warnings = warnings;

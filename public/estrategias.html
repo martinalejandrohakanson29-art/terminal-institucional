@@ -434,6 +434,26 @@
                 <input type="number" id="p-oi-threshold" class="form-input" value="0.5" min="0" step="0.1">
             </div>
             <div style="font-size:9px;color:#64748b;line-height:1.3;margin:-2px 0 4px;">Solo entra (long o short) si el OI subió ≥ ese % en la ventana = dinero nuevo. ⚠ Binance solo da OI de los últimos ~30 días.</div>
+            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">Posicionamiento — Top Traders</div>
+            <div class="form-row">
+                <label>Seguir smart money</label>
+                <input type="checkbox" id="p-toptrader" class="form-check">
+            </div>
+            <div class="form-row">
+                <label>Ratio L/S mínimo</label>
+                <input type="number" id="p-toptrader-ratio" class="form-input" value="1.05" min="1" step="0.05">
+            </div>
+            <div style="font-size:9px;color:#64748b;line-height:1.3;margin:-2px 0 4px;">Long solo si los top traders están netos long (ratio ≥ X); short si están netos short (≤ 1/X). Sigue al dinero grande.</div>
+            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">Posicionamiento — Retail (fade)</div>
+            <div class="form-row">
+                <label>Fade al retail</label>
+                <input type="checkbox" id="p-retail" class="form-check">
+            </div>
+            <div class="form-row">
+                <label>Ratio extremo</label>
+                <input type="number" id="p-retail-extreme" class="form-input" value="2.0" min="1" step="0.1">
+            </div>
+            <div style="font-size:9px;color:#64748b;line-height:1.3;margin:-2px 0 4px;">Contrarian: NO entra long si el retail está sobrecargado long (ratio &gt; X); NO entra short si está sobrecargado short (&lt; 1/X). ⚠ ~30 días de historia.</div>
             <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">MACD</div>
             <div class="form-row">
                 <label>Activar filtro</label>
@@ -771,6 +791,10 @@
             useOIFilter:       document.getElementById('p-oi').checked,
             oiLookbackMin:     parseInt(document.getElementById('p-oi-lookback').value)  || 30,
             oiThreshold:       numOrDefault('p-oi-threshold', 0.5),
+            useTopTraderFilter: document.getElementById('p-toptrader').checked,
+            topTraderRatio:    numOrDefault('p-toptrader-ratio', 1.05),
+            useRetailFilter:   document.getElementById('p-retail').checked,
+            retailExtreme:     numOrDefault('p-retail-extreme', 2.0),
             useMacdFilter:     document.getElementById('p-macd').checked,
             macdTf:            document.getElementById('p-macd-tf').value,
             macdFast:          parseInt(document.getElementById('p-macd-fast').value)   || 12,
@@ -976,6 +1000,8 @@
             { label: `EMA∠ ${params.emaAngTf||'15m'}`, activo: params.useEmaAngFilter === true,
               desc: `EMA${params.emaAngLen||200} · ${params.emaAngMode==='strong'?`≥${params.emaAngStrongSlope??0.6}`:`≥${params.emaAngMinSlope??0.25}`} · ${params.emaAngSlopeBars||10}v/ATR${params.emaAngAtr||14}` },
             { label: 'Open Interest', activo: params.useOIFilter === true, desc: `↑≥${params.oiThreshold??0.5}% / ${params.oiLookbackMin||30}m` },
+            { label: 'Top Traders',   activo: params.useTopTraderFilter === true, desc: `seguir · L/S ≥${params.topTraderRatio??1.05}` },
+            { label: 'Retail (fade)', activo: params.useRetailFilter === true,    desc: `contrarian · extremo ${params.retailExtreme??2.0}` },
             { label: 'Pullback EMAs', activo: params.usePullbackFilter,  desc: `≤${params.pullbackPerc}% · ${(params.pullbackEMAs||[]).map(e=>`EMA${e.period} ${e.tf}`).join(', ')}` },
             { label: 'Alineamiento',  activo: params.useEmaAlignment,    desc: 'EMA ordenadas' },
             { label: 'Cooldown',      activo: params.useCooldown,         desc: `${params.cooldownMinutes}m` },
@@ -1174,6 +1200,10 @@
         document.getElementById('p-oi').checked            = !!p.useOIFilter;
         document.getElementById('p-oi-lookback').value     = p.oiLookbackMin ?? 30;
         document.getElementById('p-oi-threshold').value    = p.oiThreshold   ?? 0.5;
+        document.getElementById('p-toptrader').checked       = !!p.useTopTraderFilter;
+        document.getElementById('p-toptrader-ratio').value   = p.topTraderRatio ?? 1.05;
+        document.getElementById('p-retail').checked          = !!p.useRetailFilter;
+        document.getElementById('p-retail-extreme').value    = p.retailExtreme  ?? 2.0;
         document.getElementById('p-macd').checked         = p.useMacdFilter !== false;
         document.getElementById('p-macd-tf').value       = p.macdTf      || '5m';
         document.getElementById('p-macd-fast').value     = p.macdFast    ?? 12;
