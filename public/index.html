@@ -555,8 +555,28 @@
         klinecharts.registerIndicator({
             name: 'OPEN_INTEREST',
             shortName: 'Open Interest',
-            calc: (kLineDataList) => kLineDataList.map(k => ({ oi: k.oi || null })),
-            figures: [{ key: 'oi', title: 'OI: ', type: 'line', styles: () => ({ color: '#FFD700' }) }]
+            // Coloreamos cada tramo por la pendiente del OI: verde si sube (entra dinero nuevo),
+            // rojo si baja (se cierran posiciones), dorado en el primer punto / sin cambio.
+            calc: (kLineDataList) => {
+                let prevOi = null;
+                return kLineDataList.map(k => {
+                    const oi = (k.oi != null && !isNaN(k.oi)) ? k.oi : null;
+                    let oiSlope = null;
+                    if (oi != null) {
+                        if (prevOi != null) oiSlope = oi - prevOi;
+                        prevOi = oi;
+                    }
+                    return { oi, oiSlope };
+                });
+            },
+            figures: [{ key: 'oi', title: 'OI: ', type: 'line', styles: (data) => {
+                const d = data && data.current && data.current.indicatorData;
+                const s = d ? d.oiSlope : null;
+                let color = '#FFD700';
+                if (s != null && s > 0) color = '#26a69a';
+                else if (s != null && s < 0) color = '#ef5350';
+                return { color, size: 1 };
+            } }]
         });
 
         klinecharts.registerIndicator({

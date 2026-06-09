@@ -307,6 +307,57 @@ async function guardarOpenInterest() {
 setInterval(guardarOpenInterest, 60000);
 guardarOpenInterest();
 
+// Backfill de OI histórico. El recolector live solo acumula OI desde que el server arranca,
+// pero los backtests corren sobre la cache de velas (hasta 365 días). Sin esto el filtro de OI
+// no tendría dato en el tramo histórico y rechazaría todas las entradas.
+// LÍMITE DURO: Binance solo expone OI histórico de los ÚLTIMOS ~30 DÍAS (futures/data/openInterestHist,
+// máx 500 puntos/request). No hay forma de conseguir OI más viejo → el filtro de OI es fiable
+// solo en backtests de ≤ 30 días; más atrás no hay cobertura (se avisa con warning).
+async function backfillOpenInterestHistorico() {
+    try {
+        const PERIOD = '5m', LIMIT = 500, STEP_MS = 5 * 60000;
+        const limiteInferior = Date.now() - 30 * 86400000;
+        // Solo backfillear si falta cobertura histórica (evita re-trabajo en cada reinicio).
+        const cob = await pool.query('SELECT MIN(tiempo) AS min FROM open_interest');
+        const minSeg = cob.rows[0] && cob.rows[0].min ? Number(cob.rows[0].min) : null;
+        if (minSeg && minSeg * 1000 <= limiteInferior + 2 * 86400000) {
+            return; // ya hay datos que llegan a ~28+ días atrás
+        }
+        let endTime = Date.now(), pedidos = 0, insertados = 0;
+        while (endTime > limiteInferior && pedidos < 25) {
+            const url = `https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=${PERIOD}&limit=${LIMIT}&endTime=${endTime}`;
+            const resp = await fetch(url);
+            const datos = await resp.json();
+            if (!Array.isArray(datos) || datos.length === 0) break;
+            // datos: [{ sumOpenInterest, sumOpenInterestValue, timestamp(ms) }] en orden ascendente.
+            // Guardamos sumOpenInterest (OI en BTC), consistente con el recolector live (/openInterest).
+            const placeholders = [], params = [];
+            for (const d of datos) {
+                const valor  = parseFloat(d.sumOpenInterest);
+                const tiempo = Math.floor(Number(d.timestamp) / 60000) * 60; // epoch seg alineado a minuto
+                if (isNaN(valor) || isNaN(tiempo)) continue;
+                const o = params.length;
+                placeholders.push(`($${o + 1},$${o + 2})`);
+                params.push(tiempo, valor);
+            }
+            if (params.length) {
+                const r = await pool.query(
+                    `INSERT INTO open_interest (tiempo, valor) VALUES ${placeholders.join(',')}
+                     ON CONFLICT (tiempo) DO NOTHING`,
+                    params
+                );
+                insertados += r.rowCount;
+            }
+            endTime = Number(datos[0].timestamp) - STEP_MS; // siguiente página, hacia atrás
+            pedidos++;
+        }
+        console.log(`[OI] Backfill histórico: ${insertados} puntos nuevos en ${pedidos} requests (cobertura ~30 días).`);
+    } catch (e) {
+        console.error('[OI] Error en backfill histórico:', e.message);
+    }
+}
+setTimeout(backfillOpenInterestHistorico, 5000);
+
 // --- CAZADOR DE BALLENAS ---
 let wsConectando = false;
 
@@ -997,7 +1048,7 @@ function costoOperacion(p, palanca, minutesHeld) {
     return fees + slip + fund;
 }
 
-function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
+function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr) {
     const c1m = bars1m.map(b => parseFloat(b[4]));
     const e50 = calcEMA(c1m, 50), e100 = calcEMA(c1m, 100),
           e200 = calcEMA(c1m, 200), e500 = calcEMA(c1m, 500);
@@ -1119,6 +1170,20 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
             vwapByTs_bt = new Map(bars15m.map((b, idx) => [parseInt(b[6]), vals[idx]]));
             tsVwap_bt   = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
         }
+    }
+
+    // Open Interest — "OI subiendo confirma": solo se permite entrar (long o short) si el OI
+    // creció ≥ oiThreshold% en las últimas oiLookbackMin minutos = entra dinero nuevo respaldando
+    // el movimiento. El OI se muestrea cada 1m (live) / 5m (backfill histórico); lookupHTF toma la
+    // última muestra ≤ tsClose, sin look-ahead. Si no hay dato (período sin cobertura) → no entra.
+    const useOIFilter  = p.useOIFilter === true;
+    const oiLookbackMs = (p.oiLookbackMin || 30) * 60000;
+    const oiThreshold  = Number.isFinite(p.oiThreshold) ? p.oiThreshold : 0.5;
+    let oiTs = null, oiByTs = null;
+    if (useOIFilter && Array.isArray(oiArr) && oiArr.length) {
+        oiByTs = new Map();
+        for (const o of oiArr) oiByTs.set(Number(o.tiempo) * 1000, parseFloat(o.valor));
+        oiTs = [...oiByTs.keys()].sort((a, b) => a - b);
     }
 
     // Delta de volumen — prefix sum para rolling sum O(1) por barra
@@ -1307,7 +1372,16 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                 const emaAngOkLong  = !useEmaAngFilter || (emaAngSlope !== null && emaAngSlope >=  emaAngGate);
                 const emaAngOkShort = !useEmaAngFilter || (emaAngSlope !== null && emaAngSlope <= -emaAngGate);
 
-                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong && emaAngOkLong) {
+                // Open Interest — confirma que el OI viene subiendo (dinero nuevo). Aplica a ambos lados.
+                let oiOk = !useOIFilter;
+                if (useOIFilter && oiTs) {
+                    const oiNow  = lookupHTF(oiTs, oiByTs, tsClose);
+                    const oiPast = lookupHTF(oiTs, oiByTs, tsClose - oiLookbackMs);
+                    oiOk = oiNow != null && oiPast != null && oiPast > 0 &&
+                           ((oiNow - oiPast) / oiPast * 100) >= oiThreshold;
+                }
+
+                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong && emaAngOkLong && oiOk) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1315,7 +1389,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p) {
                         const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
                         posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
                     }
-                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort) {
+                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort && oiOk) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1878,6 +1952,13 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
         [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5]
     );
 
+    const oiRows = p.useOIFilter
+        ? (await pool.query(
+            'SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC',
+            [((parseInt(p.oiLookbackMin) || 30) + 10) * 60]
+          )).rows
+        : [];
+
     // Cooldown: no entrar si pasó menos del tiempo configurado desde el último cierre.
     if (p.useCooldown && row.ultima_cierre_ts) {
         const min = (Date.now() - parseInt(row.ultima_cierre_ts)) / 60000;
@@ -1887,7 +1968,7 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
         }
     }
 
-    const resultado  = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p);
+    const resultado  = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRows);
     const nuevaSenal = resultado.signal;
 
     // Filtro opcional: no apilar entradas mientras alguna sub-posición esté en pérdida.
@@ -2192,7 +2273,7 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
 });
 
 // ── Evaluación de señal en tiempo real ────────────────────────
-function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
+function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr) {
     if (bars1m.length < 510) return { signal: null, reason: 'datos_insuficientes' };
 
     const c1m  = bars1m.map(b => parseFloat(b[4]));
@@ -2395,10 +2476,27 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
     const emaAngOkLong_sn  = !useEmaAngFilter_sn || (emaAngSlope_sn !== null && emaAngSlope_sn >=  emaAngGate_sn);
     const emaAngOkShort_sn = !useEmaAngFilter_sn || (emaAngSlope_sn !== null && emaAngSlope_sn <= -emaAngGate_sn);
 
+    // Open Interest — confirma que el OI viene subiendo (idéntico al backtest). Aplica a ambos lados.
+    const useOIFilter_sn = p.useOIFilter === true;
+    const oiLookbackMs_sn = (p.oiLookbackMin || 30) * 60000;
+    const oiThreshold_sn  = Number.isFinite(p.oiThreshold) ? p.oiThreshold : 0.5;
+    let oiSlope_sn = null, oiOk_sn = !useOIFilter_sn;
+    if (useOIFilter_sn && Array.isArray(oiArr) && oiArr.length) {
+        const oiByTs_sn = new Map();
+        for (const o of oiArr) oiByTs_sn.set(Number(o.tiempo) * 1000, parseFloat(o.valor));
+        const oiTs_sn = [...oiByTs_sn.keys()].sort((a, b) => a - b);
+        const oiNow  = lookupHTF(oiTs_sn, oiByTs_sn, tsClose);
+        const oiPast = lookupHTF(oiTs_sn, oiByTs_sn, tsClose - oiLookbackMs_sn);
+        if (oiNow != null && oiPast != null && oiPast > 0) {
+            oiSlope_sn = (oiNow - oiPast) / oiPast * 100;
+            oiOk_sn = oiSlope_sn >= oiThreshold_sn;
+        }
+    }
+
     let signal = null;
-    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn && emaAngOkLong_sn)
+    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn && emaAngOkLong_sn && oiOk_sn)
         signal = 'long';
-    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn && emaAngOkShort_sn)
+    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn && emaAngOkShort_sn && oiOk_sn)
         signal = 'short';
 
     const tpPerc = p.tpPerc ?? 0.5;
@@ -2418,7 +2516,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p) {
 
     return {
         signal, timestamp: ts, entry: close, tp, sl,
-        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
+        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, oiSlope: oiSlope_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
     };
 }
 
@@ -2433,7 +2531,7 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
         if (stratRes.rows.length === 0) return res.status(404).json({ error: 'Estrategia no encontrada' });
         const p = stratRes.rows[0].params;
 
-        const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
+        const [bars1m, bars5m, bars15m, whaleRes, oiRes] = await Promise.all([
             // Suficientes velas para que EMA/MACD/RSI/ADX (incluso de período alto en HTF)
             // converjan igual que en el backtest y no diverja la señal en vivo.
             fetchKlinesBatch('1m',  3000),
@@ -2444,9 +2542,15 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
                  FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 ORDER BY fecha ASC`,
                 [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5]
             ),
+            p.useOIFilter
+                ? pool.query(
+                    'SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC',
+                    [((parseInt(p.oiLookbackMin) || 30) + 10) * 60]
+                  )
+                : Promise.resolve({ rows: [] }),
         ]);
 
-        res.json(evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p));
+        res.json(evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows));
     } catch (e) {
         console.error('Error signal:', e);
         res.status(500).json({ error: e.message });
@@ -2678,6 +2782,9 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             emaAngMinSlope:    Number.isFinite(parseFloat(req.body.emaAngMinSlope))    ? parseFloat(req.body.emaAngMinSlope)    : 0.25,
             emaAngStrongSlope: Number.isFinite(parseFloat(req.body.emaAngStrongSlope)) ? parseFloat(req.body.emaAngStrongSlope) : 0.60,
             emaAngMode:        req.body.emaAngMode === 'strong' ? 'strong' : 'min',
+            useOIFilter:       req.body.useOIFilter === true,
+            oiLookbackMin:     Math.min(Math.max(parseInt(req.body.oiLookbackMin) || 30, 5), 1440),
+            oiThreshold:       Number.isFinite(parseFloat(req.body.oiThreshold)) ? parseFloat(req.body.oiThreshold) : 0.5,
             useMacdFilter:     req.body.useMacdFilter !== false,
             macdTf:            ['1m','5m','15m'].includes(req.body.macdTf) ? req.body.macdTf : '5m',
             macdFast:          parseInt(req.body.macdFast)   || 12,
@@ -2721,7 +2828,10 @@ app.post('/api/backtest', autenticar, async (req, res) => {
         const cargarKlines = fuente === 'binance'
             ? (tf, n) => fetchKlinesBatch(tf, n)
             : (tf)    => fetchKlinesDesdeBD(tf, days);
-        const [bars1m, bars5m, bars15m, whaleRes] = await Promise.all([
+        // Serie de OI del período (solo si el filtro está activo). Traemos un poco antes del inicio
+        // para que el lookback de las primeras velas tenga muestra previa.
+        const oiDesdeSeg = Math.floor((periodStart.getTime() - (p.oiLookbackMin || 30) * 60000) / 1000);
+        const [bars1m, bars5m, bars15m, whaleRes, oiRes] = await Promise.all([
             cargarKlines('1m',  days * 1440),
             cargarKlines('5m',  days * 288),
             cargarKlines('15m', days * 96),
@@ -2730,11 +2840,14 @@ app.post('/api/backtest', autenticar, async (req, res) => {
                  FROM ballenas WHERE fecha >= $1 AND cantidad >= $2 ORDER BY fecha ASC`,
                 [periodStart.toISOString(), p.whaleMinBTC]
             ),
+            p.useOIFilter
+                ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= $1 ORDER BY tiempo ASC', [oiDesdeSeg])
+                : Promise.resolve({ rows: [] }),
         ]);
         if (fuente === 'bd' && bars1m.length === 0) {
             throw new Error('La BD todavía no tiene velas cacheadas (el backfill inicial puede tardar unos minutos). Probá de nuevo en un rato o cambiá la fuente a Binance.');
         }
-        const resultado = runBacktest(bars1m, bars5m, bars15m, whaleRes.rows, p);
+        const resultado = runBacktest(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows);
         resultado.fuenteDatos = fuente;
         resultado.barsUsadas = { m1: bars1m.length, m5: bars5m.length, m15: bars15m.length };
 
@@ -2754,6 +2867,16 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             }
             if (p.whaleMinBTC < limiteGuardadoBD) {
                 warnings.push(`El "Mínimo BTC" del filtro (${p.whaleMinBTC}) es menor que el umbral de guardado en BD (${limiteGuardadoBD} BTC): solo existen trades ≥ ${limiteGuardadoBD} BTC, por lo que el filtro corre con datos incompletos.`);
+            }
+        }
+        if (p.useOIFilter) {
+            const oiCov = await pool.query('SELECT MIN(tiempo) AS primera, COUNT(*)::int AS n FROM open_interest');
+            const primeraOI = oiCov.rows[0] && oiCov.rows[0].primera ? Number(oiCov.rows[0].primera) * 1000 : null;
+            if (!primeraOI || oiCov.rows[0].n === 0) {
+                warnings.push('Filtro de Open Interest activo pero no hay datos de OI guardados: ningún trade pasará el filtro.');
+            } else if (primeraOI > periodStart.getTime()) {
+                const diasCubiertos = Math.max(0, (Date.now() - primeraOI) / 86400000);
+                warnings.push(`Filtro de Open Interest activo: solo hay datos de OI desde ${new Date(primeraOI).toISOString().slice(0, 16).replace('T', ' ')} UTC (~${diasCubiertos.toFixed(1)} días). Binance solo expone OI de los últimos ~30 días, así que el tramo anterior del período NO genera trades; las métricas reflejan solo el subperíodo con cobertura de OI.`);
             }
         }
         resultado.warnings = warnings;
