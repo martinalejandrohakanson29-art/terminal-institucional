@@ -730,6 +730,39 @@ app.get('/api/oi-live', autenticar, async (req, res) => {
     }
 });
 
+// Histórico de ratios de posicionamiento para el panel del gráfico.
+app.get('/api/long-short', autenticar, async (req, res) => {
+    try {
+        const r = await pool.query(`
+            SELECT tiempo, top_pos, global_acc FROM (
+                SELECT tiempo, top_pos, global_acc FROM long_short_ratio ORDER BY tiempo DESC LIMIT 10000
+            ) t ORDER BY tiempo ASC
+        `);
+        res.json(r.rows);
+    } catch (error) {
+        res.status(500).json({ error: 'Error obteniendo ratios de posicionamiento' });
+    }
+});
+
+// Valor actual de los ratios (proxy a Binance, sin CORS) para el tail en vivo del panel.
+app.get('/api/ls-live', autenticar, async (req, res) => {
+    try {
+        const [topR, globR] = await Promise.all([
+            fetch('https://fapi.binance.com/futures/data/topLongShortPositionRatio?symbol=BTCUSDT&period=5m&limit=1').then(r => r.json()),
+            fetch('https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=1').then(r => r.json()),
+        ]);
+        const t = Array.isArray(topR) && topR[0], g = Array.isArray(globR) && globR[0];
+        if (!t) return res.json({});
+        res.json({
+            tiempo:      Math.floor(Number(t.timestamp) / 60000) * 60,
+            topRatio:    parseFloat(t.longShortRatio),
+            globalRatio: g ? parseFloat(g.longShortRatio) : null,
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error obteniendo ratios en vivo' });
+    }
+});
+
 app.get('/api/filtro-bd', autenticar, (req, res) => {
     res.json({ umbral: limiteGuardadoBD });
 });

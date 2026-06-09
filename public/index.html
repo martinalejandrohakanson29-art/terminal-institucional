@@ -580,6 +580,23 @@
         });
 
         klinecharts.registerIndicator({
+            name: 'LONG_SHORT_RATIO',
+            shortName: 'L/S Ratio',
+            // Dos líneas: top traders (smart money, azul) y retail global (naranja), más una
+            // referencia en 1.0 (neutro). Por encima de 1 = neto long; por debajo = neto short.
+            calc: (kLineDataList) => kLineDataList.map(k => ({
+                topR:    (k.topR    != null && !isNaN(k.topR))    ? k.topR    : null,
+                globalR: (k.globalR != null && !isNaN(k.globalR)) ? k.globalR : null,
+                neutro:  1,
+            })),
+            figures: [
+                { key: 'neutro',  title: '',        type: 'line', styles: () => ({ color: 'rgba(120,123,134,0.5)', size: 1, style: 'dashed', dashedValue: [4, 3] }) },
+                { key: 'topR',    title: 'Top: ',    type: 'line', styles: () => ({ color: '#42a5f5', size: 1 }) },
+                { key: 'globalR', title: 'Retail: ', type: 'line', styles: () => ({ color: '#ff9800', size: 1 }) },
+            ]
+        });
+
+        klinecharts.registerIndicator({
             name: 'MACD_CUSTOM',
             shortName: 'MACD 15m',
             figures: [
@@ -1368,6 +1385,7 @@
         let adxVisible = false;
         let rsiVisible = false;
         let emaAngVisible = false;
+        let lsrVisible = false;
 
         function actualizarDisplayDeltaVol() {
             const el = document.getElementById('delta-vol-display');
@@ -1389,6 +1407,7 @@
             { id: 'DELTASUM',  label: 'ΔSum',      config: 'deltasum' },
             { id: 'DELTA_VOL', label: 'Δ Vol',     config: null        },
             { id: 'OI',        label: 'OI',        config: null        },
+            { id: 'LSR',       label: 'L/S Ratio', config: null        },
             { id: 'MACD',      label: 'MACD 15m',  config: null        },
             { id: '3EMA',      label: '3EMA',      config: 'ema'       },
             { id: 'ADX',       label: 'ADX',       config: null        },
@@ -1402,6 +1421,7 @@
             if (id === 'DELTASUM')  return deltaSumVisible;
             if (id === 'DELTA_VOL') return deltaVolVisible;
             if (id === 'OI')        return oiVisible;
+            if (id === 'LSR')       return lsrVisible;
             if (id === 'MACD')      return macdVisible;
             if (id === '3EMA')      return maVisible;
             if (id === 'ADX')       return adxVisible;
@@ -1524,6 +1544,10 @@
                 oiVisible = !oiVisible;
                 if (oiVisible) { chart.createIndicator('OPEN_INTEREST', false, { id: 'pane_oi', height: 100 }); }
                 else { chart.removeIndicator('pane_oi', 'OPEN_INTEREST'); }
+            } else if (tipo === 'LSR') {
+                lsrVisible = !lsrVisible;
+                if (lsrVisible) { chart.createIndicator('LONG_SHORT_RATIO', false, { id: 'pane_lsr', height: 100 }); }
+                else { chart.removeIndicator('pane_lsr', 'LONG_SHORT_RATIO'); }
             } else if (tipo === 'MACD') {
                 macdVisible = !macdVisible;
                 if (macdVisible) { chart.createIndicator('MACD_CUSTOM', false, { id: 'pane_macd', height: 120 }); }
@@ -1619,6 +1643,7 @@
         let velasActuales = [];       // fuente de verdad local de las velas
         let memoriaBallenasBD = [];
         let memoriaOIBD = [];
+        let memoriaLSRBD = [];
 
         // --- INDICADOR DE ESTADO DE CONEXIONES ---
         function actualizarEstadoConexion(tipo, ok) {
@@ -1653,6 +1678,23 @@
                 if (tVela === null) return;
                 const idx = porTiempo.get(tVela);
                 if (idx !== undefined && velas[idx]) velas[idx].oi = parseFloat(d.valor);
+            });
+        }
+
+        // --- MERGE RATIOS DE POSICIONAMIENTO → VELAS ---
+        function aplicarLSRAVelas(velas) {
+            if (memoriaLSRBD.length === 0) return;
+            const porTiempo = new Map(velas.map((v, i) => [v.timestamp, i]));
+            memoriaLSRBD.forEach(d => {
+                const t_ms = parseInt(d.tiempo) * 1000;
+                if (isNaN(t_ms)) return;
+                const tVela = obtenerVelaExacta(t_ms);
+                if (tVela === null) return;
+                const idx = porTiempo.get(tVela);
+                if (idx !== undefined && velas[idx]) {
+                    if (d.top_pos    != null) velas[idx].topR    = parseFloat(d.top_pos);
+                    if (d.global_acc != null) velas[idx].globalR = parseFloat(d.global_acc);
+                }
             });
         }
 
@@ -1691,16 +1733,22 @@
 
                 allVelas.forEach(v => {
                     const ts = v[0], vol = parseFloat(v[5]), c = parseFloat(v[9]), vt = vol - c;
-                    velasActuales.push({ timestamp: ts, open: parseFloat(v[1]), high: parseFloat(v[2]), low: parseFloat(v[3]), close: parseFloat(v[4]), volume: vol, delta: c - vt, compras: c, ventas: vt, oi: null });
+                    velasActuales.push({ timestamp: ts, open: parseFloat(v[1]), high: parseFloat(v[2]), low: parseFloat(v[3]), close: parseFloat(v[4]), volume: vol, delta: c - vt, compras: c, ventas: vt, oi: null, topR: null, globalR: null });
                     tiemposVelasActivas.push(ts);
                 });
 
-                // Cargar OI y mergearlo ANTES del primer applyNewData (una sola llamada sin flash)
+                // Cargar OI + ratios y mergearlos ANTES del primer applyNewData (sin flash).
+                // Los ratios se mergean aunque el panel esté oculto, así al activarlo ya hay datos.
                 try {
-                    const oiResp = await fetch('/api/open-interest');
-                    memoriaOIBD = await oiResp.json();
+                    const [oiResp, lsResp] = await Promise.all([
+                        fetch('/api/open-interest'),
+                        fetch('/api/long-short'),
+                    ]);
+                    memoriaOIBD  = await oiResp.json();
+                    memoriaLSRBD = await lsResp.json();
                     aplicarOIAVelas(velasActuales);
-                } catch (e) { console.error('Error cargando OI inicial:', e); }
+                    aplicarLSRAVelas(velasActuales);
+                } catch (e) { console.error('Error cargando OI/ratios inicial:', e); }
 
                 chart.applyNewData(velasActuales);
                 restaurarDibujos(temporalidad);
@@ -1727,8 +1775,11 @@
                         if (!k) return;
                         const ts = k.t, vol = parseFloat(k.v), c = parseFloat(k.V), vt = vol - c;
                         const ultima = velasActuales.length > 0 ? velasActuales[velasActuales.length - 1] : null;
-                        const oiActual = (ultima && ultima.timestamp === ts) ? ultima.oi : null;
-                        const kActualizada = { timestamp: ts, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: vol, delta: c - vt, compras: c, ventas: vt, oi: oiActual };
+                        const mismaVela = ultima && ultima.timestamp === ts;
+                        const oiActual = mismaVela ? ultima.oi : null;
+                        const topRActual = mismaVela ? ultima.topR : null;
+                        const globalRActual = mismaVela ? ultima.globalR : null;
+                        const kActualizada = { timestamp: ts, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: vol, delta: c - vt, compras: c, ventas: vt, oi: oiActual, topR: topRActual, globalR: globalRActual };
                         if (ultima && ultima.timestamp === ts) velasActuales[velasActuales.length - 1] = kActualizada;
                         else { velasActuales.push(kActualizada); tiemposVelasActivas.push(ts); }
                         chart.updateData(kActualizada);
@@ -1844,6 +1895,23 @@
         }
 
         setTimeout(() => { actualizarOpenInterestEnVivo(); setInterval(actualizarOpenInterestEnVivo, 3000); }, 3000);
+
+        // --- RATIOS DE POSICIONAMIENTO EN VIVO (Binance publica cada 5m; polleamos c/60s) ---
+        function actualizarLSREnVivo() {
+            fetch('/api/ls-live')
+                .then(r => r.json())
+                .then(d => {
+                    if (velasActuales.length > 0 && d && d.topRatio != null) {
+                        const ultima = velasActuales[velasActuales.length - 1];
+                        ultima.topR    = d.topRatio;
+                        ultima.globalR = d.globalRatio;
+                        chart.updateData(ultima);
+                    }
+                })
+                .catch(err => console.log("Error ratios en vivo:", err));
+        }
+
+        setTimeout(() => { actualizarLSREnVivo(); setInterval(actualizarLSREnVivo, 60000); }, 4000);
 
         // --- WHALE ACTIVITY HISTOGRAM ---
         let histoHoras   = 4;
@@ -2102,7 +2170,7 @@
                 temporalidad:   temporalidadActual,
                 panelVisible:   document.getElementById('orderbook-container').style.display !== 'none',
                 ballenasVisibles,
-                vwapVisible, deltaVisible, deltaSumVisible, deltaVolVisible, deltaVolVelas, oiVisible, maVisible, macdVisible, adxVisible, rsiVisible, emaAngVisible,
+                vwapVisible, deltaVisible, deltaSumVisible, deltaVolVisible, deltaVolVelas, oiVisible, lsrVisible, maVisible, macdVisible, adxVisible, rsiVisible, emaAngVisible,
                 configMA:       { ...configMA },
                 configRSI:      { ...configRSI },
                 configEMAang:   { ...configEMAang },
@@ -2566,6 +2634,10 @@
                 if (cfg.oiVisible === false) {
                     oiVisible = false;
                     chart.removeIndicator('pane_oi', 'OPEN_INTEREST');
+                }
+                if (cfg.lsrVisible === true) {
+                    lsrVisible = true;
+                    chart.createIndicator('LONG_SHORT_RATIO', false, { id: 'pane_lsr', height: 100 });
                 }
                 if (cfg.macdVisible === false) {
                     macdVisible = false;
