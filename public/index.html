@@ -291,7 +291,7 @@
                         <option value="">— Elegir —</option>
                     </select>
                     <button id="btn-strat-live" onclick="toggleEstrategiaLive()" style="height:24px;padding:0 8px;border:1px solid #d1d4dc;border-radius:4px;font-size:11px;background:#f8fafc;color:#374151;cursor:pointer;white-space:nowrap;">Activar</button>
-                    <span id="strat-live-badge" style="font-size:11px;font-weight:bold;color:#94a3b8;white-space:nowrap;"></span>
+                    <span id="strat-live-badge" style="font-size:11px;font-weight:bold;color:#94a3b8;white-space:nowrap;cursor:help;"></span>
                 </div>
 
                 <!-- AutoBot (solo admin) -->
@@ -1664,7 +1664,10 @@
                 else if (tiemposVelasActivas[mid] < tiempoBuscado_ms) lo = mid + 1;
                 else hi = mid - 1;
             }
-            return hi >= 0 ? tiemposVelasActivas[hi] : tiemposVelasActivas[0];
+            // hi apunta a la última vela con timestamp ≤ buscado (el bucket que contiene la muestra).
+            // Si hi < 0 la muestra es anterior a la primera vela del gráfico → no pertenece a ninguna
+            // vela visible: devolvemos null para no colapsar muestras viejas sobre la vela[0].
+            return hi >= 0 ? tiemposVelasActivas[hi] : null;
         }
 
         // --- MERGE OI → VELAS (Map para O(1) lookup) ---
@@ -2497,12 +2500,37 @@
             el.style.color = color || '#94a3b8';
         }
 
+        // Snapshot de los valores actuales de los indicadores devueltos por /signal. Se muestra
+        // como tooltip (title) del badge para poder inspeccionar por qué entra o no una señal:
+        // solo lista las métricas con dato (las de filtros apagados llegan en null y se omiten).
+        function resumenIndicadores(ind) {
+            if (!ind) return '';
+            const f = (v, d = 2) => (v == null || isNaN(v)) ? '—' : Number(v).toFixed(d);
+            const L = [];
+            if (ind.rsi15 != null)       L.push(`RSI ${ind.rsiTf || ''}: ${f(ind.rsi15, 1)}`);
+            if (ind.macd5 != null)       L.push(`MACD ${ind.macdTf || ''}: ${f(ind.macd5, 1)}`);
+            if (ind.adx != null)         L.push(`ADX: ${f(ind.adx, 1)}`);
+            if (ind.vwap != null)        L.push(`VWAP ${ind.vwapTf || ''}: ${f(ind.vwap, 0)}`);
+            if (ind.emaAngSlope != null) L.push(`EMA∠ ${ind.emaAngTf || ''}: ${f(ind.emaAngSlope)}`);
+            if (ind.oiSlope != null)     L.push(`OI Δ: ${f(ind.oiSlope)}%`);
+            if (ind.topRatio != null)    L.push(`Top traders L/S: ${f(ind.topRatio)}`);
+            if (ind.globalRatio != null) L.push(`Retail L/S: ${f(ind.globalRatio)}`);
+            if (ind.whaleDelta != null)  L.push(`Ballenas Δ: ${f(ind.whaleDelta, 1)} BTC`);
+            if (ind.deltaRolling != null) L.push(`Delta vol: ${f(ind.deltaRolling, 1)}`);
+            return L.length ? 'Indicadores en vivo:\n' + L.join('\n') : '';
+        }
+
         async function checkSenalEstrategia() {
             const nombre = document.getElementById('strat-live-sel').value;
             if (!nombre || !estrategiaLiveActiva) return;
             try {
                 const res = await fetch(`/api/estrategia/signal?nombre=${encodeURIComponent(nombre)}`, { credentials: 'same-origin' });
                 const data = await res.json();
+
+                // Tooltip con el estado actual de los indicadores (incluye OI y ratios de
+                // posicionamiento), disponible al pasar el mouse por el badge en cada ciclo.
+                const badgeEl = document.getElementById('strat-live-badge');
+                if (badgeEl) badgeEl.title = resumenIndicadores(data.indicadores);
 
                 if (senalAbierta) {
                     // Hay señal abierta: solo verificar si el precio actual tocó TP o SL.
@@ -2550,6 +2578,8 @@
                 btn.textContent = 'Activar';
                 btn.style.cssText = 'height:24px;padding:0 8px;border:1px solid #d1d4dc;border-radius:4px;font-size:11px;background:#f8fafc;color:#374151;cursor:pointer;white-space:nowrap;';
                 setLiveBadge('', '#94a3b8');
+                const badgeEl = document.getElementById('strat-live-badge');
+                if (badgeEl) badgeEl.title = '';
             } else {
                 const nombre = document.getElementById('strat-live-sel').value;
                 if (!nombre) { setLiveBadge('Seleccioná una estrategia', '#ef5350'); return; }

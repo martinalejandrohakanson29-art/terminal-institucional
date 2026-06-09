@@ -1423,7 +1423,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                     ? -pos.capitalAtEntry
                     : Math.max(pos.capitalAtEntry * net, -pos.capitalAtEntry);
                 capital += pnlAbs;
-                trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: ts, entryPrice: pos.entry, exitPrice, tp: pos.tp, sl: pos.sl, pnlPerc: (pnlAbs / pos.capitalAtEntry) * 100, pnlAbs, reason: exitReason, capital });
+                trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: ts, entryPrice: pos.entry, exitPrice, tp: pos.tp, sl: pos.sl, pnlPerc: (pnlAbs / pos.capitalAtEntry) * 100, pnlAbs, reason: exitReason, capital, oiSlope: pos.oiSlope, topRatio: pos.topRatio, globalRatio: pos.globalRatio });
                 lastClosedBarIdx = i;
                 posiciones.splice(j, 1);
             }
@@ -1507,12 +1507,16 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                 const emaAngOkShort = !useEmaAngFilter || (emaAngSlope !== null && emaAngSlope <= -emaAngGate);
 
                 // Open Interest — confirma que el OI viene subiendo (dinero nuevo). Aplica a ambos lados.
-                let oiOk = !useOIFilter;
+                let oiOk = !useOIFilter, oiSlopeVal = null;
                 if (useOIFilter && oiTs) {
                     const oiNow  = lookupHTF(oiTs, oiByTs, tsClose);
                     const oiPast = lookupHTF(oiTs, oiByTs, tsClose - oiLookbackMs);
-                    oiOk = oiNow != null && oiPast != null && oiPast > 0 &&
-                           ((oiNow - oiPast) / oiPast * 100) >= oiThreshold;
+                    if (oiNow != null && oiPast != null && oiPast > 0) {
+                        oiSlopeVal = (oiNow - oiPast) / oiPast * 100;
+                        oiOk = oiSlopeVal >= oiThreshold;
+                    } else {
+                        oiOk = false;
+                    }
                 }
 
                 // Posicionamiento — top traders (seguir) y retail global (fade), por nivel.
@@ -1529,7 +1533,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                     else {
                         const tp = close * (1 + p.tpPerc / 100);
                         const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
-                        posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
+                        posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada, oiSlope: oiSlopeVal, topRatio: topRatioVal, globalRatio: globRatioVal });
                     }
                 } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort && oiOk && topOkShort && retailOkShort) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
@@ -1537,7 +1541,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                     else {
                         const tp = close * (1 - p.tpPerc / 100);
                         const sl = p.stopType === 'Porcentaje' ? close * (1 + p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
-                        posiciones.push({ side: -1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada });
+                        posiciones.push({ side: -1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada, oiSlope: oiSlopeVal, topRatio: topRatioVal, globalRatio: globRatioVal });
                     }
                 }
             }
@@ -1577,7 +1581,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
             const net = raw * palanca - costoOperacion(p, palanca, barsIn);
             const pnlAbs = Math.max(pos.capitalAtEntry * net, -pos.capitalAtEntry);
             capital += pnlAbs;
-            trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: lastTs, entryPrice: pos.entry, exitPrice: lastClose, tp: pos.tp, sl: pos.sl, pnlPerc: (pnlAbs / pos.capitalAtEntry) * 100, pnlAbs, reason: 'Fin', capital });
+            trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: lastTs, entryPrice: pos.entry, exitPrice: lastClose, tp: pos.tp, sl: pos.sl, pnlPerc: (pnlAbs / pos.capitalAtEntry) * 100, pnlAbs, reason: 'Fin', capital, oiSlope: pos.oiSlope, topRatio: pos.topRatio, globalRatio: pos.globalRatio });
         }
         posiciones = [];
     }

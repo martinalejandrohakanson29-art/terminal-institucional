@@ -939,12 +939,20 @@
             const pc     = t.pnlPerc >= 0 ? '#26a69a' : '#ef5350';
             const rBadge = RAZON_BADGE[t.reason] || 'badge-time';
             const num    = filtrado.length - idx;
+            // Snapshot de los filtros de OI/posicionamiento al momento de la entrada (solo los
+            // que tenían filtro activo traen valor; null se omite). Permite validar visualmente
+            // que p.ej. todo Long entró con OI subiendo y top traders netos long.
+            const diag = [];
+            if (t.oiSlope    != null && !isNaN(t.oiSlope))    diag.push(`OI ${t.oiSlope >= 0 ? '+' : ''}${f2(t.oiSlope)}%`);
+            if (t.topRatio   != null && !isNaN(t.topRatio))   diag.push(`Top ${f2(t.topRatio)}`);
+            if (t.globalRatio != null && !isNaN(t.globalRatio)) diag.push(`Ret ${f2(t.globalRatio)}`);
+            const diagHtml = diag.length ? `<br><span style="color:#64748b;font-size:10px;">${diag.join(' · ')}</span>` : '';
             return `<tr>
                 <td style="color:#94a3b8;font-size:11px;">${num}</td>
                 <td><span class="badge ${t.type === 'Long' ? 'badge-long' : 'badge-short'}">${t.type}</span></td>
                 <td style="font-family:monospace;font-size:11px;color:#374151;">
                     ${fTs(t.entryTs)}<br>
-                    <span style="color:#94a3b8;">$${Math.round(t.entryPrice).toLocaleString()}</span>
+                    <span style="color:#94a3b8;">$${Math.round(t.entryPrice).toLocaleString()}</span>${diagHtml}
                 </td>
                 <td style="font-family:monospace;font-size:11px;color:#374151;">
                     ${fTs(t.exitTs)}<br>
