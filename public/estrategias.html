@@ -1242,10 +1242,10 @@
                        || document.getElementById('strat-select').value || '';
         const verEnGraficoHTML = `
         <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
-            <button onclick="verEnGrafico()" style="padding:5px 14px; border:1px solid #2962FF; border-radius:5px; background:rgba(41,98,255,0.07); color:#2962FF; font-size:12px; font-weight:bold; cursor:pointer; display:flex; align-items:center; gap:5px;">
+            <a href="/" target="_blank" rel="noopener" onclick="prepararGrafico(event)" style="padding:5px 14px; border:1px solid #2962FF; border-radius:5px; background:rgba(41,98,255,0.07); color:#2962FF; font-size:12px; font-weight:bold; cursor:pointer; display:flex; align-items:center; gap:5px; text-decoration:none;">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
                 Ver en Gráfico
-            </button>
+            </a>
         </div>`;
 
         document.getElementById('results').innerHTML =
@@ -1277,12 +1277,11 @@
               ).join('');
     }
 
-    function verEnGrafico() {
-        if (!tradesActuales || tradesActuales.length === 0) return;
+    function prepararGrafico(e) {
+        if (!tradesActuales || tradesActuales.length === 0) { e.preventDefault(); return; }
         const stratName = document.getElementById('strat-name').value.trim()
                        || document.getElementById('strat-select').value || '';
         localStorage.setItem('backtestTrades', JSON.stringify({ trades: tradesActuales, stratName }));
-        window.open('/', '_blank');
     }
 
     function escHtml(s) {
