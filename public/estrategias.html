@@ -176,6 +176,24 @@
         .filter-btn.active-long { background: rgba(38,166,154,0.12); color: #26a69a; border-color: #26a69a; }
         .filter-btn.active-short { background: rgba(239,83,80,0.12); color: #ef5350; border-color: #ef5350; }
         .cnt { font-size: 10px; opacity: .7; margin-left: 2px; }
+
+        /* Secciones colapsables */
+        .form-section.collapsible > h3 {
+            cursor: pointer; user-select: none;
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 0;
+        }
+        .form-section.collapsible > h3::after {
+            content: '▲'; font-size: 7px; color: #cbd5e1; flex-shrink: 0; margin-left: 4px;
+        }
+        .form-section.collapsible.collapsed > h3::after { content: '▼'; }
+        .form-section.collapsible.collapsed.sec-active > h3::before {
+            content: ''; display: inline-block; width: 5px; height: 5px;
+            border-radius: 50%; background: #2962FF; margin-right: 5px;
+            flex-shrink: 0; align-self: center;
+        }
+        .form-section.collapsible > .section-body { margin-top: 8px; }
+        .form-section.collapsible.collapsed > .section-body { display: none; }
     </style>
 </head>
 <body>
@@ -243,27 +261,29 @@
             </div>
         </div>
 
-        <div class="form-section">
+        <div class="form-section collapsible" data-ctrl="p-palanca-activo">
             <h3>Apalancamiento</h3>
-            <div class="form-row">
-                <label>Activar palanca</label>
-                <input type="checkbox" id="p-palanca-activo" class="form-check" onchange="togglePalanca()">
-            </div>
-            <div class="form-row" id="row-palanca-valor" style="display:none">
-                <label>Palanca</label>
-                <select id="p-palanca-valor" class="form-select">
-                    <option value="2">2x</option>
-                    <option value="3">3x</option>
-                    <option value="5">5x</option>
-                    <option value="10">10x</option>
-                    <option value="20" selected>20x</option>
-                    <option value="25">25x</option>
-                    <option value="50">50x</option>
-                    <option value="100">100x</option>
-                </select>
-            </div>
-            <div id="palanca-hint" style="display:none;font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
-                Simula futuros con margen. P&amp;L y comisiones se multiplican por la palanca. La posición se liquida (LIQ) si el precio se mueve ≥ 1/palanca en contra.
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar palanca</label>
+                    <input type="checkbox" id="p-palanca-activo" class="form-check" onchange="togglePalanca()">
+                </div>
+                <div class="form-row" id="row-palanca-valor" style="display:none">
+                    <label>Palanca</label>
+                    <select id="p-palanca-valor" class="form-select">
+                        <option value="2">2x</option>
+                        <option value="3">3x</option>
+                        <option value="5">5x</option>
+                        <option value="10">10x</option>
+                        <option value="20" selected>20x</option>
+                        <option value="25">25x</option>
+                        <option value="50">50x</option>
+                        <option value="100">100x</option>
+                    </select>
+                </div>
+                <div id="palanca-hint" style="display:none;font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                    Simula futuros con margen. P&amp;L y comisiones se multiplican por la palanca. La posición se liquida (LIQ) si el precio se mueve ≥ 1/palanca en contra.
+                </div>
             </div>
         </div>
 
@@ -353,261 +373,305 @@
             <div style="font-size:10px;color:#94a3b8;margin-top:2px;">Todo en horario Argentina (UTC-3, sin DST)</div>
         </div>
 
-        <div class="form-section">
-            <h3>Filtros</h3>
-            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;">RSI</div>
-            <div class="form-row">
-                <label>Activar filtro</label>
-                <input type="checkbox" id="p-rsi" class="form-check" checked>
+        <div class="form-section collapsible" data-ctrl="p-rsi">
+            <h3>RSI</h3>
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-rsi" class="form-check" checked>
+                </div>
+                <div class="form-row">
+                    <label>Temporalidad</label>
+                    <select id="p-rsi-tf" class="form-select">
+                        <option value="1m">1m</option>
+                        <option value="5m">5m</option>
+                        <option value="15m" selected>15m</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>Período</label>
+                    <input type="number" id="p-rsi-period" class="form-input" value="14" min="2" max="500">
+                </div>
+                <div class="form-row">
+                    <label>Umbral Long (≥)</label>
+                    <input type="number" id="p-rsi-long" class="form-input" value="60" min="1" max="99" step="1">
+                </div>
+                <div class="form-row">
+                    <label>Umbral Short (≤)</label>
+                    <input type="number" id="p-rsi-short" class="form-input" value="40" min="1" max="99" step="1">
+                </div>
             </div>
-            <div class="form-row">
-                <label>Temporalidad</label>
-                <select id="p-rsi-tf" class="form-select">
-                    <option value="1m">1m</option>
-                    <option value="5m">5m</option>
-                    <option value="15m" selected>15m</option>
-                </select>
+        </div>
+        <div class="form-section collapsible" data-ctrl="p-macd">
+            <h3>MACD</h3>
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-macd" class="form-check" checked>
+                </div>
+                <div class="form-row">
+                    <label>Temporalidad</label>
+                    <select id="p-macd-tf" class="form-select">
+                        <option value="1m">1m</option>
+                        <option value="5m" selected>5m</option>
+                        <option value="15m">15m</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>Fast</label>
+                    <input type="number" id="p-macd-fast" class="form-input" value="12" min="1" max="500">
+                </div>
+                <div class="form-row">
+                    <label>Slow</label>
+                    <input type="number" id="p-macd-slow" class="form-input" value="26" min="1" max="500">
+                </div>
+                <div class="form-row">
+                    <label>Signal</label>
+                    <input type="number" id="p-macd-signal" class="form-input" value="9" min="1" max="200">
+                </div>
             </div>
-            <div class="form-row">
-                <label>Período</label>
-                <input type="number" id="p-rsi-period" class="form-input" value="14" min="2" max="500">
+        </div>
+        <div class="form-section collapsible" data-ctrl="p-pullback">
+            <h3>Pullback a EMAs</h3>
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-pullback" class="form-check" checked>
+                </div>
+                <div class="form-row">
+                    <label>Distancia máx. %</label>
+                    <input type="number" id="p-pullback-perc" class="form-input" value="0.20" step="0.05" min="0.01">
+                </div>
+                <div style="margin-top:6px;">
+                    <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;">EMAs del filtro</div>
+                    <div id="pullback-ema-list"></div>
+                    <button type="button" onclick="agregarPullbackEMA()" style="padding:3px 10px;border:1px dashed #94a3b8;border-radius:4px;background:transparent;color:#64748b;font-size:11px;cursor:pointer;width:100%;margin-top:2px;">+ Agregar EMA</button>
+                </div>
             </div>
-            <div class="form-row">
-                <label>Umbral Long (≥)</label>
-                <input type="number" id="p-rsi-long" class="form-input" value="60" min="1" max="99" step="1">
+        </div>
+        <div class="form-section collapsible" data-ctrl="p-ema-align">
+            <h3>Alineamiento EMAs</h3>
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-ema-align" class="form-check" checked>
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">EMA 50 &gt; 100 &gt; 200 &gt; 500 para longs (inverso para shorts)</div>
             </div>
-            <div class="form-row">
-                <label>Umbral Short (≤)</label>
-                <input type="number" id="p-rsi-short" class="form-input" value="40" min="1" max="99" step="1">
+        </div>
+        <div class="form-section collapsible" data-ctrl="p-emaang">
+            <h3>Angulación EMA</h3>
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-emaang" class="form-check">
+                </div>
+                <div class="form-row">
+                    <label>Temporalidad</label>
+                    <select id="p-emaang-tf" class="form-select">
+                        <option value="1m">1m</option>
+                        <option value="5m">5m</option>
+                        <option value="15m" selected>15m</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>EMA Length</label>
+                    <input type="number" id="p-emaang-len" class="form-input" value="200" min="2" max="1000">
+                </div>
+                <div class="form-row">
+                    <label>Velas pendiente</label>
+                    <input type="number" id="p-emaang-slopebars" class="form-input" value="10" min="1" max="200">
+                </div>
+                <div class="form-row">
+                    <label>ATR Length</label>
+                    <input type="number" id="p-emaang-atr" class="form-input" value="14" min="1" max="200">
+                </div>
+                <div class="form-row">
+                    <label>Pendiente mínima</label>
+                    <input type="number" id="p-emaang-minslope" class="form-input" value="0.25" step="0.05" min="0">
+                </div>
+                <div class="form-row">
+                    <label>Pendiente fuerte</label>
+                    <input type="number" id="p-emaang-strongslope" class="form-input" value="0.60" step="0.05" min="0">
+                </div>
+                <div class="form-row">
+                    <label>Exigir</label>
+                    <select id="p-emaang-mode" class="form-select">
+                        <option value="min" selected>Pendiente mínima</option>
+                        <option value="strong">Pendiente fuerte</option>
+                    </select>
+                </div>
             </div>
-            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">Angulación EMA</div>
-            <div class="form-row">
-                <label>Activar filtro</label>
-                <input type="checkbox" id="p-emaang" class="form-check">
+        </div>
+        <div class="form-section collapsible" data-ctrl="p-oi">
+            <h3>Open Interest</h3>
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-oi" class="form-check">
+                </div>
+                <div class="form-row">
+                    <label>Lookback (min)</label>
+                    <input type="number" id="p-oi-lookback" class="form-input" value="30" min="5" max="1440" step="5">
+                </div>
+                <div class="form-row">
+                    <label>Suba mínima OI (%)</label>
+                    <input type="number" id="p-oi-threshold" class="form-input" value="0.5" min="0" step="0.1">
+                </div>
+                <div style="font-size:9px;color:#64748b;line-height:1.3;margin-top:4px;">Solo entra si el OI subió ≥ ese % en la ventana = dinero nuevo. ⚠ Binance solo da OI de los últimos ~30 días.</div>
             </div>
-            <div class="form-row">
-                <label>Temporalidad</label>
-                <select id="p-emaang-tf" class="form-select">
-                    <option value="1m">1m</option>
-                    <option value="5m">5m</option>
-                    <option value="15m" selected>15m</option>
-                </select>
+        </div>
+        <div class="form-section collapsible" data-ctrl="p-toptrader">
+            <h3>Top Traders</h3>
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Seguir smart money</label>
+                    <input type="checkbox" id="p-toptrader" class="form-check">
+                </div>
+                <div class="form-row">
+                    <label>Ratio L/S mínimo</label>
+                    <input type="number" id="p-toptrader-ratio" class="form-input" value="1.05" min="1" step="0.05">
+                </div>
+                <div style="font-size:9px;color:#64748b;line-height:1.3;margin-top:4px;">Long solo si top traders netos long (ratio ≥ X); short si netos short (≤ 1/X).</div>
             </div>
-            <div class="form-row">
-                <label>EMA Length</label>
-                <input type="number" id="p-emaang-len" class="form-input" value="200" min="2" max="1000">
-            </div>
-            <div class="form-row">
-                <label>Velas pendiente</label>
-                <input type="number" id="p-emaang-slopebars" class="form-input" value="10" min="1" max="200">
-            </div>
-            <div class="form-row">
-                <label>ATR Length</label>
-                <input type="number" id="p-emaang-atr" class="form-input" value="14" min="1" max="200">
-            </div>
-            <div class="form-row">
-                <label>Pendiente mínima</label>
-                <input type="number" id="p-emaang-minslope" class="form-input" value="0.25" step="0.05" min="0">
-            </div>
-            <div class="form-row">
-                <label>Pendiente fuerte</label>
-                <input type="number" id="p-emaang-strongslope" class="form-input" value="0.60" step="0.05" min="0">
-            </div>
-            <div class="form-row">
-                <label>Exigir</label>
-                <select id="p-emaang-mode" class="form-select">
-                    <option value="min" selected>Pendiente mínima</option>
-                    <option value="strong">Pendiente fuerte</option>
-                </select>
-            </div>
-            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">Open Interest</div>
-            <div class="form-row">
-                <label>Activar filtro</label>
-                <input type="checkbox" id="p-oi" class="form-check">
-            </div>
-            <div class="form-row">
-                <label>Lookback (min)</label>
-                <input type="number" id="p-oi-lookback" class="form-input" value="30" min="5" max="1440" step="5">
-            </div>
-            <div class="form-row">
-                <label>Suba mínima OI (%)</label>
-                <input type="number" id="p-oi-threshold" class="form-input" value="0.5" min="0" step="0.1">
-            </div>
-            <div style="font-size:9px;color:#64748b;line-height:1.3;margin:-2px 0 4px;">Solo entra (long o short) si el OI subió ≥ ese % en la ventana = dinero nuevo. ⚠ Binance solo da OI de los últimos ~30 días.</div>
-            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">Posicionamiento — Top Traders</div>
-            <div class="form-row">
-                <label>Seguir smart money</label>
-                <input type="checkbox" id="p-toptrader" class="form-check">
-            </div>
-            <div class="form-row">
-                <label>Ratio L/S mínimo</label>
-                <input type="number" id="p-toptrader-ratio" class="form-input" value="1.05" min="1" step="0.05">
-            </div>
-            <div style="font-size:9px;color:#64748b;line-height:1.3;margin:-2px 0 4px;">Long solo si los top traders están netos long (ratio ≥ X); short si están netos short (≤ 1/X). Sigue al dinero grande.</div>
-            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">Posicionamiento — Retail (fade)</div>
-            <div class="form-row">
-                <label>Fade al retail</label>
-                <input type="checkbox" id="p-retail" class="form-check">
-            </div>
-            <div class="form-row">
-                <label>Ratio extremo</label>
-                <input type="number" id="p-retail-extreme" class="form-input" value="2.0" min="1" step="0.1">
-            </div>
-            <div style="font-size:9px;color:#64748b;line-height:1.3;margin:-2px 0 4px;">Contrarian: NO entra long si el retail está sobrecargado long (ratio &gt; X); NO entra short si está sobrecargado short (&lt; 1/X). ⚠ ~30 días de historia.</div>
-            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px;">MACD</div>
-            <div class="form-row">
-                <label>Activar filtro</label>
-                <input type="checkbox" id="p-macd" class="form-check" checked>
-            </div>
-            <div class="form-row">
-                <label>Temporalidad</label>
-                <select id="p-macd-tf" class="form-select">
-                    <option value="1m">1m</option>
-                    <option value="5m" selected>5m</option>
-                    <option value="15m">15m</option>
-                </select>
-            </div>
-            <div class="form-row">
-                <label>Fast</label>
-                <input type="number" id="p-macd-fast" class="form-input" value="12" min="1" max="500">
-            </div>
-            <div class="form-row">
-                <label>Slow</label>
-                <input type="number" id="p-macd-slow" class="form-input" value="26" min="1" max="500">
-            </div>
-            <div class="form-row">
-                <label>Signal</label>
-                <input type="number" id="p-macd-signal" class="form-input" value="9" min="1" max="200">
-            </div>
-            <div class="form-row" style="margin-top:8px;">
-                <label>Pullback a EMAs</label>
-                <input type="checkbox" id="p-pullback" class="form-check" checked>
-            </div>
-            <div class="form-row">
-                <label>Distancia máx. %</label>
-                <input type="number" id="p-pullback-perc" class="form-input" value="0.20" step="0.05" min="0.01">
-            </div>
-            <div style="margin-top:6px;">
-                <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;">EMAs del filtro</div>
-                <div id="pullback-ema-list"></div>
-                <button type="button" onclick="agregarPullbackEMA()" style="padding:3px 10px;border:1px dashed #94a3b8;border-radius:4px;background:transparent;color:#64748b;font-size:11px;cursor:pointer;width:100%;margin-top:2px;">+ Agregar EMA</button>
-            </div>
-            <div class="form-row" style="margin-top:8px;">
-                <label>Alineamiento EMAs</label>
-                <input type="checkbox" id="p-ema-align" class="form-check" checked>
+        </div>
+        <div class="form-section collapsible" data-ctrl="p-retail">
+            <h3>Retail (fade)</h3>
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Fade al retail</label>
+                    <input type="checkbox" id="p-retail" class="form-check">
+                </div>
+                <div class="form-row">
+                    <label>Ratio extremo</label>
+                    <input type="number" id="p-retail-extreme" class="form-input" value="2.0" min="1" step="0.1">
+                </div>
+                <div style="font-size:9px;color:#64748b;line-height:1.3;margin-top:4px;">Contrarian: NO entra long si retail sobrecargado long (ratio &gt; X); NO short si sobrecargado short (&lt; 1/X). ⚠ ~30 días de historia.</div>
             </div>
         </div>
 
-        <div class="form-section">
+        <div class="form-section collapsible" data-ctrl="p-max-time">
             <h3>Tiempo en operación</h3>
-            <div class="form-row">
-                <label>Usar tiempo máx.</label>
-                <input type="checkbox" id="p-max-time" class="form-check" checked>
-            </div>
-            <div class="form-row">
-                <label>Máx. minutos</label>
-                <input type="number" id="p-max-minutes" class="form-input" value="15" min="1">
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Usar tiempo máx.</label>
+                    <input type="checkbox" id="p-max-time" class="form-check" checked>
+                </div>
+                <div class="form-row">
+                    <label>Máx. minutos</label>
+                    <input type="number" id="p-max-minutes" class="form-input" value="15" min="1">
+                </div>
             </div>
         </div>
 
-        <div class="form-section">
+        <div class="form-section collapsible" data-ctrl="p-cooldown">
             <h3>Cooldown</h3>
-            <div class="form-row">
-                <label>Usar cooldown</label>
-                <input type="checkbox" id="p-cooldown" class="form-check" checked>
-            </div>
-            <div class="form-row">
-                <label>Minutos de espera</label>
-                <input type="number" id="p-cooldown-min" class="form-input" value="45" min="1">
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Usar cooldown</label>
+                    <input type="checkbox" id="p-cooldown" class="form-check" checked>
+                </div>
+                <div class="form-row">
+                    <label>Minutos de espera</label>
+                    <input type="number" id="p-cooldown-min" class="form-input" value="45" min="1">
+                </div>
             </div>
         </div>
 
-        <div class="form-section">
+        <div class="form-section collapsible" data-ctrl="p-delta">
             <h3>Delta de Volumen</h3>
-            <div class="form-row">
-                <label>Activar filtro</label>
-                <input type="checkbox" id="p-delta" class="form-check">
-            </div>
-            <div class="form-row">
-                <label>Velas a acumular</label>
-                <input type="number" id="p-delta-velas" class="form-input" value="3" min="1" max="50">
-            </div>
-            <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
-                Long si suma delta N velas > 0<br>Short si suma delta N velas &lt; 0
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-delta" class="form-check">
+                </div>
+                <div class="form-row">
+                    <label>Velas a acumular</label>
+                    <input type="number" id="p-delta-velas" class="form-input" value="3" min="1" max="50">
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                    Long si suma delta N velas > 0<br>Short si suma delta N velas &lt; 0
+                </div>
             </div>
         </div>
 
-        <div class="form-section">
+        <div class="form-section collapsible" data-ctrl="p-whale">
             <h3>Confirmación Ballenas</h3>
-            <div class="form-row">
-                <label>Activar filtro</label>
-                <input type="checkbox" id="p-whale" class="form-check">
-            </div>
-            <div class="form-row">
-                <label>Ventana (min)</label>
-                <input type="number" id="p-whale-window" class="form-input" value="30" min="1">
-            </div>
-            <div class="form-row">
-                <label>Mínimo BTC</label>
-                <input type="number" id="p-whale-min-btc" class="form-input" value="5" min="0.1" step="0.5">
-            </div>
-            <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
-                Long si delta ballenas en ventana > 0<br>Short si delta ballenas en ventana &lt; 0
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-whale" class="form-check">
+                </div>
+                <div class="form-row">
+                    <label>Ventana (min)</label>
+                    <input type="number" id="p-whale-window" class="form-input" value="30" min="1">
+                </div>
+                <div class="form-row">
+                    <label>Mínimo BTC</label>
+                    <input type="number" id="p-whale-min-btc" class="form-input" value="5" min="0.1" step="0.5">
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                    Long si delta ballenas en ventana > 0<br>Short si delta ballenas en ventana &lt; 0
+                </div>
             </div>
         </div>
 
-        <div class="form-section">
+        <div class="form-section collapsible" data-ctrl="p-adx">
             <h3>ADX (Fuerza de Tendencia)</h3>
-            <div class="form-row">
-                <label>Activar filtro</label>
-                <input type="checkbox" id="p-adx" class="form-check">
-            </div>
-            <div class="form-row">
-                <label>Umbral ADX</label>
-                <input type="number" id="p-adx-threshold" class="form-input" value="25" min="1" max="100">
-            </div>
-            <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
-                ADX ≥ umbral = tendencia fuerte<br>ADX &lt; 25: rango / tendencia débil
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-adx" class="form-check">
+                </div>
+                <div class="form-row">
+                    <label>Umbral ADX</label>
+                    <input type="number" id="p-adx-threshold" class="form-input" value="25" min="1" max="100">
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                    ADX ≥ umbral = tendencia fuerte<br>ADX &lt; 25: rango / tendencia débil
+                </div>
             </div>
         </div>
 
-        <div class="form-section">
+        <div class="form-section collapsible" data-ctrl="p-vwap">
             <h3>VWAP</h3>
-            <div class="form-row">
-                <label>Activar filtro</label>
-                <input type="checkbox" id="p-vwap" class="form-check">
-            </div>
-            <div class="form-row">
-                <label>Timeframe</label>
-                <select id="p-vwap-tf" class="form-select">
-                    <option value="1m">1m</option>
-                    <option value="5m" selected>5m</option>
-                    <option value="15m">15m</option>
-                </select>
-            </div>
-            <div class="form-row">
-                <label>Sesión</label>
-                <select id="p-vwap-session" class="form-select">
-                    <option value="daily" selected>Diaria</option>
-                    <option value="weekly">Semanal</option>
-                    <option value="monthly">Mensual</option>
-                </select>
-            </div>
-            <div class="form-row">
-                <label>Usar como dirección</label>
-                <input type="checkbox" id="p-vwap-direction" class="form-check">
-            </div>
-            <div class="form-row">
-                <label>Usar como pullback</label>
-                <input type="checkbox" id="p-vwap-pullback" class="form-check" onchange="toggleVwapPullback()">
-            </div>
-            <div class="form-row" id="row-vwap-pullback-perc" style="display:none;">
-                <label>Distancia (%)</label>
-                <input type="number" id="p-vwap-pullback-perc" class="form-input" value="0.30" min="0.01" step="0.01">
-            </div>
-            <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
-                Dirección: Long si precio &gt; VWAP · Short si precio &lt; VWAP<br>
-                Pullback: precio dentro de X% del VWAP
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-vwap" class="form-check">
+                </div>
+                <div class="form-row">
+                    <label>Timeframe</label>
+                    <select id="p-vwap-tf" class="form-select">
+                        <option value="1m">1m</option>
+                        <option value="5m" selected>5m</option>
+                        <option value="15m">15m</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>Sesión</label>
+                    <select id="p-vwap-session" class="form-select">
+                        <option value="daily" selected>Diaria</option>
+                        <option value="weekly">Semanal</option>
+                        <option value="monthly">Mensual</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>Usar como dirección</label>
+                    <input type="checkbox" id="p-vwap-direction" class="form-check">
+                </div>
+                <div class="form-row">
+                    <label>Usar como pullback</label>
+                    <input type="checkbox" id="p-vwap-pullback" class="form-check" onchange="toggleVwapPullback()">
+                </div>
+                <div class="form-row" id="row-vwap-pullback-perc" style="display:none;">
+                    <label>Distancia (%)</label>
+                    <input type="number" id="p-vwap-pullback-perc" class="form-input" value="0.30" min="0.01" step="0.01">
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                    Dirección: Long si precio &gt; VWAP · Short si precio &lt; VWAP<br>
+                    Pullback: precio dentro de X% del VWAP
+                </div>
             </div>
         </div>
 
@@ -1252,6 +1316,7 @@
         togglePalanca();
         actualizarPosUI();
         document.getElementById('row-sl').style.display          = p.stopType === 'Porcentaje' ? 'flex' : 'none';
+        refreshCollapsibles();
     }
 
     function cargarEstrategia() {
@@ -1333,7 +1398,31 @@
         renderPullbackEMAList();
     }
 
+    function initCollapsibles() {
+        document.querySelectorAll('.form-section.collapsible').forEach(sec => {
+            const ctrl = sec.dataset.ctrl ? document.getElementById(sec.dataset.ctrl) : null;
+            const active = ctrl ? ctrl.checked : false;
+            sec.classList.toggle('collapsed', !active);
+            sec.classList.toggle('sec-active', active);
+            sec.querySelector('h3').addEventListener('click', () => sec.classList.toggle('collapsed'));
+            if (ctrl) ctrl.addEventListener('change', () => {
+                sec.classList.toggle('sec-active', ctrl.checked);
+                sec.classList.toggle('collapsed', !ctrl.checked);
+            });
+        });
+    }
+
+    function refreshCollapsibles() {
+        document.querySelectorAll('.form-section.collapsible').forEach(sec => {
+            const ctrl = sec.dataset.ctrl ? document.getElementById(sec.dataset.ctrl) : null;
+            if (!ctrl) return;
+            sec.classList.toggle('sec-active', ctrl.checked);
+            sec.classList.toggle('collapsed', !ctrl.checked);
+        });
+    }
+
     renderPullbackEMAList();
+    initCollapsibles();
     inicializarEstrategias();
 
     function buildEquitySVG(equity, initialCapital) {
