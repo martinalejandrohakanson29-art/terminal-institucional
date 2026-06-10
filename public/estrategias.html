@@ -1282,7 +1282,7 @@
         const stratName = document.getElementById('strat-name').value.trim()
                        || document.getElementById('strat-select').value || '';
         localStorage.setItem('backtestTrades', JSON.stringify({ trades: tradesActuales, stratName }));
-        window.location.href = '/';
+        window.open('/', '_blank');
     }
 
     function escHtml(s) {
