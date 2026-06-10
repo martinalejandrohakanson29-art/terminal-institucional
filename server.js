@@ -1450,8 +1450,9 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
             (pos.side === 1 ? close - pos.entry : pos.entry - close) < 0
         );
         if ((posiciones.length === 0 || p.allowMultipleEntries) && !hayPosicionEnPerdida) {
-            const barHour = new Date(ts).getUTCHours();
-            const argDay = new Date(ts - 3 * 3600000).getUTCDay(); // 0=Dom, 6=Sáb en horario Argentina
+            const argDate = new Date(ts - 3 * 3600000); // horario Argentina (UTC-3)
+            const barHour = argDate.getUTCHours();
+            const argDay  = argDate.getUTCDay(); // 0=Dom, 6=Sáb
             const barsSinceClose = lastClosedBarIdx !== null ? i - lastClosedBarIdx : 999999;
 
             if (
@@ -2565,8 +2566,9 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const macd5 = macdLookup.macd;
     const sig5  = macdLookup.sig;
 
-    const barHour  = new Date(ts).getUTCHours();
-    const argDay   = new Date(ts - 3 * 3600000).getUTCDay(); // 0=Dom, 6=Sáb en horario Argentina
+    const argDate  = new Date(ts - 3 * 3600000); // horario Argentina (UTC-3)
+    const barHour  = argDate.getUTCHours();
+    const argDay   = argDate.getUTCDay(); // 0=Dom, 6=Sáb
     const horarioOk = barHour >= (p.startHour ?? 9) && barHour < (p.endHour ?? 20)
                    && (p.operaFinDeSemana || (argDay !== 0 && argDay !== 6));
 

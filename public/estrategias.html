@@ -183,7 +183,7 @@
 <div id="header">
     <a href="/terminal" class="back-link">← Terminal</a>
     <h2>Backtester de Estrategias</h2>
-    <span style="font-size:11px;color:#94a3b8;margin-left:auto;">BTC/USDT 1m · multi-timeframe · horarios en UTC</span>
+    <span style="font-size:11px;color:#94a3b8;margin-left:auto;">BTC/USDT 1m · multi-timeframe · horarios en Argentina (UTC-3)</span>
     <span id="prueba-msg" style="font-size:11px;font-weight:bold;color:#94a3b8;white-space:nowrap;max-width:340px;overflow:hidden;text-overflow:ellipsis;"></span>
     <button id="btn-prueba" class="btn-sm" onclick="dispararPrueba()"
             title="Abre una entrada de prueba en tu cuenta de Binance (testnet) con TP/SL muy cortos para verificar de punta a punta que la operativa y las órdenes de protección funcionan."
@@ -337,7 +337,7 @@
         </div>
 
         <div class="form-section">
-            <h3>Horario (UTC)</h3>
+            <h3>Horario (Argentina)</h3>
             <div class="form-row">
                 <label>Hora inicio</label>
                 <input type="number" id="p-start-hour" class="form-input" value="9" min="0" max="23">
@@ -350,7 +350,7 @@
                 <label>Operar fin de semana</label>
                 <input type="checkbox" id="p-fds" class="form-check">
             </div>
-            <div style="font-size:10px;color:#94a3b8;margin-top:2px;">Sáb/Dom según horario Argentina (UTC-3)</div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:2px;">Todo en horario Argentina (UTC-3, sin DST)</div>
         </div>
 
         <div class="form-section">
