@@ -1335,6 +1335,21 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const whaleWindowMs = p.whaleWindow * 60000;
     let wLeft = 0, wRight = -1, wBuys = 0, wSells = 0;
 
+    // Stop EMAs configurables (modo Ruptura EMA): pre-compute una vez, lookup por barra en el loop
+    const stopEMACfgs = p.stopType === 'Ruptura EMA'
+        ? (Array.isArray(p.stopEMAs) && p.stopEMAs.length ? p.stopEMAs : [{ period:200, tf:'1m' }, { period:500, tf:'1m' }])
+        : [];
+    const stopEmaArrays = stopEMACfgs.map(({ period, tf }) => {
+        if (tf === '5m') {
+            const vals = calcEMA(c5m_pb, period);
+            return { arr: null, tsArr: bars5m.map(b => parseInt(b[6])).sort((a,b)=>a-b), map: new Map(bars5m.map((b,i)=>[parseInt(b[6]),vals[i]])) };
+        } else if (tf === '15m') {
+            const vals = calcEMA(c15m, period);
+            return { arr: null, tsArr: bars15m.map(b => parseInt(b[6])).sort((a,b)=>a-b), map: new Map(bars15m.map((b,i)=>[parseInt(b[6]),vals[i]])) };
+        }
+        return { arr: calcEMA(c1m, period), tsArr: null, map: null };
+    });
+
     let capital = p.initialCapital;
     let posiciones = []; // { side, entry, entryBarIdx, tp, sl, capitalAtEntry }
     let lastClosedBarIdx = null;
@@ -1355,6 +1370,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         const high = parseFloat(bar[2]), low = parseFloat(bar[3]), close = parseFloat(bar[4]);
         const E50 = e50[i], E100 = e100[i], E200 = e200[i], E500 = e500[i];
         if (!E500) continue;
+        const stopEmaVals = stopEmaArrays.map(s => s.arr ? s.arr[i] : lookupHTF(s.tsArr, s.map, tsClose)).filter(v => v != null);
 
         const rsiRaw  = rsiTf === '1m'  ? rsiDirect[i]  : lookupHTF(tsRsi,  rsiByTs,  tsClose);
         const macdRaw = macdTf === '1m' ? macdDirect[i] : lookupHTF(tsMACD, macdByTs, tsClose);
@@ -1389,10 +1405,9 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                         else if (high >= pos.tp)                   { exitPrice = pos.tp; exitReason = 'TP'; }
                         else if (low  <= pos.sl)                   { exitPrice = pos.sl; exitReason = 'SL'; }
                     } else {
-                        // Conservador: si en la misma vela rompe la EMA (al cierre) y toca el TP, prioriza la ruptura.
-                        const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500;
-                        if      (close < se)     { exitPrice = close;  exitReason = 'EMA'; }
-                        else if (high >= pos.tp) { exitPrice = pos.tp; exitReason = 'TP'; }
+                        // Si rompe alguna stop EMA al cierre y también toca TP, prioriza la ruptura.
+                        if      (stopEmaVals.some(v => close < v)) { exitPrice = close;  exitReason = 'EMA'; }
+                        else if (high >= pos.tp)                    { exitPrice = pos.tp; exitReason = 'TP'; }
                     }
                     if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
                 } else {
@@ -1401,10 +1416,9 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                         else if (low  <= pos.tp)                   { exitPrice = pos.tp; exitReason = 'TP'; }
                         else if (high >= pos.sl)                   { exitPrice = pos.sl; exitReason = 'SL'; }
                     } else {
-                        // Conservador: si en la misma vela rompe la EMA (al cierre) y toca el TP, prioriza la ruptura.
-                        const se = p.stopType === 'Ruptura EMA 200' ? E200 : E500;
-                        if      (close > se)     { exitPrice = close;   exitReason = 'EMA'; }
-                        else if (low <= pos.tp)  { exitPrice = pos.tp;  exitReason = 'TP'; }
+                        // Si rompe alguna stop EMA al cierre y también toca TP, prioriza la ruptura.
+                        if      (stopEmaVals.some(v => close > v)) { exitPrice = close;   exitReason = 'EMA'; }
+                        else if (low <= pos.tp)                     { exitPrice = pos.tp;  exitReason = 'TP'; }
                     }
                     if (!exitPrice && p.useMaxTradeTime && barsIn >= p.maxTradeMinutes) { exitPrice = close; exitReason = 'Tiempo'; }
                 }
@@ -1533,7 +1547,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
                         const tp = close * (1 + p.tpPerc / 100);
-                        const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
+                        const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (stopEmaVals.length ? Math.max(...stopEmaVals) : close * 0.99);
                         posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada, oiSlope: oiSlopeVal, topRatio: topRatioVal, globalRatio: globRatioVal });
                     }
                 } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort && oiOk && topOkShort && retailOkShort) {
@@ -1541,7 +1555,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
                         const tp = close * (1 - p.tpPerc / 100);
-                        const sl = p.stopType === 'Porcentaje' ? close * (1 + p.slPerc / 100) : (p.stopType === 'Ruptura EMA 200' ? E200 : E500);
+                        const sl = p.stopType === 'Porcentaje' ? close * (1 + p.slPerc / 100) : (stopEmaVals.length ? Math.min(...stopEmaVals) : close * 1.01);
                         posiciones.push({ side: -1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada, oiSlope: oiSlopeVal, topRatio: topRatioVal, globalRatio: globRatioVal });
                     }
                 }
@@ -1837,19 +1851,38 @@ async function chequearSalida(precio, entorno) {
 
 // Cada ciclo (1 min): salida por tiempo máximo y stop EMA dinámico, por sub-posición de la
 // cuenta `ctx`. Usa los klines 1m compartidos del ciclo. Replica el backtest al cierre de vela.
-async function gestionarPosicionAbierta(ctx, p, bars1m) {
+async function gestionarPosicionAbierta(ctx, p, bars1m, bars5m, bars15m) {
     const arr = posDe(ctx.uid);
     if (arr.length === 0) return;
     const ahora = Date.now();
 
-    const stopEMA = (p.stopType === 'Ruptura EMA 200' || p.stopType === 'Ruptura EMA 500');
-    let precioActual = precioDeCtx(ctx), emaVal = null;
+    const stopEMA = (p.stopType === 'Ruptura EMA' || p.stopType === 'Ruptura EMA 200' || p.stopType === 'Ruptura EMA 500');
+    let precioActual = precioDeCtx(ctx), stopEmaVals = [];
     if (stopEMA && bars1m && bars1m.length >= 510) {
-        const c1m = bars1m.map(b => parseFloat(b[4]));
-        const emaArr = calcEMA(c1m, p.stopType === 'Ruptura EMA 200' ? 200 : 500);
+        const c1m_live = bars1m.map(b => parseFloat(b[4]));
         const last = bars1m.length - 1;
-        emaVal = emaArr[last];
-        precioActual = c1m[last]; // decisión al cierre de vela, igual que el backtest
+        precioActual = c1m_live[last];
+        const tsClose_live = parseInt(bars1m[last][6]);
+        const stopCfgs_live = (Array.isArray(p.stopEMAs) && p.stopEMAs.length)
+            ? p.stopEMAs
+            : p.stopType === 'Ruptura EMA 200' ? [{ period:200, tf:'1m' }]
+            : p.stopType === 'Ruptura EMA 500' ? [{ period:500, tf:'1m' }]
+            : [{ period:200, tf:'1m' }, { period:500, tf:'1m' }];
+        for (const { period, tf } of stopCfgs_live) {
+            let val = null;
+            if (tf === '1m') {
+                val = calcEMA(c1m_live, period)[last];
+            } else if (tf === '5m' && bars5m && bars5m.length >= period) {
+                const vals = calcEMA(bars5m.map(b => parseFloat(b[4])), period);
+                const tsArr = bars5m.map(b => parseInt(b[6])).sort((a,b)=>a-b);
+                val = lookupHTF(tsArr, new Map(bars5m.map((b,i)=>[parseInt(b[6]),vals[i]])), tsClose_live);
+            } else if (tf === '15m' && bars15m && bars15m.length >= period) {
+                const vals = calcEMA(bars15m.map(b => parseFloat(b[4])), period);
+                const tsArr = bars15m.map(b => parseInt(b[6])).sort((a,b)=>a-b);
+                val = lookupHTF(tsArr, new Map(bars15m.map((b,i)=>[parseInt(b[6]),vals[i]])), tsClose_live);
+            }
+            if (val != null) stopEmaVals.push(val);
+        }
     }
     if (!precioActual && bars1m && bars1m.length) precioActual = parseFloat(bars1m[bars1m.length - 1][4]);
     if (!precioActual) return;
@@ -1860,8 +1893,10 @@ async function gestionarPosicionAbierta(ctx, p, bars1m) {
         let razon = null;
         if (p.useMaxTradeTime && pos.entryTs && (ahora - pos.entryTs) / 60000 >= (p.maxTradeMinutes ?? 15)) {
             razon = 'Tiempo';
-        } else if (stopEMA && emaVal != null) {
-            const rompe = pos.lado === 'long' ? precioActual < emaVal : precioActual > emaVal;
+        } else if (stopEMA && stopEmaVals.length) {
+            const rompe = pos.lado === 'long'
+                ? stopEmaVals.some(v => precioActual < v)
+                : stopEmaVals.some(v => precioActual > v);
             if (rompe) razon = 'EMA';
         }
         if (razon) {
@@ -2085,7 +2120,7 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
     const arr = posDe(row.usuario_id);
 
     // Gestionar salidas de sub-posiciones abiertas (tiempo / EMA). El WS cubre TP/SL fijos.
-    if (arr.length > 0) await gestionarPosicionAbierta(ctx, p, bars1m);
+    if (arr.length > 0) await gestionarPosicionAbierta(ctx, p, bars1m, bars5m, bars15m);
 
     // Cuenta apagada: solo gestionar salidas, no abrir nuevas entradas.
     if (!row.habilitado) return;
@@ -2685,10 +2720,24 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
 
     let sl = null;
     if (signal) {
-        if (stopType === 'Porcentaje')
+        if (stopType === 'Porcentaje') {
             sl = signal === 'long' ? close * (1 - slPerc / 100) : close * (1 + slPerc / 100);
-        else
-            sl = stopType === 'Ruptura EMA 200' ? E200 : E500;
+        } else {
+            const stopCfgs_sl = Array.isArray(p.stopEMAs) && p.stopEMAs.length
+                ? p.stopEMAs : [{ period:200, tf:'1m' }, { period:500, tf:'1m' }];
+            const stopVals_sl = stopCfgs_sl.map(({ period, tf }) => {
+                if (tf === '1m') return calcEMA(c1m, period)[i];
+                const c = tf === '5m' ? c5m_sn : c15m_sn;
+                const bars = tf === '5m' ? bars5m : bars15m;
+                const vals = calcEMA(c, period);
+                const map = new Map(bars.map((b, idx) => [parseInt(b[6]), vals[idx]]));
+                const tsArr = bars.map(b => parseInt(b[6])).sort((a,b) => a-b);
+                return lookupHTF(tsArr, map, tsClose);
+            }).filter(v => v != null);
+            sl = signal === 'long'
+                ? (stopVals_sl.length ? Math.max(...stopVals_sl) : close * 0.99)
+                : (stopVals_sl.length ? Math.min(...stopVals_sl) : close * 1.01);
+        }
     }
 
     return {
@@ -2937,8 +2986,16 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             enableLongs:       req.body.enableLongs !== false,
             enableShorts:      req.body.enableShorts !== false,
             tpPerc:            parseFloat(req.body.tpPerc)  || 0.5,
-            stopType:          req.body.stopType || 'Porcentaje',
+            stopType:          (() => { const t = req.body.stopType || 'Porcentaje'; return (t === 'Ruptura EMA 200' || t === 'Ruptura EMA 500') ? 'Ruptura EMA' : t; })(),
             slPerc:            parseFloat(req.body.slPerc)  || 1.0,
+            stopEMAs:          (() => {
+                const t = req.body.stopType;
+                if (t === 'Ruptura EMA 200') return [{ period:200, tf:'1m' }, { period:200, tf:'1m' }];
+                if (t === 'Ruptura EMA 500') return [{ period:500, tf:'1m' }, { period:500, tf:'1m' }];
+                return Array.isArray(req.body.stopEMAs) && req.body.stopEMAs.length
+                    ? req.body.stopEMAs.slice(0,2).map(e => ({ period: Math.max(1, parseInt(e.period)||200), tf: ['1m','5m','15m'].includes(e.tf) ? e.tf : '1m' }))
+                    : [{ period:200, tf:'1m' }, { period:500, tf:'1m' }];
+            })(),
             startHour:         Number.isFinite(parseInt(req.body.startHour)) ? parseInt(req.body.startHour) : 9,
             endHour:           Number.isFinite(parseInt(req.body.endHour))   ? parseInt(req.body.endHour)   : 20,
             usePullbackFilter: req.body.usePullbackFilter !== false,

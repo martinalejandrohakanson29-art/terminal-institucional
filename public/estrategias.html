@@ -344,15 +344,43 @@
             </div>
             <div class="form-row">
                 <label>Tipo de Stop</label>
-                <select id="p-stop-type" class="form-select">
+                <select id="p-stop-type" class="form-select" onchange="toggleStopType()">
                     <option value="Porcentaje">Porcentaje</option>
-                    <option value="Ruptura EMA 200">Ruptura EMA 200</option>
-                    <option value="Ruptura EMA 500">Ruptura EMA 500</option>
+                    <option value="Ruptura EMA">Ruptura EMA</option>
                 </select>
             </div>
             <div class="form-row" id="row-sl">
                 <label>Stop Loss %</label>
                 <input type="number" id="p-sl" class="form-input" value="1.0" step="0.1" min="0.1">
+            </div>
+            <div id="stop-ema-config" style="display:none;">
+                <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:6px 0 3px;">EMA 1</div>
+                <div class="form-row">
+                    <label>Período</label>
+                    <input type="number" id="p-stop-ema1-period" class="form-input" value="200" min="1" max="2000">
+                </div>
+                <div class="form-row">
+                    <label>Temporalidad</label>
+                    <select id="p-stop-ema1-tf" class="form-select">
+                        <option value="1m" selected>1m</option>
+                        <option value="5m">5m</option>
+                        <option value="15m">15m</option>
+                    </select>
+                </div>
+                <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin:6px 0 3px;">EMA 2</div>
+                <div class="form-row">
+                    <label>Período</label>
+                    <input type="number" id="p-stop-ema2-period" class="form-input" value="500" min="1" max="2000">
+                </div>
+                <div class="form-row">
+                    <label>Temporalidad</label>
+                    <select id="p-stop-ema2-tf" class="form-select">
+                        <option value="1m" selected>1m</option>
+                        <option value="5m">5m</option>
+                        <option value="15m">15m</option>
+                    </select>
+                </div>
+                <div style="font-size:9px;color:#64748b;line-height:1.3;margin-top:4px;">Stop si el cierre rompe cualquiera de las 2 EMAs</div>
             </div>
         </div>
 
@@ -750,9 +778,11 @@
         }
     }
 
-    document.getElementById('p-stop-type').addEventListener('change', function() {
-        document.getElementById('row-sl').style.display = this.value === 'Porcentaje' ? 'flex' : 'none';
-    });
+    function toggleStopType() {
+        const isPorc = document.getElementById('p-stop-type').value === 'Porcentaje';
+        document.getElementById('row-sl').style.display          = isPorc ? 'flex'  : 'none';
+        document.getElementById('stop-ema-config').style.display = isPorc ? 'none'  : 'block';
+    }
 
     function toggleVwapPullback() {
         const on = document.getElementById('p-vwap-pullback').checked;
@@ -836,6 +866,10 @@
             tpPerc:            parseFloat(document.getElementById('p-tp').value) || 0.5,
             stopType:          document.getElementById('p-stop-type').value,
             slPerc:            parseFloat(document.getElementById('p-sl').value) || 1.0,
+            stopEMAs:          [
+                { period: parseInt(document.getElementById('p-stop-ema1-period').value)||200, tf: document.getElementById('p-stop-ema1-tf').value },
+                { period: parseInt(document.getElementById('p-stop-ema2-period').value)||500, tf: document.getElementById('p-stop-ema2-tf').value },
+            ],
             startHour:         numOrDefault('p-start-hour', 9),
             endHour:           numOrDefault('p-end-hour', 20),
             operaFinDeSemana:  document.getElementById('p-fds').checked,
@@ -1251,8 +1285,16 @@
         document.getElementById('p-longs').checked       = p.enableLongs !== false;
         document.getElementById('p-shorts').checked      = p.enableShorts !== false;
         document.getElementById('p-tp').value            = p.tpPerc ?? 0.5;
-        document.getElementById('p-stop-type').value     = p.stopType ?? 'Porcentaje';
-        document.getElementById('p-sl').value            = p.slPerc ?? 1.0;
+        let stopType_ap = p.stopType ?? 'Porcentaje';
+        let stopEMAs_ap = Array.isArray(p.stopEMAs) && p.stopEMAs.length >= 2 ? p.stopEMAs : [{ period:200, tf:'1m' }, { period:500, tf:'1m' }];
+        if (stopType_ap === 'Ruptura EMA 200') { stopType_ap = 'Ruptura EMA'; stopEMAs_ap = [{ period:200, tf:'1m' }, { period:200, tf:'1m' }]; }
+        if (stopType_ap === 'Ruptura EMA 500') { stopType_ap = 'Ruptura EMA'; stopEMAs_ap = [{ period:500, tf:'1m' }, { period:500, tf:'1m' }]; }
+        document.getElementById('p-stop-type').value         = stopType_ap;
+        document.getElementById('p-sl').value                = p.slPerc ?? 1.0;
+        document.getElementById('p-stop-ema1-period').value  = stopEMAs_ap[0]?.period ?? 200;
+        document.getElementById('p-stop-ema1-tf').value      = stopEMAs_ap[0]?.tf     ?? '1m';
+        document.getElementById('p-stop-ema2-period').value  = stopEMAs_ap[1]?.period ?? 500;
+        document.getElementById('p-stop-ema2-tf').value      = stopEMAs_ap[1]?.tf     ?? '1m';
         document.getElementById('p-start-hour').value    = p.startHour ?? 9;
         document.getElementById('p-end-hour').value      = p.endHour ?? 20;
         document.getElementById('p-fds').checked         = !!p.operaFinDeSemana;
@@ -1315,7 +1357,7 @@
         document.getElementById('p-palanca-valor').value         = p.palancaValor ?? 20;
         togglePalanca();
         actualizarPosUI();
-        document.getElementById('row-sl').style.display          = p.stopType === 'Porcentaje' ? 'flex' : 'none';
+        toggleStopType();
         refreshCollapsibles();
     }
 
