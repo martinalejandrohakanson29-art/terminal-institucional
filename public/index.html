@@ -187,6 +187,41 @@
         </div>
     </div>
 
+    <div id="niveles-config-panel" style="display:none; position:absolute; top:65px; left:340px; background:white; border:1px solid #d1d4dc; padding:14px; border-radius:8px; z-index:2000; box-shadow:0 4px 12px rgba(0,0,0,0.15); width:230px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h4 style="margin:0; font-size:13px;">Niveles Vol — Config</h4>
+            <span onclick="toggleNivelesConfig()" style="cursor:pointer; color:#64748b; font-size:18px; font-weight:bold;">&times;</span>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                <span style="font-size:11px; color:#64748b; white-space:nowrap;" title="Ventana de historia usada para el perfil">Ventana (días):</span>
+                <input type="number" id="niveles-dias" class="input-rango" value="90" min="7" max="365" style="width:60px; font-size:13px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                <span style="font-size:11px; color:#64748b; white-space:nowrap;" title="Resolución del perfil de volumen">Bucket ($):</span>
+                <select id="niveles-bucket" class="input-rango" style="width:60px; font-size:13px; cursor:pointer;">
+                    <option value="50">50</option>
+                    <option value="100" selected>100</option>
+                    <option value="200">200</option>
+                    <option value="500">500</option>
+                </select>
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                <span style="font-size:11px; color:#64748b; white-space:nowrap;" title="El volumen de hace τ días pesa ~37% del actual">Decaimiento τ (días):</span>
+                <input type="number" id="niveles-tau" class="input-rango" value="14" min="1" max="90" style="width:60px; font-size:13px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                <span style="font-size:11px; color:#64748b; white-space:nowrap;" title="Mínimo volumen de zona: umbral × mediana del perfil">Umbral (× mediana):</span>
+                <input type="number" id="niveles-umbral" class="input-rango" value="1.5" min="1" max="5" step="0.1" style="width:60px; font-size:13px;">
+            </div>
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                <span style="font-size:11px; color:#64748b; white-space:nowrap;">Máx. niveles:</span>
+                <input type="number" id="niveles-max" class="input-rango" value="8" min="1" max="30" style="width:60px; font-size:13px;">
+            </div>
+            <button class="btn-tiempo" onclick="aplicarNiveles(); toggleNivelesConfig();" style="background:#2962FF; color:white; border:none; width:100%; height:30px; font-size:12px;">Aplicar</button>
+        </div>
+    </div>
+
     <div id="rsi-config-panel" style="display:none; position:absolute; top:65px; left:440px; background:white; border:1px solid #d1d4dc; padding:14px; border-radius:8px; z-index:2000; box-shadow:0 4px 12px rgba(0,0,0,0.15); width:200px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
             <h4 style="margin:0; font-size:13px;">RSI — Config</h4>
@@ -943,6 +978,37 @@
         });
 
         klinecharts.registerOverlay({
+            name: 'nivelVolumen',
+            lock: true,
+            needDefaultPointFigure: false,
+            needDefaultXAxisFigure: false,
+            needDefaultYAxisFigure: false,
+            createPointFigures: ({ overlay, coordinates, bounding }) => {
+                if (!coordinates || coordinates.length < 2) return [];
+                const n = overlay.extendData || {};
+                const yTop = Math.min(coordinates[0].y, coordinates[1].y);
+                const yBot = Math.max(coordinates[0].y, coordinates[1].y);
+                const yMid = (yTop + yBot) / 2;
+                const W = bounding.width;
+                const rgb = n.rol === 'soporte' ? '38,166,154' : n.rol === 'resistencia' ? '239,83,80' : '41,98,255';
+                const alpha = 0.05 + 0.11 * Math.min(1, (n.score || 0) / 10);
+                const dWhale = (n.ballenasCompra || 0) - (n.ballenasVenta || 0);
+                const txt = `${Math.round(n.centro).toLocaleString()} · ★${(n.score || 0).toFixed(1)} · 🐳${dWhale >= 0 ? '+' : ''}${Math.round(dWhale)} · ${n.rebotes || 0}R`;
+                return [
+                    { type: 'polygon', ignoreEvent: true,
+                      attrs: { coordinates: [{ x: 0, y: yTop }, { x: W, y: yTop }, { x: W, y: yBot }, { x: 0, y: yBot }] },
+                      styles: { style: 'fill', color: `rgba(${rgb},${alpha})` } },
+                    { type: 'line', ignoreEvent: true,
+                      attrs: { coordinates: [{ x: 0, y: yMid }, { x: W, y: yMid }] },
+                      styles: { color: `rgba(${rgb},0.5)`, size: 1, style: 'dashed', dashedValue: [4, 4] } },
+                    { type: 'text', ignoreEvent: true,
+                      attrs: { x: W - 6, y: yMid - 3, text: txt, align: 'right', baseline: 'bottom' },
+                      styles: { color: `rgba(${rgb},0.95)`, size: 11, weight: 'bold' } },
+                ];
+            }
+        });
+
+        klinecharts.registerOverlay({
             name: 'rangoVolumen',
             totalStep: 3,
             needDefaultPointFigure: true, needDefaultXAxisFigure: true, needDefaultYAxisFigure: true,
@@ -1304,6 +1370,72 @@
             chart.overrideIndicator({ name: 'DELTA_ACUM', calcParams: [p] }, 'pane_deltasum');
         }
 
+        // --- NIVELES DE PRECIO POR VOLUMEN (HVN) ---
+        let nivelesVisible = false;
+        let configNiveles = { dias: 90, bucket: 100, tau: 14, umbral: 1.5, max: 8 };
+        let nivelesData = [];
+        let nivelesInterval = null;
+
+        async function cargarNiveles() {
+            try {
+                const q = new URLSearchParams(configNiveles);
+                const r = await fetch(`/api/niveles?${q}`, { credentials: 'same-origin' });
+                if (!r.ok) return;
+                const data = await r.json();
+                nivelesData = data.niveles || [];
+                dibujarNiveles();
+            } catch (e) { console.error('Error cargando niveles:', e); }
+        }
+
+        function dibujarNiveles() {
+            chart.removeOverlay({ groupId: 'niveles' });
+            if (!nivelesVisible || nivelesData.length === 0 || velasActuales.length === 0) return;
+            // El timestamp solo ancla los puntos; la banda se dibuja a lo ancho de todo el pane.
+            const ts = velasActuales[velasActuales.length - 1].timestamp;
+            nivelesData.forEach(n => {
+                chart.createOverlay({
+                    name: 'nivelVolumen',
+                    groupId: 'niveles',
+                    lock: true,
+                    points: [{ timestamp: ts, value: n.banda[1] }, { timestamp: ts, value: n.banda[0] }],
+                    extendData: n
+                });
+            });
+        }
+
+        function activarRefrescoNiveles() {
+            cargarNiveles();
+            if (!nivelesInterval) nivelesInterval = setInterval(cargarNiveles, 5 * 60 * 1000);
+        }
+
+        function desactivarRefrescoNiveles() {
+            if (nivelesInterval) { clearInterval(nivelesInterval); nivelesInterval = null; }
+            chart.removeOverlay({ groupId: 'niveles' });
+        }
+
+        function toggleNivelesConfig() {
+            const p = document.getElementById('niveles-config-panel');
+            p.style.display = p.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function initNivelesUI() {
+            document.getElementById('niveles-dias').value   = configNiveles.dias;
+            document.getElementById('niveles-bucket').value = configNiveles.bucket;
+            document.getElementById('niveles-tau').value    = configNiveles.tau;
+            document.getElementById('niveles-umbral').value = configNiveles.umbral;
+            document.getElementById('niveles-max').value    = configNiveles.max;
+        }
+
+        function aplicarNiveles() {
+            configNiveles.dias   = Math.min(365, Math.max(7, parseInt(document.getElementById('niveles-dias').value) || 90));
+            configNiveles.bucket = parseInt(document.getElementById('niveles-bucket').value) || 100;
+            configNiveles.tau    = Math.min(90, Math.max(1, parseFloat(document.getElementById('niveles-tau').value) || 14));
+            configNiveles.umbral = Math.min(5, Math.max(1, parseFloat(document.getElementById('niveles-umbral').value) || 1.5));
+            configNiveles.max    = Math.min(30, Math.max(1, parseInt(document.getElementById('niveles-max').value) || 8));
+            guardarConfigServidor('configNiveles', configNiveles).catch(() => {});
+            if (nivelesVisible) cargarNiveles();
+        }
+
         function cambiarVwap() {
             if (!vwapVisible) return;
             chart.overrideIndicator({ name: 'VWAP_CUSTOM', calcParams: [vwapPeriod] }, 'candle_pane');
@@ -1413,6 +1545,7 @@
             { id: 'ADX',       label: 'ADX',       config: null        },
             { id: 'RSI',       label: 'RSI',       config: 'rsi'       },
             { id: 'EMA_ANG',   label: 'EMA∠',      config: 'emaang'    },
+            { id: 'NIVELES',   label: 'Niveles Vol', config: 'niveles' },
         ];
 
         function indicadorEsVisible(id) {
@@ -1427,6 +1560,7 @@
             if (id === 'ADX')       return adxVisible;
             if (id === 'RSI')       return rsiVisible;
             if (id === 'EMA_ANG')   return emaAngVisible;
+            if (id === 'NIVELES')   return nivelesVisible;
             return false;
         }
 
@@ -1515,6 +1649,7 @@
             else if (tipo === 'ema') toggleMAConfig();
             else if (tipo === 'rsi') toggleRSIConfig();
             else if (tipo === 'emaang') toggleEMAangConfig();
+            else if (tipo === 'niveles') toggleNivelesConfig();
         }
 
         // Cerrar dropdown al click fuera
@@ -1577,6 +1712,10 @@
                     desactivarFuentesEMAang();
                     actualizarDisplayEMAang();
                 }
+            } else if (tipo === 'NIVELES') {
+                nivelesVisible = !nivelesVisible;
+                if (nivelesVisible) activarRefrescoNiveles();
+                else desactivarRefrescoNiveles();
             }
             renderChips();
         }
@@ -1623,6 +1762,7 @@
         initMAUI();
         initRSIUI();
         initEMAangUI();
+        initNivelesUI();
         renderChips();
 
         // --- TOGGLE BALLENAS ---
@@ -1756,6 +1896,7 @@
                 chart.applyNewData(velasActuales);
                 restaurarDibujos(temporalidad);
                 dibujarMarcadores();
+                dibujarNiveles();
                 cargarBacktestEnGrafico();
                 cargarEntradasAutobot();
                 actualizarDisplayDeltaVol();
@@ -2173,8 +2314,9 @@
                 temporalidad:   temporalidadActual,
                 panelVisible:   document.getElementById('orderbook-container').style.display !== 'none',
                 ballenasVisibles,
-                vwapVisible, deltaVisible, deltaSumVisible, deltaVolVisible, deltaVolVelas, oiVisible, lsrVisible, maVisible, macdVisible, adxVisible, rsiVisible, emaAngVisible,
+                vwapVisible, deltaVisible, deltaSumVisible, deltaVolVisible, deltaVolVelas, oiVisible, lsrVisible, maVisible, macdVisible, adxVisible, rsiVisible, emaAngVisible, nivelesVisible,
                 configMA:       { ...configMA },
+                configNiveles:  { ...configNiveles },
                 configRSI:      { ...configRSI },
                 configEMAang:   { ...configEMAang },
                 vwapReset:      vwapPeriod,
@@ -2688,6 +2830,11 @@
                     chart.createIndicator('EMA_ANGULO', true, { id: 'candle_pane' });
                     chart.overrideIndicator({ name: 'EMA_ANGULO', calcParams: emaAngCalcParams() }, 'candle_pane');
                     activarFuentesEMAang();
+                }
+                if (cfg.configNiveles) { Object.assign(configNiveles, cfg.configNiveles); initNivelesUI(); }
+                if (cfg.nivelesVisible === true) {
+                    nivelesVisible = true;
+                    activarRefrescoNiveles();
                 }
 
                 if (cfg.maVisible === true) {

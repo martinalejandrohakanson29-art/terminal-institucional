@@ -826,6 +826,257 @@ app.get('/api/whale-histogram', autenticar, async (req, res) => {
 
 
 // ============================================================
+// NIVELES DE PRECIO POR VOLUMEN (HVN)
+// ============================================================
+// Perfil de volumen-por-precio sobre klines_1m con decaimiento exponencial por
+// antigüedad (el volumen de hace meses pesa menos que el reciente), detección de
+// zonas de alto volumen (buckets contiguos por encima de umbral × mediana del
+// perfil suavizado) y enriquecimiento con volumen ballena + historial de toques.
+// El perfil es el mismo para todos los usuarios y solo cambia con velas nuevas,
+// así que se cachea en memoria por combinación de parámetros.
+const cacheNiveles = new Map(); // clave de params → { ts, data }
+const TTL_NIVELES_MS = 5 * 60 * 1000;
+
+// Cuenta visitas del precio a la zona [desde, hasta) sobre velas 15m: un "toque"
+// arranca cuando el rango de la vela intersecta la zona viniendo de afuera; la
+// visita termina cuando un cierre queda fuera. Si sale por el mismo lado por el
+// que entró es un rebote (la zona actuó); si la atraviesa, no. Para que las
+// oscilaciones de un rango no cuenten cada una como toque, se exige que el
+// precio haya pasado sepMin velas (8×15m = 2h) sin tocar la zona antes de que
+// el contacto cuente como visita nueva.
+function contarToquesZona(velas, desde, hasta, sepMin = 8) {
+    let toques = 0, rebotes = 0, ultimoToque = null;
+    let enVisita = false, lado = null, ladoEntrada = null;
+    let fuera = Infinity;
+    for (const v of velas) {
+        const high = v[2], low = v[3], close = v[4];
+        const toca = low < hasta && high > desde;
+        if (!enVisita && toca && fuera >= sepMin) {
+            enVisita = true;
+            ladoEntrada = lado;
+            toques++;
+            ultimoToque = v[0];
+        }
+        if (enVisita && (close >= hasta || close < desde)) {
+            const ladoSalida = close >= hasta ? 'arriba' : 'abajo';
+            if (ladoEntrada && ladoSalida === ladoEntrada) rebotes++;
+            enVisita = false;
+        }
+        fuera = toca ? 0 : fuera + 1;
+        if (close >= hasta) lado = 'arriba';
+        else if (close < desde) lado = 'abajo';
+    }
+    return { toques, rebotes, ultimoToque };
+}
+
+async function calcularNiveles({ bucket, dias, tau, umbral, maxZonas }) {
+    const ahora = Date.now();
+    const desde = ahora - dias * 86400000;
+
+    const [perfilR, ballenasR, velas15m] = await Promise.all([
+        // 1) Volumen por bucket de precio. Cada vela 1m aporta todo su volumen al
+        //    bucket de su precio típico (H+L+C)/3 — con velas de 1m el rango es
+        //    menor que el bucket, así que el error es despreciable.
+        pool.query(
+            `SELECT (FLOOR(((high + low + close) / 3) / $2) * $2)::bigint AS nivel,
+                    SUM(volume)         AS vol_total,
+                    SUM(taker_buy_base) AS vol_compra,
+                    SUM(volume * EXP(-(($3::bigint - open_time) / 86400000.0) / $4)) AS vol_pond
+             FROM klines_1m
+             WHERE open_time >= $1::bigint
+             GROUP BY nivel ORDER BY nivel ASC`,
+            [desde, bucket, ahora, tau]
+        ),
+        // 2) Volumen ballena por bucket en la misma ventana.
+        pool.query(
+            `SELECT (FLOOR(precio / $2) * $2)::bigint AS nivel,
+                    SUM(CASE WHEN es_venta = false THEN cantidad ELSE 0 END) AS compras,
+                    SUM(CASE WHEN es_venta = true  THEN cantidad ELSE 0 END) AS ventas
+             FROM ballenas
+             WHERE fecha >= to_timestamp($1 / 1000.0)
+             GROUP BY nivel`,
+            [desde, bucket]
+        ),
+        // 3) Velas 15m para contar toques/rebotes de cada zona y el precio actual.
+        fetchKlinesDesdeBD('15m', dias),
+    ]);
+
+    const buckets = perfilR.rows.map(r => ({
+        nivel: Number(r.nivel),
+        volTotal: Number(r.vol_total),
+        volCompra: Number(r.vol_compra),
+        volPond: Number(r.vol_pond),
+    }));
+    if (buckets.length < 5 || velas15m.length === 0) {
+        return { precio: null, generado: ahora, niveles: [] };
+    }
+    const precio = velas15m[velas15m.length - 1][4];
+
+    // Suavizado del perfil (media móvil de 3 buckets) para que el ruido no
+    // fragmente un nodo real en varias zonas pegadas.
+    const suave = buckets.map((b, i) => {
+        const vecinos = [buckets[i - 1], b, buckets[i + 1]].filter(Boolean);
+        return vecinos.reduce((s, x) => s + x.volPond, 0) / vecinos.length;
+    });
+    const mediana = [...suave].sort((a, b) => a - b)[Math.floor(suave.length / 2)];
+    const corte = mediana * umbral;
+
+    // Corridas: buckets CONTIGUOS en precio (no solo en el array) sobre el corte.
+    const runs = [];
+    let run = null;
+    buckets.forEach((b, i) => {
+        const alto = suave[i] >= corte;
+        if (alto && run && b.nivel === buckets[run[run.length - 1]].nivel + bucket) {
+            run.push(i);
+        } else if (alto) {
+            if (run) runs.push(run);
+            run = [i];
+        } else if (run) {
+            runs.push(run);
+            run = null;
+        }
+    });
+    if (run) runs.push(run);
+    if (runs.length === 0) return { precio, generado: ahora, niveles: [] };
+
+    // Una corrida puede contener varios nodos pegados (típico alrededor del precio
+    // actual, donde el decaimiento hace que casi todo supere el corte). Se divide
+    // en los valles (<85% del pico vecino más bajo) entre picos del perfil suavizado.
+    function dividirRunEnNodos(idxs) {
+        if (idxs.length < 6) return [idxs];
+        const picos = [];
+        for (let i = 0; i < idxs.length; i++) {
+            const v   = suave[idxs[i]];
+            const izq = i === 0 ? -Infinity : suave[idxs[i - 1]];
+            const der = i === idxs.length - 1 ? -Infinity : suave[idxs[i + 1]];
+            if (v >= izq && v > der) picos.push(i); // "> der" evita doble pico en mesetas
+        }
+        if (picos.length <= 1) return [idxs];
+        const cortes = [];
+        for (let p = 0; p < picos.length - 1; p++) {
+            let vMin = Infinity, iMin = -1;
+            for (let i = picos[p] + 1; i < picos[p + 1]; i++) {
+                if (suave[idxs[i]] < vMin) { vMin = suave[idxs[i]]; iMin = i; }
+            }
+            const techo = Math.min(suave[idxs[picos[p]]], suave[idxs[picos[p + 1]]]);
+            if (iMin > 0 && vMin <= 0.85 * techo) cortes.push(iMin);
+        }
+        if (cortes.length === 0) return [idxs];
+        const segs = [];
+        let ini = 0;
+        cortes.forEach(c => { segs.push(idxs.slice(ini, c)); ini = c; });
+        segs.push(idxs.slice(ini));
+        return segs.filter(s => s.length > 0);
+    }
+
+    // Tope duro de ancho: una "zona" de miles de dólares no es un nivel operable.
+    // Si tras el corte por valles un segmento sigue ancho (perfil en joroba única,
+    // sin valles marcados), se parte recursivamente por su valle interior más
+    // profundo hasta quedar bajo ANCHO_MAX buckets.
+    const ANCHO_MAX = 12;
+    function dividirPorAncho(seg) {
+        if (seg.length <= ANCHO_MAX) return [seg];
+        let vMin = Infinity, iMin = -1;
+        for (let i = 1; i < seg.length - 1; i++) {
+            if (suave[seg[i]] < vMin) { vMin = suave[seg[i]]; iMin = i; }
+        }
+        return [...dividirPorAncho(seg.slice(0, iMin)), ...dividirPorAncho(seg.slice(iMin))];
+    }
+
+    const zonas = [];
+    runs.forEach(r => dividirRunEnNodos(r).flatMap(dividirPorAncho).forEach(seg => {
+        zonas.push({
+            desde: buckets[seg[0]].nivel,
+            hasta: buckets[seg[seg.length - 1]].nivel + bucket,
+            buckets: seg.map(i => buckets[i]),
+        });
+    }));
+
+    const ballenasPorNivel = new Map(ballenasR.rows.map(r => [Number(r.nivel), r]));
+    const volPondTotal = buckets.reduce((s, b) => s + b.volPond, 0);
+
+    const niveles = zonas.map(zona => {
+        const volPond  = zona.buckets.reduce((s, b) => s + b.volPond, 0);
+        const volTotal = zona.buckets.reduce((s, b) => s + b.volTotal, 0);
+        const volCompra = zona.buckets.reduce((s, b) => s + b.volCompra, 0);
+        const centro = zona.buckets.reduce((s, b) => s + (b.nivel + bucket / 2) * b.volPond, 0) / volPond;
+        let ballenasCompra = 0, ballenasVenta = 0;
+        for (let n = zona.desde; n < zona.hasta; n += bucket) {
+            const w = ballenasPorNivel.get(n);
+            if (w) { ballenasCompra += Number(w.compras); ballenasVenta += Number(w.ventas); }
+        }
+        const { toques, rebotes, ultimoToque } = contarToquesZona(velas15m, zona.desde, zona.hasta);
+        const rol = precio >= zona.hasta ? 'soporte' : precio < zona.desde ? 'resistencia' : 'en_precio';
+        return {
+            centro: Math.round(centro),
+            banda: [zona.desde, zona.hasta],
+            volPond: Math.round(volPond),
+            pctPerfil: Math.round(volPond / volPondTotal * 1000) / 10,
+            deltaPct: volTotal > 0 ? Math.round(volCompra / volTotal * 100) : 50,
+            ballenasCompra: Math.round(ballenasCompra * 10) / 10,
+            ballenasVenta: Math.round(ballenasVenta * 10) / 10,
+            toques, rebotes,
+            ultimoToque,
+            rol,
+        };
+    });
+
+    // Score 0–10: peso del volumen (40%), ballenas alineadas al rol (25%),
+    // historial de rebotes (20%), recencia del último toque (15%). El score
+    // ballena combina dirección (fracción alineada al rol) con magnitud
+    // (relativa a la zona con más volumen ballena, con sqrt para suavizar):
+    // 30 BTC comprados sin ventas no valen lo mismo que 1500.
+    const maxVolPond = Math.max(...niveles.map(n => n.volPond));
+    const maxW = Math.max(...niveles.map(n => n.ballenasCompra + n.ballenasVenta), 1);
+    niveles.forEach(n => {
+        const volScore = 4 * (n.volPond / maxVolPond);
+        const totalW = n.ballenasCompra + n.ballenasVenta;
+        const fAlineada = totalW === 0 ? 0
+            : n.rol === 'soporte'     ? n.ballenasCompra / totalW
+            : n.rol === 'resistencia' ? n.ballenasVenta / totalW
+            : 0.5;
+        const whaleScore  = 2.5 * fAlineada * Math.sqrt(totalW / maxW);
+        const reboteScore = 2 * Math.min(n.rebotes, 4) / 4;
+        const recencia    = n.ultimoToque ? 1.5 * Math.exp(-((ahora - n.ultimoToque) / 86400000) / 14) : 0;
+        n.score = Math.round((volScore + whaleScore + reboteScore + recencia) * 10) / 10;
+    });
+
+    // Supresión de no-máximos: dos niveles casi pegados no aportan información
+    // distinta; se queda el de mayor score y se descarta todo centro a menos de
+    // sepMin (≈0.4% del precio, mínimo 2 buckets).
+    niveles.sort((a, b) => b.score - a.score);
+    const sepMin = Math.max(2 * bucket, precio * 0.004);
+    const elegidos = [];
+    for (const n of niveles) {
+        if (elegidos.length >= maxZonas) break;
+        if (elegidos.every(e => Math.abs(e.centro - n.centro) >= sepMin)) elegidos.push(n);
+    }
+    return { precio, generado: ahora, niveles: elegidos };
+}
+
+app.get('/api/niveles', autenticar, async (req, res) => {
+    const bucket   = [50, 100, 200, 500].includes(parseInt(req.query.bucket)) ? parseInt(req.query.bucket) : 100;
+    const dias     = Math.min(Math.max(parseInt(req.query.dias) || 90, 7), 365);
+    const tau      = Math.min(Math.max(parseFloat(req.query.tau) || 14, 1), 90);
+    const umbral   = Math.min(Math.max(parseFloat(req.query.umbral) || 1.5, 1), 5);
+    const maxZonas = Math.min(Math.max(parseInt(req.query.max) || 8, 1), 30);
+
+    const clave = `${bucket}|${dias}|${tau}|${umbral}|${maxZonas}`;
+    const cacheado = cacheNiveles.get(clave);
+    if (cacheado && Date.now() - cacheado.ts < TTL_NIVELES_MS) return res.json(cacheado.data);
+
+    try {
+        const data = await calcularNiveles({ bucket, dias, tau, umbral, maxZonas });
+        cacheNiveles.set(clave, { ts: Date.now(), data });
+        res.json(data);
+    } catch (e) {
+        console.error('Error niveles:', e);
+        res.status(500).json({ error: 'Error interno' });
+    }
+});
+
+
+// ============================================================
 // MOTOR DE BACKTEST
 // ============================================================
 
