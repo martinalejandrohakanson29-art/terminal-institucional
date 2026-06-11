@@ -1493,8 +1493,6 @@ function costoOperacion(p, palanca, minutesHeld, side = 1) {
 
 function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const c1m = bars1m.map(b => parseFloat(b[4]));
-    const e50 = calcEMA(c1m, 50), e100 = calcEMA(c1m, 100),
-          e200 = calcEMA(c1m, 200), e500 = calcEMA(c1m, 500);
 
     // Indexamos los indicadores HTF por tiempo de CIERRE (b[6]), no de apertura (b[0]).
     // Así lookupHTF(ts) solo devuelve velas HTF ya cerradas respecto a la vela 1m actual,
@@ -1707,8 +1705,13 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         const ts = parseInt(bar[0]);
         const tsClose = parseInt(bar[6]); // instante real de la decisión (cierre de la vela 1m)
         const high = parseFloat(bar[2]), low = parseFloat(bar[3]), close = parseFloat(bar[4]);
-        const E50 = e50[i], E100 = e100[i], E200 = e200[i], E500 = e500[i];
-        if (!E500) continue;
+        const alignVals = pbEMAConfig.map(({ period, tf }) => {
+            if (tf === '1m')  return pbArr1m[period]?.[i] ?? null;
+            if (tf === '5m')  return pbArr5m[period]  ? lookupHTF(pbArr5m[period].ts,  pbArr5m[period].map,  tsClose) : null;
+            if (tf === '15m') return pbArr15m[period] ? lookupHTF(pbArr15m[period].ts, pbArr15m[period].map, tsClose) : null;
+            return null;
+        });
+        if (alignVals.some(v => !v)) continue;
         const stopEmaVals = stopEmaArrays.map(s => s.arr ? s.arr[i] : lookupHTF(s.tsArr, s.map, tsClose)).filter(v => v != null);
 
         const rsiRaw  = rsiTf === '1m'  ? rsiDirect[i]  : lookupHTF(tsRsi,  rsiByTs,  tsClose);
@@ -1813,16 +1816,11 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                 (p.operaFinDeSemana || (argDay !== 0 && argDay !== 6)) &&
                 !(p.useCooldown && barsSinceClose < p.cooldownMinutes)
             ) {
-                const above = close > E50 && close > E100 && close > E200 && close > E500;
-                const below = close < E50 && close < E100 && close < E200 && close < E500;
-                const bullAlign = E50 > E100 && E100 > E200 && E200 > E500;
-                const bearAlign = E50 < E100 && E100 < E200 && E200 < E500;
-                const pbVals = pbEMAConfig.map(({ period, tf }) => {
-                    if (tf === '1m')  return pbArr1m[period]?.[i];
-                    if (tf === '5m')  return pbArr5m[period]  ? lookupHTF(pbArr5m[period].ts,  pbArr5m[period].map,  tsClose) : null;
-                    if (tf === '15m') return pbArr15m[period] ? lookupHTF(pbArr15m[period].ts, pbArr15m[period].map, tsClose) : null;
-                    return null;
-                }).filter(v => v != null && v > 0);
+                const above = alignVals.every(v => close > v);
+                const below = alignVals.every(v => close < v);
+                const bullAlign = alignVals.length < 2 || alignVals.every((v, j) => j === 0 || alignVals[j-1] > v);
+                const bearAlign = alignVals.length < 2 || alignVals.every((v, j) => j === 0 || alignVals[j-1] < v);
+                const pbVals = alignVals;
                 const nearEMA = pbVals.some(e => Math.abs(close - e) / close * 100 <= (p.pullbackPerc ?? 0.2));
                 const pullOK     = !p.usePullbackFilter || (pbVals.length > 0 && nearEMA);
                 const alignLong  = !p.useEmaAlignment || bullAlign;
@@ -2879,10 +2877,6 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     if (bars1m.length < 510) return { signal: null, reason: 'datos_insuficientes' };
 
     const c1m  = bars1m.map(b => parseFloat(b[4]));
-    const e50  = calcEMA(c1m, 50);
-    const e100 = calcEMA(c1m, 100);
-    const e200 = calcEMA(c1m, 200);
-    const e500 = calcEMA(c1m, 500);
 
     // Pullback EMAs configurables
     const pbEMAConfig = (Array.isArray(p.pullbackEMAs) && p.pullbackEMAs.length > 0)
@@ -3001,7 +2995,13 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const tsClose = parseInt(bar[6]); // instante real de la decisión (cierre de la vela 1m)
     const close = parseFloat(bar[4]);
 
-    const E50 = e50[i], E100 = e100[i], E200 = e200[i], E500 = e500[i];
+    const alignVals = pbEMAConfig.map(({ period, tf }) => {
+        if (tf === '1m')  return pbSn1m[period]?.[i] ?? null;
+        if (tf === '5m')  return pbSn5m[period]  ? lookupHTF(pbSn5m[period].ts,  pbSn5m[period].map,  tsClose) : null;
+        if (tf === '15m') return pbSn15m[period] ? lookupHTF(pbSn15m[period].ts, pbSn15m[period].map, tsClose) : null;
+        return null;
+    });
+    if (alignVals.some(v => !v)) return { signal: null, reason: 'emas_no_calentadas', indicadores: {} };
 
     const rsiLookup  = rsiTf_sn  === '1m' ? rsiSnDirect[i]  : lookupHTF(rsiSnTs,  rsiSnByTs,  tsClose);
     const macdLookup = macdTf_sn === '1m' ? macdSnDirect[i] : lookupHTF(macdSnTs, macdSnByTs, tsClose);
@@ -3021,17 +3021,12 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const horarioOk = barHour >= (p.startHour ?? 9) && barHour < (p.endHour ?? 20)
                    && (p.operaFinDeSemana || (argDay !== 0 && argDay !== 6));
 
-    const above     = close > E50 && close > E100 && close > E200 && close > E500;
-    const below     = close < E50 && close < E100 && close < E200 && close < E500;
-    const bullAlign = E50 > E100 && E100 > E200 && E200 > E500;
-    const bearAlign = E50 < E100 && E100 < E200 && E200 < E500;
+    const above     = alignVals.every(v => close > v);
+    const below     = alignVals.every(v => close < v);
+    const bullAlign = alignVals.length < 2 || alignVals.every((v, j) => j === 0 || alignVals[j-1] > v);
+    const bearAlign = alignVals.length < 2 || alignVals.every((v, j) => j === 0 || alignVals[j-1] < v);
 
-    const pbSnVals = pbEMAConfig.map(({ period, tf }) => {
-        if (tf === '1m')  return pbSn1m[period]?.[i];
-        if (tf === '5m')  return pbSn5m[period]  ? lookupHTF(pbSn5m[period].ts,  pbSn5m[period].map,  tsClose) : null;
-        if (tf === '15m') return pbSn15m[period] ? lookupHTF(pbSn15m[period].ts, pbSn15m[period].map, tsClose) : null;
-        return null;
-    }).filter(v => v != null && v > 0);
+    const pbSnVals = alignVals;
     const nearEMA = !p.usePullbackFilter || (pbSnVals.length > 0 && pbSnVals.some(e =>
         Math.abs(close - e) / close * 100 <= (p.pullbackPerc ?? 0.2)
     ));
@@ -3191,7 +3186,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
 
     return {
         signal, timestamp: ts, entry: close, tp, sl,
-        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, oiSlope: oiSlope_sn, topRatio: topRatioVal_sn, topSlope: topSlopeVal_sn, globalRatio: globRatioVal_sn, cvdSlope: cvdSlope_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
+        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, oiSlope: oiSlope_sn, topRatio: topRatioVal_sn, topSlope: topSlopeVal_sn, globalRatio: globRatioVal_sn, cvdSlope: cvdSlope_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, alignVals }
     };
 }
 
