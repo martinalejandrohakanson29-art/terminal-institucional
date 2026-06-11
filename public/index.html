@@ -386,6 +386,11 @@
                 <div style="display:flex; align-items:center; gap:4px; border-left:2px solid #d1d4dc; margin-left:3px; padding-left:6px;">
                     <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;">Ballenas &gt;</span>
                     <input type="number" id="filtro-grafico" class="input-rango" value="5" min="1" step="1" title="Mostrar en gráfico ballenas > X BTC">
+                    <select id="filtro-mercado" class="input-rango" style="width:78px;cursor:pointer;" title="Mercado de las ballenas: spot, futuros perp o ambos sumados">
+                        <option value="">SPOT+PERP</option>
+                        <option value="SPOT">SPOT</option>
+                        <option value="PERP">PERP</option>
+                    </select>
                     <button class="btn-dibujo" id="btn-toggle-ballenas" onclick="toggleBallenas()" title="Mostrar/Ocultar marcadores en gráfico" style="color:#26a69a;border-color:#26a69a;">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16c0-2.2 1.8-4 4-4 1.4 0 2.6.7 3.4 1.8.8-1.1 2-1.8 3.4-1.8 1.4 0 2.6.7 3.4 1.8.8-1.1 2-1.8 3.4-1.8 2.2 0 4 1.8 4 4v2H2v-2z"></path></svg>
                     </button>
@@ -548,15 +553,24 @@
 
         // --- MEMORIA (servidor por usuario) ---
         const inputFiltroGrafico = document.getElementById('filtro-grafico');
+        const selectMercadoBallenas = document.getElementById('filtro-mercado');
 
         function aplicarConfigInicial() {
             const fg = cfgGet('filtroGrafico', null);
             if (fg !== null) inputFiltroGrafico.value = fg;
+            const mb = cfgGet('mercadoBallenas', null);
+            if (mb !== null) selectMercadoBallenas.value = mb;
         }
 
         inputFiltroGrafico.addEventListener('change', function() {
             guardarConfigServidor('filtroGrafico', parseFloat(this.value)).catch(() => {});
             dibujarMarcadores();
+        });
+
+        selectMercadoBallenas.addEventListener('change', function() {
+            guardarConfigServidor('mercadoBallenas', this.value).catch(() => {});
+            // El filtrado por mercado es server-side: refetch de marcadores e histograma.
+            pedirHistorialBallenas();
         });
 
         // --- PANEL ---
@@ -1961,7 +1975,10 @@
         let ultimoTiempoBallena = -1;
 
         function pedirHistorialBallenas() {
-            fetch('/api/ballenas', { credentials: 'same-origin' })
+            // 7 días de tape alcanzan para los marcadores (solo se dibujan sobre velas cargadas)
+            // y para el delta 24h; el mercado se filtra server-side según el selector.
+            const mercado = selectMercadoBallenas.value;
+            fetch(`/api/ballenas?horas=168${mercado ? `&mercado=${mercado}` : ''}`, { credentials: 'same-origin' })
                 .then(r => r.json())
                 .then(datos => {
                     const nuevoTiempo = datos.length > 0 ? datos[0].tiempo_segundos : -1;
@@ -2078,7 +2095,8 @@
 
         async function cargarHistograma() {
             try {
-                const res = await fetch(`/api/whale-histogram?horas=${histoHoras}&bucket=${histoBucket}`, { credentials: 'same-origin' });
+                const mercado = selectMercadoBallenas.value;
+                const res = await fetch(`/api/whale-histogram?horas=${histoHoras}&bucket=${histoBucket}${mercado ? `&mercado=${mercado}` : ''}`, { credentials: 'same-origin' });
                 if (!res.ok) return;
                 renderizarHistograma(await res.json());
             } catch (e) {
@@ -2309,6 +2327,7 @@
 
             const config = {
                 filtroGrafico:  parseFloat(inputFiltroGrafico.value),
+                mercadoBallenas: selectMercadoBallenas.value,
                 histoHoras,
                 histoBucket,
                 temporalidad:   temporalidadActual,
@@ -2751,7 +2770,8 @@
 
             if (cfg) {
                 // Filtros
-                if (cfg.filtroGrafico != null) inputFiltroGrafico.value = cfg.filtroGrafico;
+                if (cfg.filtroGrafico   != null) inputFiltroGrafico.value = cfg.filtroGrafico;
+                if (cfg.mercadoBallenas != null) selectMercadoBallenas.value = cfg.mercadoBallenas;
                 if (cfg.histoHoras    != null) { histoHoras = cfg.histoHoras; document.querySelectorAll('[data-h]').forEach(b => b.classList.toggle('btn-activo', parseInt(b.dataset.h) === histoHoras)); }
                 if (cfg.histoBucket   != null) { histoBucket = cfg.histoBucket; document.querySelectorAll('[data-b]').forEach(b => b.classList.toggle('btn-activo', parseInt(b.dataset.b) === histoBucket)); }
 

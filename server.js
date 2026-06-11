@@ -449,6 +449,28 @@ async function backfillLongShortRatio() {
 }
 setTimeout(backfillLongShortRatio, 7000);
 
+// ── Watchdog de WebSockets ────────────────────────────────────────────
+// Un WS puede quedar mudo sin disparar 'close' (conexión zombi): el feed deja de grabar
+// y nadie se entera — para una terminal cuya ventaja es el histórico, un hueco silencioso
+// es el peor escenario. El aggTrade de BTCUSDT emite varias veces por segundo, así que
+// minutos de silencio = conexión muerta: se fuerza terminate() y el handler de 'close'
+// existente reconecta. Cubre también sockets colgados en CONNECTING (terminate los cierra).
+const WS_SILENCIO_MAX_MS = 3 * 60 * 1000;
+const wsSalud = new Map(); // nombre del feed → { ws, ultimoMsg }
+
+function registrarSaludWS(nombre, ws) { wsSalud.set(nombre, { ws, ultimoMsg: Date.now() }); }
+function latidoWS(nombre) { const s = wsSalud.get(nombre); if (s) s.ultimoMsg = Date.now(); }
+
+setInterval(() => {
+    for (const [nombre, s] of wsSalud) {
+        if (Date.now() - s.ultimoMsg > WS_SILENCIO_MAX_MS) {
+            console.warn(`⚠️ [Watchdog] Feed "${nombre}" sin mensajes hace >${WS_SILENCIO_MAX_MS / 60000} min — forzando reconexión.`);
+            s.ultimoMsg = Date.now(); // no re-disparar mientras la reconexión está en curso
+            try { s.ws.terminate(); } catch (_) {}
+        }
+    }
+}, 60 * 1000);
+
 // --- CAZADOR DE BALLENAS (SPOT + PERP) ---
 // Dos feeds paralelos: spot (stream.binance.com) y futuros perp (fstream.binance.com).
 // Cada trade se guarda con su columna `mercado` ('SPOT' o 'PERP') para poder filtrar
@@ -461,6 +483,7 @@ function iniciarRastreadorBallenas(wsUrl, mercado) {
     wsBallenasConectando.add(mercado);
 
     const ws = new WebSocket(wsUrl);
+    registrarSaludWS(`ballenas-${mercado}`, ws);
 
     ws.on('open', () => {
         wsBallenasConectando.delete(mercado);
@@ -468,6 +491,7 @@ function iniciarRastreadorBallenas(wsUrl, mercado) {
     });
 
     ws.on('message', async (data) => {
+        latidoWS(`ballenas-${mercado}`);
         try {
             const evento = JSON.parse(data);
             const cantidad = parseFloat(evento.q);
@@ -498,6 +522,28 @@ function iniciarRastreadorBallenas(wsUrl, mercado) {
 
 iniciarRastreadorBallenas('wss://stream.binance.com:9443/ws/btcusdt@aggTrade', 'SPOT');
 iniciarRastreadorBallenas('wss://fstream.binance.com/ws/btcusdt@aggTrade',     'PERP');
+
+// Retención del tape de ballenas: alineada a la ventana de la cache de velas (365 días),
+// que es lo máximo que un backtest puede consultar — más atrás la tabla solo crece sin uso.
+// Configurable con BALLENAS_RETENCION_DIAS en el entorno; 0 o negativo = no podar nunca.
+const DIAS_RETENCION_BALLENAS = process.env.BALLENAS_RETENCION_DIAS !== undefined
+    ? parseInt(process.env.BALLENAS_RETENCION_DIAS)
+    : 365;
+
+async function podarBallenas() {
+    if (!(DIAS_RETENCION_BALLENAS > 0)) return;
+    try {
+        const r = await pool.query(
+            `DELETE FROM ballenas WHERE fecha < NOW() - make_interval(days => $1)`,
+            [DIAS_RETENCION_BALLENAS]
+        );
+        if (r.rowCount > 0) console.log(`[Ballenas] Retención: ${r.rowCount} trades de más de ${DIAS_RETENCION_BALLENAS} días eliminados.`);
+    } catch (e) {
+        console.error('[Ballenas] Error en retención:', e.message);
+    }
+}
+setInterval(podarBallenas, 24 * 3600 * 1000);
+setTimeout(podarBallenas, 60000); // al arrancar, diferido para no competir con la inicialización
 
 
 // ============================================================
@@ -709,14 +755,22 @@ app.delete('/api/admin/usuarios/:id', autenticar, soloAdmin, async (req, res) =>
 // ============================================================
 
 app.get('/api/ballenas', autenticar, async (req, res) => {
+    // Ventana acotada: el gráfico marca ballenas solo sobre velas cargadas y el delta usa 24h;
+    // devolver la tabla entera (100k filas) era puro payload. Default 7 días, máx 30.
+    const horas   = Math.min(Math.max(parseInt(req.query.horas) || 168, 1), 720);
+    const mercado = ['SPOT', 'PERP'].includes(req.query.mercado) ? req.query.mercado : null;
     try {
+        const params = [horas];
+        if (mercado) params.push(mercado);
         const query = `
-            SELECT precio, cantidad, es_venta, EXTRACT(EPOCH FROM fecha) as tiempo_segundos
+            SELECT precio, cantidad, es_venta, mercado, EXTRACT(EPOCH FROM fecha) as tiempo_segundos
             FROM ballenas
+            WHERE fecha >= NOW() - make_interval(hours => $1)
+              ${mercado ? 'AND mercado = $2' : ''}
             ORDER BY fecha DESC
             LIMIT 100000
         `;
-        const resultado = await pool.query(query);
+        const resultado = await pool.query(query, params);
         res.json(resultado.rows);
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
@@ -805,7 +859,10 @@ app.post('/api/filtro-bd', autenticar, soloAdmin, async (req, res) => {
 app.get('/api/whale-histogram', autenticar, async (req, res) => {
     const horas   = Math.min(Math.max(parseInt(req.query.horas)  || 8,  1), 168);
     const bucket  = [50, 100, 200].includes(parseInt(req.query.bucket)) ? parseInt(req.query.bucket) : 100;
+    const mercado = ['SPOT', 'PERP'].includes(req.query.mercado) ? req.query.mercado : null;
     try {
+        const params = [horas, bucket];
+        if (mercado) params.push(mercado);
         const result = await pool.query(`
             SELECT
                 (FLOOR(precio::numeric / $2) * $2)::bigint AS nivel,
@@ -813,10 +870,11 @@ app.get('/api/whale-histogram', autenticar, async (req, res) => {
                 ROUND(SUM(CASE WHEN es_venta = true  THEN cantidad ELSE 0 END)::numeric, 2) AS ventas
             FROM ballenas
             WHERE fecha >= NOW() - make_interval(hours => $1)
+              ${mercado ? 'AND mercado = $3' : ''}
             GROUP BY nivel
             HAVING SUM(cantidad) > 0
             ORDER BY nivel DESC
-        `, [horas, bucket]);
+        `, params);
         res.json(result.rows);
     } catch (error) {
         console.error('Error whale-histogram:', error);
@@ -2237,6 +2295,7 @@ function iniciarMonitorPrecio(wsUrl, entorno) {
     monitorConectando.add(entorno);
 
     const ws = new WebSocket(wsUrl);
+    registrarSaludWS(`precio-${entorno}`, ws);
 
     ws.on('open', () => {
         monitorConectando.delete(entorno);
@@ -2244,6 +2303,7 @@ function iniciarMonitorPrecio(wsUrl, entorno) {
     });
 
     ws.on('message', async (data) => {
+        latidoWS(`precio-${entorno}`);
         try {
             const evento = JSON.parse(data);
             await chequearSalida(parseFloat(evento.p), entorno);
@@ -2332,9 +2392,18 @@ async function asegurarConfiguracionCuenta(ctx) {
 // periódicamente para eliminar la "posición fantasma" sin depender del reinicio.
 async function reconciliarCuenta(ctx) {
     const arr = posDe(ctx.uid);
-    if (!arr.length) return;
     try {
         const amt = await obtenerPosicionExchange(ctx);
+        if (!arr.length) {
+            // Caso inverso: libro vacío pero el exchange tiene posición. Pasa si el server se cae
+            // entre el fill de la entrada y el INSERT en BD (posición sin registrar NI protegida),
+            // o si el usuario operó manualmente en la misma cuenta. No se cierra automáticamente
+            // (podría ser una posición manual legítima): se avisa fuerte en cada pasada.
+            if (Math.abs(amt) >= 1e-8) {
+                console.warn(`[AutoTrading u${ctx.uid}] 🚨 POSICIÓN HUÉRFANA: el exchange tiene ${amt} BTC pero el libro está vacío. Puede ser una entrada del bot sin registrar (sin TP/SL de protección) o una posición manual — revisar y cerrar/registrar a mano.`);
+            }
+            return;
+        }
         if (Math.abs(amt) < 1e-8) {
             console.warn(`[AutoTrading u${ctx.uid}] ⚠️ Reconciliación: exchange PLANO pero libro con ${arr.length} sub-pos — marcando como cerradas.`);
             const ahoraMs = Date.now();
@@ -2469,9 +2538,11 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
           )).rows
         : [];
 
-    const lsRows = (p.useTopTraderFilter || p.useRetailFilter)
+    const lsRows = (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
         ? (await pool.query(
-            'SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - 1800 ORDER BY tiempo ASC'
+            // Ventana suficiente para el lookback de la pendiente (mínimo 30 min para el nivel).
+            'SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC',
+            [Math.max(1800, ((parseInt(p.topSlopeLookbackMin) || 15) + 10) * 60)]
           )).rows
         : [];
 
@@ -2616,14 +2687,24 @@ setTimeout(async () => {
     iniciarMonitorPrecio(WS_PRECIO_POR_ENTORNO.testnet, 'testnet');
     iniciarMonitorPrecio(WS_PRECIO_POR_ENTORNO.real,    'real');
 
-    // Reconciliación periódica: detecta posiciones cerradas por el exchange (Algo TP/SL)
-    // sin depender del reinicio. Corre cada 5 minutos sobre todas las cuentas con posiciones.
+    // Reconciliación periódica: detecta posiciones cerradas por el exchange (Algo TP/SL) y
+    // posiciones huérfanas (exchange con posición, libro vacío) sin depender del reinicio.
+    // Corre cada 5 minutos sobre todas las cuentas habilitadas con claves, tengan o no libro.
     setInterval(async () => {
-        for (const [uid] of posicionesPorCuenta) {
-            if (!posDe(uid).length) continue;
-            const ctx = ctxActivos.get(uid);
-            if (ctx) await reconciliarCuenta(ctx).catch(() => {});
-        }
+        if (!ENCRYPTION_KEY) return;
+        try {
+            const r = await pool.query('SELECT * FROM cuentas_trading WHERE api_key IS NOT NULL');
+            for (const row of r.rows) {
+                const uid = row.usuario_id;
+                if (!row.habilitado && !posDe(uid).length) continue;
+                let ctx = ctxActivos.get(uid);
+                if (!ctx) {
+                    try { ctx = ctxDeCuenta(row); ctxActivos.set(uid, ctx); }
+                    catch (_) { continue; }
+                }
+                await reconciliarCuenta(ctx).catch(() => {});
+            }
+        } catch (e) { console.error('[AutoTrading] Error en pasada de reconciliación:', e.message); }
     }, 5 * 60 * 1000);
 
     ejecutarAutoTrading();
@@ -3142,8 +3223,11 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
                     [((parseInt(p.oiLookbackMin) || 30) + 10) * 60]
                   )
                 : Promise.resolve({ rows: [] }),
-            (p.useTopTraderFilter || p.useRetailFilter)
-                ? pool.query('SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - 1800 ORDER BY tiempo ASC')
+            (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
+                ? pool.query(
+                    'SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC',
+                    [Math.max(1800, ((parseInt(p.topSlopeLookbackMin) || 15) + 10) * 60)]
+                  )
                 : Promise.resolve({ rows: [] }),
         ]);
 
@@ -3348,7 +3432,17 @@ app.get('/api/mi-cuenta/entradas', autenticar, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Límite de backtests simultáneos: una corrida de 365 días carga ~525k velas 1m más todos
+// los indicadores en memoria; varias en paralelo pueden tirar el proceso entero (y con él,
+// el auto-trading y los recolectores). Los excedentes reciben 429 y la UI muestra el mensaje.
+let backtestsActivos = 0;
+const MAX_BACKTESTS_SIMULTANEOS = 2;
+
 app.post('/api/backtest', autenticar, async (req, res) => {
+    if (backtestsActivos >= MAX_BACKTESTS_SIMULTANEOS) {
+        return res.status(429).json({ error: `Ya hay ${MAX_BACKTESTS_SIMULTANEOS} backtests corriendo; esperá a que terminen y reintentá.` });
+    }
+    backtestsActivos++;
     try {
         const p = {
             enableLongs:       req.body.enableLongs !== false,
@@ -3394,6 +3488,11 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             topTraderRatio:     Number.isFinite(parseFloat(req.body.topTraderRatio)) ? parseFloat(req.body.topTraderRatio) : 1.05,
             useRetailFilter:    req.body.useRetailFilter === true,
             retailExtreme:      Number.isFinite(parseFloat(req.body.retailExtreme)) ? parseFloat(req.body.retailExtreme) : 2.0,
+            useTopSlopeFilter:  req.body.useTopSlopeFilter === true,
+            topSlopeLookbackMin: Math.min(Math.max(parseInt(req.body.topSlopeLookbackMin) || 15, 5), 1440),
+            topSlopeMin:        Number.isFinite(parseFloat(req.body.topSlopeMin)) ? parseFloat(req.body.topSlopeMin) : 0,
+            useCVDFilter:       req.body.useCVDFilter === true,
+            cvdLookback:        Math.min(Math.max(parseInt(req.body.cvdLookback) || 20, 2), 1440),
             useMacdFilter:     req.body.useMacdFilter !== false,
             macdTf:            ['1m','5m','15m'].includes(req.body.macdTf) ? req.body.macdTf : '5m',
             macdFast:          parseInt(req.body.macdFast)   || 12,
@@ -3452,8 +3551,10 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             p.useOIFilter
                 ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= $1 ORDER BY tiempo ASC', [oiDesdeSeg])
                 : Promise.resolve({ rows: [] }),
-            (p.useTopTraderFilter || p.useRetailFilter)
-                ? pool.query('SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= $1 ORDER BY tiempo ASC', [Math.floor(periodStart.getTime() / 1000)])
+            (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
+                // Margen extra hacia atrás para que el lookback de la pendiente tenga muestra previa
+                // en las primeras velas del período (igual que el OI con oiDesdeSeg).
+                ? pool.query('SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= $1 ORDER BY tiempo ASC', [Math.floor((periodStart.getTime() - (p.topSlopeLookbackMin + 10) * 60000) / 1000)])
                 : Promise.resolve({ rows: [] }),
         ]);
         if (fuente === 'bd' && bars1m.length === 0) {
@@ -3491,7 +3592,7 @@ app.post('/api/backtest', autenticar, async (req, res) => {
                 warnings.push(`Filtro de Open Interest activo: solo hay datos de OI desde ${new Date(primeraOI).toISOString().slice(0, 16).replace('T', ' ')} UTC (~${diasCubiertos.toFixed(1)} días). Binance solo expone OI de los últimos ~30 días, así que el tramo anterior del período NO genera trades; las métricas reflejan solo el subperíodo con cobertura de OI.`);
             }
         }
-        if (p.useTopTraderFilter || p.useRetailFilter) {
+        if (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter) {
             const lsCov = await pool.query('SELECT MIN(tiempo) AS primera, COUNT(*)::int AS n FROM long_short_ratio');
             const primeraLS = lsCov.rows[0] && lsCov.rows[0].primera ? Number(lsCov.rows[0].primera) * 1000 : null;
             if (!primeraLS || lsCov.rows[0].n === 0) {
@@ -3507,6 +3608,8 @@ app.post('/api/backtest', autenticar, async (req, res) => {
     } catch (err) {
         console.error('Error backtest:', err);
         res.status(500).json({ error: err.message || 'Error al ejecutar backtest' });
+    } finally {
+        backtestsActivos--;
     }
 });
 
