@@ -13,6 +13,13 @@ app.use(express.json());
 app.use(cookieParser());
 
 const JWT_SECRET = process.env.JWT_SECRET || 'cambiar_este_secreto_en_produccion';
+if (JWT_SECRET === 'cambiar_este_secreto_en_produccion') {
+    if (process.env.NODE_ENV === 'production') {
+        console.error('FATAL: JWT_SECRET no configurado. Abortando para no exponer tokens predecibles en producción.');
+        process.exit(1);
+    }
+    console.warn('⚠️ [Seguridad] JWT_SECRET con valor por defecto — solo aceptable en desarrollo local.');
+}
 
 // ── Cifrado de secretos (claves API Binance de cada usuario) ──────────
 // Las claves secretas de Binance NO se guardan en texto plano: se cifran con
@@ -198,6 +205,9 @@ async function inicializarBaseDeDatos() {
         `);
 
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_ballenas_fecha ON ballenas(fecha DESC)`);
+        // Migración: columna mercado para distinguir flujo SPOT (stream.binance.com) del
+        // flujo PERP (fstream.binance.com). Permite filtrar por mercado en análisis futuros.
+        await pool.query(`ALTER TABLE ballenas ADD COLUMN IF NOT EXISTS mercado VARCHAR(5) DEFAULT 'SPOT'`);
 
         // Migración: columnas de posición activa en auto_trading_config
         await pool.query(`
@@ -252,7 +262,7 @@ async function inicializarBaseDeDatos() {
                 api_key             TEXT,
                 api_secret_cifrado  TEXT,
                 base_url            TEXT DEFAULT 'https://testnet.binancefuture.com',
-                margin_type         VARCHAR(10) DEFAULT 'CROSSED',
+                margin_type         VARCHAR(10) DEFAULT 'ISOLATED',
                 estrategia_nombre   VARCHAR(100),
                 position_usdt       NUMERIC DEFAULT 100,
                 habilitado          BOOLEAN DEFAULT false,
@@ -439,49 +449,55 @@ async function backfillLongShortRatio() {
 }
 setTimeout(backfillLongShortRatio, 7000);
 
-// --- CAZADOR DE BALLENAS ---
-let wsConectando = false;
+// --- CAZADOR DE BALLENAS (SPOT + PERP) ---
+// Dos feeds paralelos: spot (stream.binance.com) y futuros perp (fstream.binance.com).
+// Cada trade se guarda con su columna `mercado` ('SPOT' o 'PERP') para poder filtrar
+// después. El flujo de futuros captura el apalancamiento y las liquidaciones forzadas,
+// que no están disponibles en el feed de spot.
+const wsBallenasConectando = new Set();
 
-function iniciarRastreadorBallenas() {
-    if (wsConectando) return;
-    wsConectando = true;
+function iniciarRastreadorBallenas(wsUrl, mercado) {
+    if (wsBallenasConectando.has(mercado)) return;
+    wsBallenasConectando.add(mercado);
 
-    const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade');
+    const ws = new WebSocket(wsUrl);
 
     ws.on('open', () => {
-        wsConectando = false;
-        console.log('✅ Conectado a la Cinta de Binance.');
+        wsBallenasConectando.delete(mercado);
+        console.log(`✅ Cazador de ballenas (${mercado}) conectado.`);
     });
 
     ws.on('message', async (data) => {
         try {
             const evento = JSON.parse(data);
             const cantidad = parseFloat(evento.q);
-            const precio = parseFloat(evento.p);
+            const precio   = parseFloat(evento.p);
             const es_venta = evento.m;
             if (cantidad >= limiteGuardadoBD) {
                 await pool.query(
-                    `INSERT INTO ballenas (precio, cantidad, es_venta) VALUES ($1, $2, $3)`,
-                    [precio, cantidad, es_venta]
+                    `INSERT INTO ballenas (precio, cantidad, es_venta, mercado) VALUES ($1, $2, $3, $4)`,
+                    [precio, cantidad, es_venta, mercado]
                 );
             }
         } catch (error) {
-            console.error('Error al guardar trade:', error);
+            console.error(`Error al guardar trade (${mercado}):`, error);
         }
     });
 
     ws.on('error', (err) => {
-        console.error('Error en WebSocket ballenas:', err.message);
+        console.error(`Error en WebSocket ballenas (${mercado}):`, err.message);
         ws.terminate();
     });
 
     ws.on('close', () => {
-        wsConectando = false;
-        console.log('⚠️ Reconectando en 5 segundos...');
-        setTimeout(iniciarRastreadorBallenas, 5000);
+        wsBallenasConectando.delete(mercado);
+        console.log(`⚠️ Ballenas (${mercado}) reconectando en 5 segundos...`);
+        setTimeout(() => iniciarRastreadorBallenas(wsUrl, mercado), 5000);
     });
 }
-iniciarRastreadorBallenas();
+
+iniciarRastreadorBallenas('wss://stream.binance.com:9443/ws/btcusdt@aggTrade', 'SPOT');
+iniciarRastreadorBallenas('wss://fstream.binance.com/ws/btcusdt@aggTrade',     'PERP');
 
 
 // ============================================================
@@ -533,6 +549,7 @@ app.post('/api/auth/login', async (req, res) => {
             httpOnly: true,
             sameSite: 'strict',
             path: '/',
+            ...(process.env.NODE_ENV === 'production' ? { secure: true } : {}),
         };
         if (recordar) {
             cookieOpts.maxAge = 30 * 24 * 60 * 60 * 1000; // 30 días
@@ -767,7 +784,7 @@ app.get('/api/filtro-bd', autenticar, (req, res) => {
     res.json({ umbral: limiteGuardadoBD });
 });
 
-app.post('/api/filtro-bd', autenticar, async (req, res) => {
+app.post('/api/filtro-bd', autenticar, soloAdmin, async (req, res) => {
     const nuevoUmbral = parseFloat(req.body.umbral);
     if (!isNaN(nuevoUmbral) && nuevoUmbral > 0) {
         limiteGuardadoBD = nuevoUmbral;
@@ -1155,10 +1172,13 @@ function calcCapitalEntrada(p, capital, posicionesAbiertas) {
 // Costo total de una operación como fracción del capital de la posición (margen):
 // comisión y slippage se cobran en entrada + salida; el funding se prorratea por el
 // tiempo en operación. Todo escala con la palanca porque se aplica sobre el nocional.
-function costoOperacion(p, palanca, minutesHeld) {
-    const fees = (p.commission   / 100) * 2 * palanca;                          // entrada + salida
-    const slip = (p.slippagePerc / 100) * 2 * palanca;                          // entrada + salida
-    const fund = (p.fundingPerc  / 100) * (Math.max(0, minutesHeld) / 480) * palanca; // por cada 8h
+// El funding es DIRECCIONAL: funding positivo → longs pagan, shorts cobran (costo negativo).
+// side = 1 (long) o -1 (short). Si se omite, se asume que se paga siempre (conservador).
+function costoOperacion(p, palanca, minutesHeld, side = 1) {
+    const fees = (p.commission   / 100) * 2 * palanca;
+    const slip = (p.slippagePerc / 100) * 2 * palanca;
+    // side * fundingPerc: long con funding positivo paga (+), short cobra (-).
+    const fund = side * (p.fundingPerc / 100) * (Math.max(0, minutesHeld) / 480) * palanca;
     return fees + slip + fund;
 }
 
@@ -1304,12 +1324,16 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     // cambio: lookupHTF toma la última muestra (5m) ≤ tsClose. Top traders = seguir smart money
     // (long si están netos long); retail (global) = fade contrarian (no comprar si el retail está
     // sobrecargado long). Umbrales simétricos alrededor del neutro 1.0 (ratio long/short).
-    const useTopTraderFilter = p.useTopTraderFilter === true;
-    const useRetailFilter    = p.useRetailFilter === true;
+    const useTopTraderFilter  = p.useTopTraderFilter === true;
+    const useRetailFilter     = p.useRetailFilter === true;
+    // Pendiente del ratio — smart money ACUMULANDO (slope > threshold) vs DISTRIBUYENDO.
+    // Independiente del filtro de nivel: podés usar solo el slope, solo el nivel, o ambos.
+    const useTopSlopeFilter   = p.useTopSlopeFilter === true;
+    const topSlopeLookbackMs  = (p.topSlopeLookbackMin ?? 15) * 60000;
     const topTraderRatio = Number.isFinite(p.topTraderRatio) ? p.topTraderRatio : 1.05;
     const retailExtreme  = Number.isFinite(p.retailExtreme)  ? p.retailExtreme  : 2.0;
     let topTs = null, topByTs = null, globTs = null, globByTs = null;
-    if ((useTopTraderFilter || useRetailFilter) && Array.isArray(lsArr) && lsArr.length) {
+    if ((useTopTraderFilter || useRetailFilter || useTopSlopeFilter) && Array.isArray(lsArr) && lsArr.length) {
         topByTs = new Map(); globByTs = new Map();
         for (const r of lsArr) {
             const tms = Number(r.tiempo) * 1000;
@@ -1327,6 +1351,12 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         const tv = parseFloat(bars1m[i][5]); // total volume
         deltaPfx[i + 1] = deltaPfx[i] + (bv - (tv - bv));
     }
+
+    // CVD (Cumulative Volume Delta) — reutiliza deltaPfx. Slope = diferencia del acumulado
+    // entre i y i-cvdLookback: positivo = presión compradora neta, negativo = vendedora.
+    // No necesita estructura extra; lookup O(1) en el loop.
+    const useCVDFilter = p.useCVDFilter === true;
+    const cvdLookback  = p.cvdLookback || 20;
 
     // Ballenas — ordenadas por tiempo para sliding window O(n)
     const whaleTrades = (whalesArr || [])
@@ -1429,7 +1459,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                     ? (exitPrice - pos.entry) / pos.entry
                     : (pos.entry - exitPrice) / pos.entry;
                 const palanca = p.palancaActivo ? (p.palancaValor || 1) : 1;
-                const net = raw * palanca - costoOperacion(p, palanca, barsIn);
+                const net = raw * palanca - costoOperacion(p, palanca, barsIn, pos.side);
                 // En margen aislado la liquidación consume todo el margen (el de
                 // mantenimiento restante se lo lleva el fee de liquidación): pérdida = -margen.
                 // Sin este caso especial, a palanca alta se sub-contabiliza la pérdida.
@@ -1535,14 +1565,25 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                 }
 
                 // Posicionamiento — top traders (seguir) y retail global (fade), por nivel.
-                const topRatioVal  = useTopTraderFilter && topTs  ? lookupHTF(topTs,  topByTs,  tsClose) : null;
+                const topRatioVal  = (useTopTraderFilter || useTopSlopeFilter) && topTs  ? lookupHTF(topTs,  topByTs,  tsClose) : null;
                 const globRatioVal = useRetailFilter    && globTs ? lookupHTF(globTs, globByTs, tsClose) : null;
                 const topOkLong    = !useTopTraderFilter || (topRatioVal  != null && topRatioVal  >= topTraderRatio);
                 const topOkShort   = !useTopTraderFilter || (topRatioVal  != null && topRatioVal  <= 1 / topTraderRatio);
                 const retailOkLong  = !useRetailFilter || (globRatioVal != null && globRatioVal <= retailExtreme);
                 const retailOkShort = !useRetailFilter || (globRatioVal != null && globRatioVal >= 1 / retailExtreme);
 
-                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong && emaAngOkLong && oiOk && topOkLong && retailOkLong) {
+                // Pendiente del ratio de top traders — smart money acumulando (slope > 0) ahora.
+                const topRatioPast    = useTopSlopeFilter && topTs ? lookupHTF(topTs, topByTs, tsClose - topSlopeLookbackMs) : null;
+                const topSlopeVal     = topRatioVal != null && topRatioPast != null ? topRatioVal - topRatioPast : null;
+                const topSlopeOkLong  = !useTopSlopeFilter || (topSlopeVal !== null && topSlopeVal >  (p.topSlopeMin ?? 0));
+                const topSlopeOkShort = !useTopSlopeFilter || (topSlopeVal !== null && topSlopeVal < -(p.topSlopeMin ?? 0));
+
+                // CVD slope — net taker flow en los últimos cvdLookback velas (O(1) vía deltaPfx).
+                const cvdSlope   = i >= cvdLookback ? deltaPfx[i + 1] - deltaPfx[i + 1 - cvdLookback] : null;
+                const cvdOkLong  = !useCVDFilter || (cvdSlope !== null && cvdSlope > 0);
+                const cvdOkShort = !useCVDFilter || (cvdSlope !== null && cvdSlope < 0);
+
+                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong && emaAngOkLong && oiOk && topOkLong && retailOkLong && topSlopeOkLong && cvdOkLong) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1550,7 +1591,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                         const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (stopEmaVals.length ? Math.max(...stopEmaVals) : close * 0.99);
                         posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada, oiSlope: oiSlopeVal, topRatio: topRatioVal, globalRatio: globRatioVal });
                     }
-                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort && oiOk && topOkShort && retailOkShort) {
+                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort && oiOk && topOkShort && retailOkShort && topSlopeOkShort && cvdOkShort) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1567,7 +1608,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         for (const pos of posiciones) {
             const raw = pos.side === 1 ? (close - pos.entry) / pos.entry : (pos.entry - close) / pos.entry;
             const palanca = p.palancaActivo ? (p.palancaValor || 1) : 1;
-            markedEquity += Math.max(pos.capitalAtEntry * (raw * palanca - costoOperacion(p, palanca, i - pos.entryBarIdx)), -pos.capitalAtEntry);
+            markedEquity += Math.max(pos.capitalAtEntry * (raw * palanca - costoOperacion(p, palanca, i - pos.entryBarIdx, pos.side)), -pos.capitalAtEntry);
         }
         if (markedEquity > ddPeak) ddPeak = markedEquity;
         const ddNow = (ddPeak - markedEquity) / ddPeak * 100;
@@ -1593,7 +1634,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                 ? (lastClose - pos.entry) / pos.entry
                 : (pos.entry - lastClose) / pos.entry;
             const palanca = p.palancaActivo ? (p.palancaValor || 1) : 1;
-            const net = raw * palanca - costoOperacion(p, palanca, barsIn);
+            const net = raw * palanca - costoOperacion(p, palanca, barsIn, pos.side);
             const pnlAbs = Math.max(pos.capitalAtEntry * net, -pos.capitalAtEntry);
             capital += pnlAbs;
             trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: lastTs, entryPrice: pos.entry, exitPrice: lastClose, tp: pos.tp, sl: pos.sl, pnlPerc: (pnlAbs / pos.capitalAtEntry) * 100, pnlAbs, reason: 'Fin', capital, oiSlope: pos.oiSlope, topRatio: pos.topRatio, globalRatio: pos.globalRatio });
@@ -1684,7 +1725,7 @@ function ctxDeCuenta(row) {
         apiKey:     row.api_key,
         secret:     descifrarSecreto(row.api_secret_cifrado),
         base:       row.base_url || 'https://testnet.binancefuture.com',
-        marginType: (row.margin_type || 'CROSSED').toUpperCase(),
+        marginType: (row.margin_type || 'ISOLATED').toUpperCase(),
     };
 }
 
@@ -1819,7 +1860,12 @@ async function cerrarSubPosicion(ctx, pos, razon, precio) {
     // El cierre reduceOnly que sigue es benigno si el exchange ya cerró (Binance lo rechaza -2022).
     await cancelarOrden(ctx, pos.tpOrderId);
     await cancelarOrden(ctx, pos.slOrderId);
-    await ejecutarOrdenBinance(ctx, buildCloseUrl(ctx, pos.lado, pos.qty), `CIERRE-${razon}`);
+    const rClose = await ejecutarOrdenBinance(ctx, buildCloseUrl(ctx, pos.lado, pos.qty), `CIERRE-${razon}`);
+    // Corregir precio_cierre con el fill real si la orden de cierre se ejecutó.
+    if (rClose.ok && rClose.body?.avgPrice) {
+        const fillClose = parseFloat(rClose.body.avgPrice);
+        if (fillClose > 0) await pool.query(`UPDATE auto_trading_entradas SET precio_cierre=$1 WHERE id=$2`, [fillClose, pos.id]);
+    }
     // Barrido final al quedar plana: limpia cualquier stop residual del exchange.
     if (arr.length === 0) await cancelarTodasLasOrdenes(ctx);
 }
@@ -2018,7 +2064,7 @@ async function asegurarConfiguracionCuenta(ctx) {
 
     // Margin type
     try {
-        const mt  = ctx.marginType || 'CROSSED';
+        const mt  = ctx.marginType || 'ISOLATED';
         const ts  = Date.now();
         const q   = `symbol=BTCUSDT&marginType=${mt}&timestamp=${ts}`;
         const url = `${ctx.base}/fapi/v1/marginType?${q}&signature=${firmarParams(q, ctx.secret)}`;
@@ -2027,6 +2073,37 @@ async function asegurarConfiguracionCuenta(ctx) {
         if (r.ok || b.code === -4046) console.log(`[AutoTrading u${ctx.uid}] Margin type: ${mt} ✅`);
         else console.warn(`[AutoTrading u${ctx.uid}] ⚠️ No se pudo fijar margin type: ${b.code} ${b.msg}`);
     } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error margin type:`, e.message); }
+}
+
+// Reconcilia el estado en memoria de una cuenta con el exchange. Si el exchange está plano
+// pero el libro tiene sub-posiciones, las marca como cerradas (el exchange las cerró vía
+// sus propias órdenes Algo mientras el server no lo detectaba). Se llama al arrancar y
+// periódicamente para eliminar la "posición fantasma" sin depender del reinicio.
+async function reconciliarCuenta(ctx) {
+    const arr = posDe(ctx.uid);
+    if (!arr.length) return;
+    try {
+        const amt = await obtenerPosicionExchange(ctx);
+        if (Math.abs(amt) < 1e-8) {
+            console.warn(`[AutoTrading u${ctx.uid}] ⚠️ Reconciliación: exchange PLANO pero libro con ${arr.length} sub-pos — marcando como cerradas.`);
+            const ahoraMs = Date.now();
+            for (const pos of arr) {
+                await pool.query(
+                    `UPDATE auto_trading_entradas SET estado='cerrada', razon_cierre='Exchange', ts_cierre=$1 WHERE id=$2`,
+                    [ahoraMs, pos.id]
+                );
+            }
+            posicionesPorCuenta.set(ctx.uid, []);
+            await cancelarTodasLasOrdenes(ctx);
+            await pool.query(`UPDATE cuentas_trading SET ultima_senal=NULL, ultima_cierre_ts=$1 WHERE usuario_id=$2`, [ahoraMs, ctx.uid]);
+            await sincronizarPosicionBD(ctx.uid);
+        } else {
+            const sumLibro = arr.reduce((s, p) => s + p.qty, 0) * (arr[0].lado === 'long' ? 1 : -1);
+            if (Math.abs(amt - sumLibro) > 0.0005) {
+                console.warn(`[AutoTrading u${ctx.uid}] ⚠️ Discrepancia: exchange ${amt} BTC vs libro ${sumLibro} BTC. Revisar manualmente.`);
+            }
+        }
+    } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error en reconciliación periódica:`, e.message); }
 }
 
 // Posición NETA real del símbolo en el exchange de la cuenta `ctx` (positionAmt con signo).
@@ -2057,7 +2134,7 @@ async function migrarConfigGlobal() {
              ultima_senal, ultima_senal_ts, ultima_cierre_ts, capital_inicial_ref)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
         [cfg.usuario_id, BINANCE_API_KEY, cifrarSecreto(BINANCE_SECRET), BINANCE_BASE,
-         (process.env.BINANCE_MARGIN_TYPE || 'CROSSED').toUpperCase(), cfg.estrategia_nombre,
+         (process.env.BINANCE_MARGIN_TYPE || 'ISOLATED').toUpperCase(), cfg.estrategia_nombre,
          cfg.position_usdt, cfg.habilitado, cfg.posicion_lado, cfg.posicion_qty, cfg.posicion_entry,
          cfg.posicion_tp, cfg.posicion_sl, cfg.ultima_senal, cfg.ultima_senal_ts, cfg.ultima_cierre_ts, cfg.capital_inicial_ref]
     );
@@ -2188,6 +2265,8 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
     if (!sizing.ok) { console.log(`[AutoTrading u${row.usuario_id}] Entrada omitida — ${sizing.motivo}`); return; }
     const qty = Math.floor((sizing.nocional / resultado.entry) * 1000) / 1000;
     if (qty < 0.001) { console.log(`[AutoTrading u${row.usuario_id}] qty ${qty} < 0.001 BTC — omitida`); return; }
+    const notionalUsdt = qty * resultado.entry;
+    if (notionalUsdt < 100) { console.log(`[AutoTrading u${row.usuario_id}] nocional $${notionalUsdt.toFixed(0)} < $100 mínimo Binance (-4164) — omitida`); return; }
 
     console.log(`[AutoTrading u${row.usuario_id}] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${qty} BTC`);
 
@@ -2196,13 +2275,15 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
     const ordenEntrada = await ejecutarOrdenBinance(ctx, buildEntryUrl(ctx, nuevaSenal, qty), 'ENTRADA');
     if (ordenEntrada.ok) {
         const stopType = p.stopType ?? 'Porcentaje';
+        // Usar el precio de fill real (avgPrice) en vez del cierre de vela estimado.
+        const fillEntry = parseFloat(ordenEntrada.body?.avgPrice) || resultado.entry;
         const ins = await pool.query(
             `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8, $8) RETURNING id`,
-            [Date.now(), nuevaSenal, resultado.entry, resultado.tp, resultado.sl, qty, stopType, row.usuario_id]
+            [Date.now(), nuevaSenal, fillEntry, resultado.tp, resultado.sl, qty, stopType, row.usuario_id]
         );
         const sub = {
-            id: ins.rows[0].id, lado: nuevaSenal, qty, entry: resultado.entry,
+            id: ins.rows[0].id, lado: nuevaSenal, qty, entry: fillEntry,
             tp: resultado.tp, sl: resultado.sl, entryTs: Date.now(), stopType,
         };
         arr.push(sub);
@@ -2268,28 +2349,12 @@ setTimeout(async () => {
 
             // Reconciliar: si el exchange está plano, los stops cerraron la posición con el server caído.
             try {
-                const amt = await obtenerPosicionExchange(ctx);
-                if (Math.abs(amt) < 1e-8) {
-                    console.warn(`[AutoTrading u${uid}] ⚠️ Exchange PLANO pero el libro tenía ${arr.length} — reconciliando (cerradas por el exchange).`);
-                    const ahoraMs = Date.now();
-                    for (const pos of arr) {
-                        await pool.query(`UPDATE auto_trading_entradas SET estado='cerrada', razon_cierre='Exchange', ts_cierre=$1 WHERE id=$2`, [ahoraMs, pos.id]);
-                    }
-                    posicionesPorCuenta.set(uid, []);
-                    await cancelarTodasLasOrdenes(ctx);
-                    await pool.query(`UPDATE cuentas_trading SET ultima_senal=NULL, ultima_cierre_ts=$1 WHERE usuario_id=$2`, [ahoraMs, uid]);
-                    await sincronizarPosicionBD(uid);
-                } else {
-                    const sumLibro = arr.reduce((s, p) => s + p.qty, 0) * (arr[0].lado === 'long' ? 1 : -1);
-                    if (Math.abs(amt - sumLibro) > 0.0005) {
-                        console.warn(`[AutoTrading u${uid}] ⚠️ Discrepancia: exchange ${amt} BTC vs libro ${sumLibro} BTC. Revisar manualmente.`);
-                    }
-                    // Recolocar protección a sub-posiciones legacy sin órdenes en el exchange.
-                    for (const sub of arr) {
-                        if (!sub.tpOrderId && !sub.slOrderId) await colocarProteccionExchange(ctx, sub);
-                    }
+                await reconciliarCuenta(ctx);
+                // Si tras reconciliar siguen abiertas, recolocar protección a sub-pos sin órdenes.
+                for (const sub of posDe(uid)) {
+                    if (!sub.tpOrderId && !sub.slOrderId) await colocarProteccionExchange(ctx, sub);
                 }
-            } catch (e) { console.error(`[AutoTrading u${uid}] Error reconciliando:`, e.message); }
+            } catch (e) { console.error(`[AutoTrading u${uid}] Error reconciliando al arrancar:`, e.message); }
 
             try { await asegurarConfiguracionCuenta(ctx); } catch (_) {}
         }
@@ -2299,8 +2364,25 @@ setTimeout(async () => {
 
     iniciarMonitorPrecio(WS_PRECIO_POR_ENTORNO.testnet, 'testnet');
     iniciarMonitorPrecio(WS_PRECIO_POR_ENTORNO.real,    'real');
+
+    // Reconciliación periódica: detecta posiciones cerradas por el exchange (Algo TP/SL)
+    // sin depender del reinicio. Corre cada 5 minutos sobre todas las cuentas con posiciones.
+    setInterval(async () => {
+        for (const [uid] of posicionesPorCuenta) {
+            if (!posDe(uid).length) continue;
+            const ctx = ctxActivos.get(uid);
+            if (ctx) await reconciliarCuenta(ctx).catch(() => {});
+        }
+    }, 5 * 60 * 1000);
+
     ejecutarAutoTrading();
-    setInterval(ejecutarAutoTrading, 60 * 1000);
+    // Alinear el ciclo al cierre de vela (+2 s de buffer) para minimizar el slippage
+    // estructural respecto al backtest, que entra exactamente al cierre.
+    const msToNextClose = 60000 - (Date.now() % 60000) + 2000;
+    setTimeout(() => {
+        ejecutarAutoTrading();
+        setInterval(ejecutarAutoTrading, 60 * 1000);
+    }, msToNextClose);
 }, 5000);
 
 // ── Endpoints de Auto-Trading (per-usuario; alias de /api/mi-cuenta para la UI actual) ──
@@ -2631,6 +2713,23 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const deltaOkLong  = !p.useDeltaFilter || deltaRolling > 0;
     const deltaOkShort = !p.useDeltaFilter || deltaRolling < 0;
 
+    // CVD slope — net taker flow acumulado en los últimos cvdLookback velas de 1m.
+    // Comparte la misma fuente de datos que deltaRolling pero con una ventana más larga
+    // para capturar la dirección del order flow en el contexto de velas recientes.
+    const useCVDFilter_sn = p.useCVDFilter === true;
+    const cvdLookback_sn  = p.cvdLookback || 20;
+    let cvdSlope_sn = null;
+    if (useCVDFilter_sn) {
+        const start = Math.max(0, bars1m.length - cvdLookback_sn);
+        let acc = 0;
+        for (let k = start; k < bars1m.length; k++) {
+            acc += 2 * parseFloat(bars1m[k][9]) - parseFloat(bars1m[k][5]);
+        }
+        cvdSlope_sn = acc;
+    }
+    const cvdOkLong_sn  = !useCVDFilter_sn || (cvdSlope_sn !== null && cvdSlope_sn > 0);
+    const cvdOkShort_sn = !useCVDFilter_sn || (cvdSlope_sn !== null && cvdSlope_sn < 0);
+
     // Ventana de ballenas anclada al CIERRE de la última vela 1m (tsClose), igual que el sliding
     // window del backtest [tsClose - windowMs, tsClose]. Antes se anclaba a Date.now(), así que si
     // el poll caía lejos del cierre de vela la ventana no coincidía con la del backtest y la señal
@@ -2685,10 +2784,12 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     // Posicionamiento de traders — por nivel del ratio (idéntico al backtest).
     const useTopTraderFilter_sn = p.useTopTraderFilter === true;
     const useRetailFilter_sn    = p.useRetailFilter === true;
+    const useTopSlopeFilter_sn  = p.useTopSlopeFilter === true;
+    const topSlopeLookbackMs_sn = (p.topSlopeLookbackMin ?? 15) * 60000;
     const topTraderRatio_sn = Number.isFinite(p.topTraderRatio) ? p.topTraderRatio : 1.05;
     const retailExtreme_sn  = Number.isFinite(p.retailExtreme)  ? p.retailExtreme  : 2.0;
     let topRatioVal_sn = null, globRatioVal_sn = null;
-    if ((useTopTraderFilter_sn || useRetailFilter_sn) && Array.isArray(lsArr) && lsArr.length) {
+    if ((useTopTraderFilter_sn || useRetailFilter_sn || useTopSlopeFilter_sn) && Array.isArray(lsArr) && lsArr.length) {
         const topByTs_sn = new Map(), globByTs_sn = new Map();
         for (const r of lsArr) {
             const tms = Number(r.tiempo) * 1000;
@@ -2697,7 +2798,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         }
         const topTs_sn  = [...topByTs_sn.keys()].sort((a, b) => a - b);
         const globTs_sn = [...globByTs_sn.keys()].sort((a, b) => a - b);
-        if (useTopTraderFilter_sn && topTs_sn.length)  topRatioVal_sn  = lookupHTF(topTs_sn,  topByTs_sn,  tsClose);
+        if ((useTopTraderFilter_sn || useTopSlopeFilter_sn) && topTs_sn.length) topRatioVal_sn  = lookupHTF(topTs_sn,  topByTs_sn,  tsClose);
         if (useRetailFilter_sn    && globTs_sn.length) globRatioVal_sn = lookupHTF(globTs_sn, globByTs_sn, tsClose);
     }
     const topOkLong_sn    = !useTopTraderFilter_sn || (topRatioVal_sn  != null && topRatioVal_sn  >= topTraderRatio_sn);
@@ -2705,10 +2806,26 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const retailOkLong_sn  = !useRetailFilter_sn || (globRatioVal_sn != null && globRatioVal_sn <= retailExtreme_sn);
     const retailOkShort_sn = !useRetailFilter_sn || (globRatioVal_sn != null && globRatioVal_sn >= 1 / retailExtreme_sn);
 
+    // Pendiente del ratio de top traders — smart money acumulando AHORA vs hace N minutos.
+    let topSlopeVal_sn = null;
+    if (useTopSlopeFilter_sn && topRatioVal_sn != null) {
+        const topByTs_temp = new Map(), topTs_temp = [];
+        if (Array.isArray(lsArr)) {
+            for (const r of lsArr) {
+                if (r.top_pos != null) { const t = Number(r.tiempo) * 1000; topByTs_temp.set(t, parseFloat(r.top_pos)); topTs_temp.push(t); }
+            }
+            topTs_temp.sort((a, b) => a - b);
+        }
+        const topPast_sn = topTs_temp.length ? lookupHTF(topTs_temp, topByTs_temp, tsClose - topSlopeLookbackMs_sn) : null;
+        topSlopeVal_sn = topPast_sn != null ? topRatioVal_sn - topPast_sn : null;
+    }
+    const topSlopeOkLong_sn  = !useTopSlopeFilter_sn || (topSlopeVal_sn !== null && topSlopeVal_sn >  (p.topSlopeMin ?? 0));
+    const topSlopeOkShort_sn = !useTopSlopeFilter_sn || (topSlopeVal_sn !== null && topSlopeVal_sn < -(p.topSlopeMin ?? 0));
+
     let signal = null;
-    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn && emaAngOkLong_sn && oiOk_sn && topOkLong_sn && retailOkLong_sn)
+    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn && emaAngOkLong_sn && oiOk_sn && topOkLong_sn && retailOkLong_sn && topSlopeOkLong_sn && cvdOkLong_sn)
         signal = 'long';
-    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn && emaAngOkShort_sn && oiOk_sn && topOkShort_sn && retailOkShort_sn)
+    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn && emaAngOkShort_sn && oiOk_sn && topOkShort_sn && retailOkShort_sn && topSlopeOkShort_sn && cvdOkShort_sn)
         signal = 'short';
 
     const tpPerc = p.tpPerc ?? 0.5;
@@ -2742,7 +2859,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
 
     return {
         signal, timestamp: ts, entry: close, tp, sl,
-        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, oiSlope: oiSlope_sn, topRatio: topRatioVal_sn, globalRatio: globRatioVal_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
+        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, oiSlope: oiSlope_sn, topRatio: topRatioVal_sn, topSlope: topSlopeVal_sn, globalRatio: globRatioVal_sn, cvdSlope: cvdSlope_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, E50, E100, E200, E500 }
     };
 }
 
