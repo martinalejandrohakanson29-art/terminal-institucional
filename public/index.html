@@ -440,6 +440,9 @@
                         <polyline points="11,5 19,5 19,13"/>
                     </svg>
                 </button>
+                <button class="btn-dibujo" onclick="activarSnapshot()" title="Snapshot de tramo (2 clics): descarga un JSON con velas, indicadores, ballenas, OI y posicionamiento del tramo para analizarlo" style="color:#9c27b0;border-color:#9c27b0;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                </button>
                 <button class="btn-dibujo" onclick="activarDibujo('entradaLong')" title="Entrada Long (3 clics: entrada → TP → SL)" style="color:#26a69a;border-color:#26a69a;">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                         <polygon points="12,3 6,9 18,9" fill="#26a69a"/>
@@ -1043,6 +1046,31 @@
             }
         });
 
+        // Regla de snapshot: dos clics marcan un tramo (banda violeta a lo alto del pane);
+        // al confirmar el 2º punto se descarga el JSON del tramo (ver activarSnapshot).
+        klinecharts.registerOverlay({
+            name: 'reglaSnapshot',
+            totalStep: 3,
+            needDefaultPointFigure: false,
+            needDefaultXAxisFigure: true,
+            needDefaultYAxisFigure: false,
+            createPointFigures: ({ coordinates, bounding }) => {
+                if (coordinates.length < 1) return [];
+                const H = bounding.height;
+                const x0 = coordinates[0].x;
+                const figs = [{ type: 'line', ignoreEvent: true, attrs: { coordinates: [{ x: x0, y: 0 }, { x: x0, y: H }] }, styles: { color: '#9c27b0', size: 1, style: 'dashed', dashedValue: [4, 3] } }];
+                if (coordinates.length === 2) {
+                    const x1 = coordinates[1].x;
+                    figs.push(
+                        { type: 'line', ignoreEvent: true, attrs: { coordinates: [{ x: x1, y: 0 }, { x: x1, y: H }] }, styles: { color: '#9c27b0', size: 1, style: 'dashed', dashedValue: [4, 3] } },
+                        { type: 'polygon', ignoreEvent: true, attrs: { coordinates: [{ x: x0, y: 0 }, { x: x1, y: 0 }, { x: x1, y: H }, { x: x0, y: H }] }, styles: { style: 'fill', color: 'rgba(156,39,176,0.08)' } },
+                        { type: 'text', ignoreEvent: true, attrs: { x: (x0 + x1) / 2, y: 14, text: '📷 Snapshot', align: 'center', baseline: 'top' }, styles: { color: '#ffffff', backgroundColor: '#9c27b0', borderRadius: 4, paddingLeft: 8, paddingRight: 8, paddingTop: 3, paddingBottom: 3, size: 11, weight: 'bold' } }
+                    );
+                }
+                return figs;
+            }
+        });
+
         klinecharts.registerOverlay({
             name: 'cajaCustom',
             totalStep: 3,
@@ -1358,9 +1386,62 @@
         }
 
         function borrarDibujos() {
-            ['segment','rayLine','fibonacciLine','cajaCustom','canalParalelo','rangoVolumen','medidorPorcentaje','entradaLong','entradaShort'].forEach(t => chart.removeOverlay({ name: t }));
+            ['segment','rayLine','fibonacciLine','cajaCustom','canalParalelo','rangoVolumen','medidorPorcentaje','entradaLong','entradaShort','reglaSnapshot'].forEach(t => chart.removeOverlay({ name: t }));
             overlaySeleccionado = null;
             registroDibujos[temporalidadActual] = [];
+        }
+
+        // --- SNAPSHOT DE TRAMO ---
+        // Dos clics sobre el gráfico y descarga un JSON con la "foto" completa del tramo
+        // (velas + indicadores + ballenas + OI + posicionamiento) para analizarlo fuera.
+        function activarSnapshot() {
+            avisoSnapshot('Snapshot: marcá el inicio y el fin del tramo (2 clics)');
+            chart.createOverlay({
+                name: 'reglaSnapshot',
+                id: `snapshot_${Date.now()}`,
+                onDrawEnd: ({ overlay }) => {
+                    const t1 = overlay.points[0]?.timestamp, t2 = overlay.points[1]?.timestamp;
+                    setTimeout(() => chart.removeOverlay({ id: overlay.id }), 2000);
+                    if (!t1 || !t2 || t1 === t2) { avisoSnapshot('✗ Snapshot cancelado: tramo inválido', true); return; }
+                    descargarSnapshot(Math.min(t1, t2), Math.max(t1, t2));
+                }
+            });
+        }
+
+        async function descargarSnapshot(desde, hasta) {
+            // Los clics caen sobre el openTime de la vela: extender para incluir completa la del cierre.
+            const durTf = { '1m': 60000, '5m': 300000, '15m': 900000, '30m': 1800000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[temporalidadActual] || 60000;
+            hasta = Math.min(hasta + durTf - 1, Date.now());
+            avisoSnapshot('Generando snapshot del tramo…');
+            try {
+                const r = await fetch(`/api/snapshot?desde=${desde}&hasta=${hasta}`, { credentials: 'same-origin' });
+                const data = await r.json();
+                if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+                const fmt = ms => { const d = new Date(ms); const p = n => String(n).padStart(2, '0'); return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}`; };
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }));
+                a.download = `snapshot-BTCUSDT-${fmt(desde)}-${fmt(hasta)}-utc.json`;
+                a.click();
+                URL.revokeObjectURL(a.href);
+                avisoSnapshot(`✓ Snapshot descargado: ${data.meta.velasEnSerie} velas ${data.meta.tfSeries} · ${data.eventos.length} eventos`);
+            } catch (e) {
+                avisoSnapshot('✗ Snapshot: ' + e.message, true);
+            }
+        }
+
+        function avisoSnapshot(texto, esError) {
+            let el = document.getElementById('snapshot-toast');
+            if (!el) {
+                el = document.createElement('div');
+                el.id = 'snapshot-toast';
+                el.style.cssText = 'position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:9999;padding:9px 16px;border-radius:6px;font-size:12.5px;font-weight:bold;color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.25);transition:opacity .3s;opacity:0;';
+                document.body.appendChild(el);
+            }
+            el.style.background = esError ? '#ef5350' : '#9c27b0';
+            el.textContent = texto;
+            el.style.opacity = '1';
+            clearTimeout(el._t);
+            el._t = setTimeout(() => { el.style.opacity = '0'; }, 4500);
         }
 
         document.addEventListener('keydown', function(e) {

@@ -3685,6 +3685,207 @@ app.get('/api/klines/estado', autenticar, async (req, res) => {
 });
 
 
+// ── Snapshot de tramo ──────────────────────────────────────────────────────
+// "Foto" completa de un rango del gráfico para analizarlo fuera de la terminal
+// (p.ej. pegándolo en un LLM): velas + indicadores + ballenas + OI + posiciona-
+// miento, con un resumen agregado y eventos destacados. Tres capas: resumen
+// (lectura rápida), eventos (qué pasó puntualmente) y series (detalle fino).
+app.get('/api/snapshot', autenticar, async (req, res) => {
+    try {
+        const desde = parseInt(req.query.desde);
+        let   hasta = Math.min(parseInt(req.query.hasta), Date.now());
+        if (!Number.isFinite(desde) || !Number.isFinite(hasta) || hasta <= desde) {
+            return res.status(400).json({ error: 'Parámetros desde/hasta inválidos (timestamps en ms, hasta > desde).' });
+        }
+        if (hasta - desde > 48 * 3600000) {
+            return res.status(400).json({ error: 'El rango máximo del snapshot es 48 horas.' });
+        }
+
+        // Warmup previo al rango para que EMA500/RSI/ADX/MACD lleguen calentados al
+        // inicio (mismo criterio que el backtest); 2 días de 1m cubre todos los períodos.
+        const WARMUP_MS  = 2 * 86400000;
+        const CONTEXT_MS = 2 * 3600000; // ventana de "tendencia previa" del resumen
+
+        const [klRes, whaleRes, oiRes, lsRes] = await Promise.all([
+            pool.query(
+                `SELECT open_time, open, high, low, close, volume, close_time, taker_buy_base
+                 FROM klines_1m WHERE open_time >= $1::bigint AND open_time <= $2::bigint ORDER BY open_time ASC`,
+                [desde - WARMUP_MS, hasta]
+            ),
+            pool.query(
+                `SELECT EXTRACT(EPOCH FROM fecha) AS ts_sec, precio, cantidad, es_venta
+                 FROM ballenas WHERE fecha >= $1 AND fecha <= $2 ORDER BY fecha ASC`,
+                [new Date(desde).toISOString(), new Date(hasta).toISOString()]
+            ),
+            pool.query(
+                'SELECT tiempo, valor FROM open_interest WHERE tiempo >= $1 AND tiempo <= $2 ORDER BY tiempo ASC',
+                [Math.floor(desde / 1000), Math.floor(hasta / 1000)]
+            ),
+            pool.query(
+                'SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= $1 AND tiempo <= $2 ORDER BY tiempo ASC',
+                [Math.floor(desde / 1000), Math.floor(hasta / 1000)]
+            ),
+        ]);
+
+        const bars1m = klRes.rows.map(f => [
+            Number(f.open_time), Number(f.open), Number(f.high), Number(f.low),
+            Number(f.close), Number(f.volume), Number(f.close_time), 0, 0, Number(f.taker_buy_base)
+        ]);
+        const idx0 = bars1m.findIndex(b => b[0] >= desde); // primera vela 1m del rango
+        if (idx0 < 0) {
+            return res.status(404).json({ error: 'No hay velas cacheadas en ese rango (la BD cubre ~365 días hacia atrás).' });
+        }
+
+        // Indicadores sobre el array completo (warmup incluido). 5m/15m derivadas de 1m.
+        const c1m = bars1m.map(b => b[4]);
+        const ema50  = calcEMA(c1m, 50),  ema100 = calcEMA(c1m, 100);
+        const ema200 = calcEMA(c1m, 200), ema500 = calcEMA(c1m, 500);
+        const bars5m  = agregarVelas1m(bars1m, 300000);
+        const bars15m = agregarVelas1m(bars1m, 900000);
+        const c5m  = bars5m.map(b => b[4]);
+        const c15m = bars15m.map(b => b[4]);
+        const rsi15Arr = calcRSI(c15m, 14);
+        const adx15Arr = calcADX(bars15m.map(b => b[2]), bars15m.map(b => b[3]), c15m);
+        const { macd: macd5Arr, signal: sig5Arr } = calcMACDArr(c5m, 12, 26, 9);
+        const vwap5Arr = calcVWAP(bars5m, 'daily');
+        const ts5m  = bars5m.map(b => b[6]);
+        const ts15m = bars15m.map(b => b[6]);
+        const rsiByTs  = new Map(bars15m.map((b, i) => [b[6], rsi15Arr[i]]));
+        const adxByTs  = new Map(bars15m.map((b, i) => [b[6], adx15Arr[i]]));
+        const macdByTs = new Map(bars5m.map((b, i)  => [b[6], { macd: macd5Arr[i], sig: sig5Arr[i] }]));
+        const vwapByTs = new Map(bars5m.map((b, i)  => [b[6], vwap5Arr[i]]));
+
+        const iso = ms => new Date(ms).toISOString().slice(0, 16) + 'Z';
+        const rnd = (v, d = 2) => v == null ? null : Math.round(v * 10 ** d) / 10 ** d;
+
+        // Serie de velas con granularidad adaptativa para mantener el JSON manejable.
+        const rangoBars  = bars1m.slice(idx0);
+        const tfSeries   = (hasta - desde) <= 6 * 3600000 ? '1m' : '5m';
+        const seriesBars = tfSeries === '1m' ? rangoBars : agregarVelas1m(rangoBars, 300000);
+
+        // Para cada vela de la serie, los indicadores vistos al cierre de su última vela 1m
+        // (los HTF vía lookupHTF = última vela 5m/15m CERRADA, igual que el backtest).
+        let p1m = idx0;
+        const velasOut = seriesBars.map(sb => {
+            while (p1m + 1 < bars1m.length && bars1m[p1m + 1][6] <= sb[6]) p1m++;
+            const tsC = bars1m[p1m][6];
+            const macdV = lookupHTF(ts5m, macdByTs, tsC);
+            return {
+                ts: iso(sb[0]),
+                o: sb[1], h: sb[2], l: sb[3], c: sb[4],
+                vol: rnd(sb[5]), delta: rnd(2 * sb[9] - sb[5]),
+                ema50: rnd(ema50[p1m], 1), ema100: rnd(ema100[p1m], 1),
+                ema200: rnd(ema200[p1m], 1), ema500: rnd(ema500[p1m], 1),
+                rsi15m: rnd(lookupHTF(ts15m, rsiByTs, tsC), 1),
+                adx15m: rnd(lookupHTF(ts15m, adxByTs, tsC), 1),
+                macd5m: macdV ? rnd(macdV.macd, 1) : null,
+                macdSig5m: macdV ? rnd(macdV.sig, 1) : null,
+                vwap5m: rnd(lookupHTF(ts5m, vwapByTs, tsC), 1),
+            };
+        });
+
+        // Series de OI y posicionamiento, submuestreadas a ≤200 puntos.
+        const dsStep = n => Math.max(1, Math.ceil(n / 200));
+        const oiRango = oiRes.rows.map(r => ({ ts: Number(r.tiempo) * 1000, valor: Math.round(parseFloat(r.valor)) }));
+        const oiSerie = oiRango.filter((_, i) => i % dsStep(oiRango.length) === 0 || i === oiRango.length - 1)
+            .map(o => ({ ts: iso(o.ts), valor: o.valor }));
+        const lsRango = lsRes.rows.map(r => ({
+            ts: Number(r.tiempo) * 1000,
+            top:    r.top_pos    != null ? parseFloat(r.top_pos)    : null,
+            retail: r.global_acc != null ? parseFloat(r.global_acc) : null,
+        }));
+        const lsSerie = lsRango.filter((_, i) => i % dsStep(lsRango.length) === 0 || i === lsRango.length - 1)
+            .map(o => ({ ts: iso(o.ts), top: rnd(o.top, 3), retail: rnd(o.retail, 3) }));
+
+        // ── Resumen ──
+        const first = rangoBars[0], last = rangoBars[rangoBars.length - 1];
+        let maxP = -Infinity, minP = Infinity, volTotal = 0, deltaAcum = 0;
+        for (const b of rangoBars) {
+            if (b[2] > maxP) maxP = b[2];
+            if (b[3] < minP) minP = b[3];
+            volTotal  += b[5];
+            deltaAcum += 2 * b[9] - b[5];
+        }
+        const whales   = whaleRes.rows.map(w => ({ ts: parseFloat(w.ts_sec) * 1000, btc: parseFloat(w.cantidad), precio: parseFloat(w.precio), esVenta: w.es_venta }));
+        const wCompras = whales.filter(w => !w.esVenta), wVentas = whales.filter(w => w.esVenta);
+        const oiIni = oiRango[0], oiFin = oiRango[oiRango.length - 1];
+        const lsIni = lsRango[0], lsFin = lsRango[lsRango.length - 1];
+
+        // Tendencia previa: variación del cierre en las 2h anteriores al inicio del tramo.
+        let i2 = idx0;
+        while (i2 > 0 && bars1m[i2 - 1][0] >= desde - CONTEXT_MS) i2--;
+        const tendenciaPrevia = i2 < idx0 ? rnd((first[1] - bars1m[i2][1]) / bars1m[i2][1] * 100, 2) : null;
+
+        const resumen = {
+            precio: {
+                apertura: first[1], cierre: last[4], maximo: maxP, minimo: minP,
+                variacionPerc: rnd((last[4] - first[1]) / first[1] * 100, 2),
+                rangoPerc: rnd((maxP - minP) / minP * 100, 2),
+            },
+            volumen: { totalBTC: rnd(volTotal), deltaAcumuladoBTC: rnd(deltaAcum) },
+            openInterest: oiIni && oiFin
+                ? { inicioBTC: oiIni.valor, finBTC: oiFin.valor, cambioPerc: rnd((oiFin.valor - oiIni.valor) / oiIni.valor * 100, 2) }
+                : null,
+            posicionamiento: lsIni && lsFin
+                ? { topRatioInicio: rnd(lsIni.top, 3), topRatioFin: rnd(lsFin.top, 3),
+                    retailRatioInicio: rnd(lsIni.retail, 3), retailRatioFin: rnd(lsFin.retail, 3) }
+                : null,
+            ballenas: {
+                compras: wCompras.length, ventas: wVentas.length,
+                btcComprado: rnd(wCompras.reduce((s, w) => s + w.btc, 0), 1),
+                btcVendido:  rnd(wVentas.reduce((s, w) => s + w.btc, 0), 1),
+                btcNeto:     rnd(whales.reduce((s, w) => s + (w.esVenta ? -w.btc : w.btc), 0), 1),
+                umbralGuardadoBTC: limiteGuardadoBD,
+            },
+            contexto: {
+                tendenciaPrevia2hPerc: tendenciaPrevia,
+                rsi15mInicio: rnd(lookupHTF(ts15m, rsiByTs, first[6]), 1),
+                rsi15mFin:    rnd(lookupHTF(ts15m, rsiByTs, last[6]), 1),
+                adx15mInicio: rnd(lookupHTF(ts15m, adxByTs, first[6]), 1),
+                adx15mFin:    rnd(lookupHTF(ts15m, adxByTs, last[6]), 1),
+                distEMA200InicioPerc: ema200[idx0] ? rnd((first[4] - ema200[idx0]) / ema200[idx0] * 100, 2) : null,
+            },
+        };
+
+        // ── Eventos: ballenas (cap a las 40 más grandes) y saltos de OI (≥0.3% en ~5m) ──
+        const eventos = [];
+        const whalesEv = whales.length > 40
+            ? [...whales].sort((a, b) => b.btc - a.btc).slice(0, 40).sort((a, b) => a.ts - b.ts)
+            : whales;
+        whalesEv.forEach(w => eventos.push({ ts: iso(w.ts), tipo: 'ballena', lado: w.esVenta ? 'venta' : 'compra', btc: rnd(w.btc, 1), precio: Math.round(w.precio) }));
+        let lo = 0, lastOiEvTs = -Infinity;
+        for (let k = 0; k < oiRango.length; k++) {
+            while (oiRango[lo].ts < oiRango[k].ts - 300000) lo++;
+            const past = oiRango[lo];
+            if (past.ts >= oiRango[k].ts || past.valor <= 0) continue;
+            const ch = (oiRango[k].valor - past.valor) / past.valor * 100;
+            if (Math.abs(ch) >= 0.3 && oiRango[k].ts - lastOiEvTs >= 300000) {
+                eventos.push({ ts: iso(oiRango[k].ts), tipo: 'salto_oi', cambio5mPerc: rnd(ch, 2) });
+                lastOiEvTs = oiRango[k].ts;
+            }
+        }
+        eventos.sort((a, b) => a.ts < b.ts ? -1 : 1);
+
+        res.json({
+            meta: {
+                simbolo: 'BTCUSDT', exchange: 'Binance',
+                desde: iso(desde), hasta: iso(hasta),
+                duracionMin: Math.round((hasta - desde) / 60000),
+                tfSeries, velasEnSerie: velasOut.length,
+                generado: iso(Date.now()),
+                notas: 'Velas 1m de la BD propia. delta = volumen taker de compra − venta (BTC). Indicadores: EMAs 50/100/200/500 sobre 1m; RSI(14) y ADX(14) sobre 15m; MACD(12,26,9) sobre 5m; VWAP sesión diaria sobre 5m; los HTF se leen de la última vela cerrada (sin look-ahead). Ratios: top = top traders por posición (long/short), retail = cuentas globales. Horarios en UTC.',
+            },
+            resumen,
+            eventos,
+            series: { velas: velasOut, openInterest: oiSerie, posicionamiento: lsSerie },
+        });
+    } catch (err) {
+        console.error('Error snapshot:', err);
+        res.status(500).json({ error: err.message || 'Error al generar el snapshot' });
+    }
+});
+
+
 // ============================================================
 // RUTAS DE PÁGINAS (deben ir ANTES de express.static para que
 // tomen prioridad sobre el auto-index de index.html en "/")
