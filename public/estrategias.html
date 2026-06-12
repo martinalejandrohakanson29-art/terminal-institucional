@@ -696,11 +696,21 @@
                     <input type="checkbox" id="p-adx" class="form-check">
                 </div>
                 <div class="form-row">
+                    <label>Temporalidad</label>
+                    <select id="p-adx-tf" class="form-select">
+                        <option value="1m">1m</option>
+                        <option value="5m">5m</option>
+                        <option value="15m" selected>15m</option>
+                        <option value="1h">1h</option>
+                    </select>
+                </div>
+                <div class="form-row">
                     <label>Umbral ADX</label>
                     <input type="number" id="p-adx-threshold" class="form-input" value="25" min="1" max="100">
                 </div>
                 <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
-                    ADX ≥ umbral = tendencia fuerte<br>ADX &lt; 25: rango / tendencia débil
+                    ADX ≥ umbral = tendencia fuerte<br>ADX &lt; 25: rango / tendencia débil<br>
+                    ⚠ Con 1h el ADX necesita ~29 h de historial para calentar: en backtests cortos el primer tramo no genera trades.
                 </div>
             </div>
         </div>
@@ -972,6 +982,7 @@
             whaleWindow:       parseInt(document.getElementById('p-whale-window').value) || 30,
             whaleMinBTC:       parseFloat(document.getElementById('p-whale-min-btc').value) || 5,
             useADXFilter:        document.getElementById('p-adx').checked,
+            adxTf:               document.getElementById('p-adx-tf').value,
             adxThreshold:        numOrDefault('p-adx-threshold', 25),
             useVwapFilter:       document.getElementById('p-vwap').checked,
             vwapTf:              document.getElementById('p-vwap-tf').value,
@@ -1176,7 +1187,7 @@
             { label: 'Tiempo máx.',   activo: params.useMaxTradeTime,     desc: `${params.maxTradeMinutes}m` },
             { label: 'Delta Vol.',    activo: params.useDeltaFilter,      desc: `${params.deltaVelas} velas` },
             { label: 'Ballenas',      activo: params.useWhaleFilter,      desc: `${params.whaleWindow}m / ≥${params.whaleMinBTC}BTC` },
-            { label: 'ADX',           activo: params.useADXFilter,        desc: `≥${params.adxThreshold}` },
+            { label: `ADX ${params.adxTf||'15m'}`, activo: params.useADXFilter, desc: `≥${params.adxThreshold}` },
             { label: `VWAP ${params.vwapTf||'5m'}`, activo: params.useVwapFilter,
               desc: [
                   params.vwapSession === 'weekly' ? 'Semanal' : params.vwapSession === 'monthly' ? 'Mensual' : 'Diaria',
@@ -1407,6 +1418,7 @@
         document.getElementById('p-whale-window').value  = p.whaleWindow ?? 30;
         document.getElementById('p-whale-min-btc').value = p.whaleMinBTC ?? 5;
         document.getElementById('p-adx').checked                 = !!p.useADXFilter;
+        document.getElementById('p-adx-tf').value                = p.adxTf || '15m';
         document.getElementById('p-adx-threshold').value         = p.adxThreshold ?? 25;
         document.getElementById('p-vwap').checked                = !!p.useVwapFilter;
         document.getElementById('p-vwap-tf').value               = p.vwapTf       || '5m';

@@ -1452,6 +1452,35 @@ async function fetchKlinesDesdeBD(interval, days) {
     ]);
 }
 
+// Agrega velas 1m en buckets más grandes (p.ej. 1h) en el mismo formato array que
+// Binance. Se usa para temporalidades que no guardamos (la BD solo cachea 1m y deriva
+// 5m/15m por SQL), así el resultado es idéntico con fuente BD o Binance. Igual que
+// fetchKlinesDesdeBD, descarta el bucket EN CURSO: sus velas 1m están incompletas y
+// los indicadores calculados sobre él cambiarían al re-evaluar un minuto después.
+function agregarVelas1m(bars1m, bucketMs) {
+    const out = [];
+    let cur = null, curB = -1;
+    for (const b of bars1m) {
+        const bk = Math.floor(parseInt(b[0]) / bucketMs);
+        if (bk !== curB) {
+            if (cur) out.push(cur);
+            curB = bk;
+            cur = [bk * bucketMs, parseFloat(b[1]), parseFloat(b[2]), parseFloat(b[3]),
+                   parseFloat(b[4]), parseFloat(b[5]), bk * bucketMs + bucketMs - 1, 0, 0, parseFloat(b[9])];
+        } else {
+            cur[2] = Math.max(cur[2], parseFloat(b[2]));
+            cur[3] = Math.min(cur[3], parseFloat(b[3]));
+            cur[4] = parseFloat(b[4]);
+            cur[5] += parseFloat(b[5]);
+            cur[9] += parseFloat(b[9]);
+        }
+    }
+    if (cur) out.push(cur);
+    const lastClose1m = bars1m.length ? parseInt(bars1m[bars1m.length - 1][6]) : 0;
+    while (out.length && out[out.length - 1][6] > lastClose1m) out.pop();
+    return out;
+}
+
 function lookupHTF(sortedTs, byTs, target) {
     let lo = 0, hi = sortedTs.length - 1, found = -1;
     while (lo <= hi) {
@@ -1564,9 +1593,20 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
 
     const h15m = bars15m.map(b => parseFloat(b[2]));
     const l15m = bars15m.map(b => parseFloat(b[3]));
-    const adxArr15m = calcADX(h15m, l15m, c15m);
-    const adx15mByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), adxArr15m[i]]));
-    const tsAdx15m = bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b);
+    // ADX — temporalidad configurable (1m/5m/15m/1h). La de 1h no se guarda en ningún
+    // lado: se deriva agregando las velas 1m del período (agregarVelas1m).
+    const adxTf = ['1m', '5m', '15m', '1h'].includes(p.adxTf) ? p.adxTf : '15m';
+    let adxDirect = null, adxByTs = null, tsAdx = null;
+    if (p.useADXFilter) {
+        if (adxTf === '1m') {
+            adxDirect = calcADX(bars1m.map(b => parseFloat(b[2])), bars1m.map(b => parseFloat(b[3])), c1m);
+        } else {
+            const barsAdx = adxTf === '5m' ? bars5m : adxTf === '15m' ? bars15m : agregarVelas1m(bars1m, 3600000);
+            const arr = calcADX(barsAdx.map(b => parseFloat(b[2])), barsAdx.map(b => parseFloat(b[3])), barsAdx.map(b => parseFloat(b[4])));
+            adxByTs = new Map(barsAdx.map((b, i) => [parseInt(b[6]), arr[i]]));
+            tsAdx   = barsAdx.map(b => parseInt(b[6])).sort((a, b) => a - b);
+        }
+    }
 
     // Angulación de EMA — pendiente normalizada por ATR, con temporalidad propia.
     // gate = umbral mínimo de pendiente; 'strong' exige la banda fuerte. Long pide
@@ -1836,9 +1876,10 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                 const whaleOkLong  = !p.useWhaleFilter || whaleDelta > 0;
                 const whaleOkShort = !p.useWhaleFilter || whaleDelta < 0;
 
-                // ADX 15m: mide fuerza de tendencia (>=25 = tendencia fuerte)
-                const adxRaw = lookupHTF(tsAdx15m, adx15mByTs, tsClose);
-                const adxOk  = !p.useADXFilter || (adxRaw !== null && adxRaw >= (p.adxThreshold ?? 25));
+                // ADX: mide fuerza de tendencia (>= umbral = tendencia fuerte), en su temporalidad propia
+                const adxRaw = !p.useADXFilter ? null
+                    : adxTf === '1m' ? adxDirect[i] : lookupHTF(tsAdx, adxByTs, tsClose);
+                const adxOk  = !p.useADXFilter || (adxRaw != null && adxRaw >= (p.adxThreshold ?? 25));
 
                 // VWAP — dirección y/o pullback
                 const vwapVal_bt = !p.useVwapFilter ? null
@@ -2480,9 +2521,10 @@ async function ejecutarAutoTrading() {
         if (rowsByUid.size === 0) return;
 
         // Datos de mercado COMPARTIDOS: se descargan una sola vez por ciclo (BTCUSDT es igual
-        // para todas las cuentas). Velas suficientes para que EMA/MACD/RSI/ADX converjan.
+        // para todas las cuentas). Velas suficientes para que EMA/MACD/RSI/ADX converjan
+        // (6000 de 1m = ~100 velas 1h derivadas, para que el ADX 1h converja como en backtest).
         const [bars1m, bars5m, bars15m] = await Promise.all([
-            fetchKlinesBatch('1m',  3000),
+            fetchKlinesBatch('1m',  6000),
             fetchKlinesBatch('5m',  800),
             fetchKlinesBatch('15m', 800),
         ]);
@@ -2922,10 +2964,19 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         rsiSnTs   = [...rsiSnByTs.keys()].sort((a, b) => a - b);
     }
 
-    const adxArr15m = calcADX(bars15m.map(b => parseFloat(b[2])), bars15m.map(b => parseFloat(b[3])), c15m_sn);
-    const adxByTs15m = new Map(bars15m.map((b, i) => [parseInt(b[6]), adxArr15m[i]]));
-    const adxTs15m   = [...adxByTs15m.keys()].sort((a, b) => a - b);
-    const adxValue   = lookupHTF(adxTs15m, adxByTs15m, parseInt(bars1m[bars1m.length - 1][6]));
+    // ADX — temporalidad configurable (1m/5m/15m/1h), idéntico al backtest. La de 1h
+    // se deriva agregando las velas 1m del ciclo.
+    const adxTf_sn = ['1m', '5m', '15m', '1h'].includes(p.adxTf) ? p.adxTf : '15m';
+    let adxValue = null;
+    if (adxTf_sn === '1m') {
+        adxValue = calcADX(bars1m.map(b => parseFloat(b[2])), bars1m.map(b => parseFloat(b[3])), c1m)[bars1m.length - 1];
+    } else {
+        const barsAdx = adxTf_sn === '5m' ? bars5m : adxTf_sn === '15m' ? bars15m : agregarVelas1m(bars1m, 3600000);
+        const arr = calcADX(barsAdx.map(b => parseFloat(b[2])), barsAdx.map(b => parseFloat(b[3])), barsAdx.map(b => parseFloat(b[4])));
+        const adxByTs_sn = new Map(barsAdx.map((b, idx) => [parseInt(b[6]), arr[idx]]));
+        const adxTs_sn   = [...adxByTs_sn.keys()].sort((a, b) => a - b);
+        adxValue = lookupHTF(adxTs_sn, adxByTs_sn, parseInt(bars1m[bars1m.length - 1][6]));
+    }
 
     // Angulación de EMA — pendiente normalizada por ATR (idéntico al backtest)
     const useEmaAngFilter_sn = p.useEmaAngFilter === true;
@@ -3071,7 +3122,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const alignLong  = !p.useEmaAlignment || bullAlign;
     const alignShort = !p.useEmaAlignment || bearAlign;
 
-    const adxOk = !p.useADXFilter || (adxValue !== null && adxValue >= (p.adxThreshold ?? 25));
+    const adxOk = !p.useADXFilter || (adxValue != null && adxValue >= (p.adxThreshold ?? 25));
 
     // VWAP — dirección y/o pullback
     const vwapVal_sn = !p.useVwapFilter ? null
@@ -3186,7 +3237,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
 
     return {
         signal, timestamp: ts, entry: close, tp, sl,
-        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, oiSlope: oiSlope_sn, topRatio: topRatioVal_sn, topSlope: topSlopeVal_sn, globalRatio: globRatioVal_sn, cvdSlope: cvdSlope_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, alignVals }
+        indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, adxTf: adxTf_sn, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, oiSlope: oiSlope_sn, topRatio: topRatioVal_sn, topSlope: topSlopeVal_sn, globalRatio: globRatioVal_sn, cvdSlope: cvdSlope_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, alignVals }
     };
 }
 
@@ -3203,8 +3254,9 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
 
         const [bars1m, bars5m, bars15m, whaleRes, oiRes, lsRes] = await Promise.all([
             // Suficientes velas para que EMA/MACD/RSI/ADX (incluso de período alto en HTF)
-            // converjan igual que en el backtest y no diverja la señal en vivo.
-            fetchKlinesBatch('1m',  3000),
+            // converjan igual que en el backtest y no diverja la señal en vivo
+            // (6000 de 1m = ~100 velas 1h derivadas para el ADX 1h).
+            fetchKlinesBatch('1m',  6000),
             fetchKlinesBatch('5m',  800),
             fetchKlinesBatch('15m', 800),
             pool.query(
@@ -3505,6 +3557,7 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             whaleWindow:       parseInt(req.body.whaleWindow) || 30,
             whaleMinBTC:       parseFloat(req.body.whaleMinBTC) || 5,
             useADXFilter:        req.body.useADXFilter === true,
+            adxTf:               ['1m','5m','15m','1h'].includes(req.body.adxTf) ? req.body.adxTf : '15m',
             adxThreshold:        parseInt(req.body.adxThreshold) || 25,
             useVwapFilter:       req.body.useVwapFilter === true,
             vwapTf:              ['1m','5m','15m'].includes(req.body.vwapTf) ? req.body.vwapTf : '5m',
