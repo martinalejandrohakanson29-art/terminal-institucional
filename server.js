@@ -1780,6 +1780,15 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                 }
             }
 
+            // Breakeven: el stop ya fue movido a entrada ± offset en una vela ANTERIOR (ver
+            // disparo más abajo). Se evalúa antes que TP/SL/EMA: es un nivel duro intra-vela
+            // que ejecuta antes que cualquier chequeo al cierre. Si la misma vela toca TP y
+            // breakeven, prioriza breakeven (misma convención conservadora que el caso TP+SL).
+            if (!exitPrice && pos.beAplicado) {
+                if      (pos.side === 1  && low  <= pos.sl) { exitPrice = pos.sl; exitReason = 'BE'; }
+                else if (pos.side === -1 && high >= pos.sl) { exitPrice = pos.sl; exitReason = 'BE'; }
+            }
+
             if (!exitPrice) {
                 if (pos.side === 1) {
                     if (p.stopType === 'Porcentaje') {
@@ -1822,6 +1831,21 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                 trades.push({ type: pos.side === 1 ? 'Long' : 'Short', entryTs: parseInt(bars1m[pos.entryBarIdx][0]), exitTs: ts, entryPrice: pos.entry, exitPrice, tp: pos.tp, sl: pos.sl, pnlPerc: (pnlAbs / pos.capitalAtEntry) * 100, pnlAbs, reason: exitReason, capital, oiSlope: pos.oiSlope, topRatio: pos.topRatio, globalRatio: pos.globalRatio });
                 lastClosedBarIdx = i;
                 posiciones.splice(j, 1);
+            } else if (p.useBreakeven && !pos.beAplicado) {
+                // Disparo del breakeven: si la vela avanzó el % de trigger a favor, mover el
+                // stop a entrada ± offset (el offset cubre comisión + slippage de ida y vuelta).
+                // Rige recién desde la PRÓXIMA vela: dentro de una vela 1m no se sabe si el
+                // extremo favorable ocurrió antes o después del retroceso, así que asumir
+                // disparo-y-salida en la misma vela sería look-ahead optimista.
+                const disparo = pos.side === 1
+                    ? high >= pos.entry * (1 + p.breakevenTrigger / 100)
+                    : low  <= pos.entry * (1 - p.breakevenTrigger / 100);
+                if (disparo) {
+                    pos.beAplicado = true;
+                    pos.sl = pos.side === 1
+                        ? pos.entry * (1 + p.breakevenOffset / 100)
+                        : pos.entry * (1 - p.breakevenOffset / 100);
+                }
             }
         }
 
@@ -3497,6 +3521,9 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             tpPerc:            parseFloat(req.body.tpPerc)  || 0.5,
             stopType:          (() => { const t = req.body.stopType || 'Porcentaje'; return (t === 'Ruptura EMA 200' || t === 'Ruptura EMA 500') ? 'Ruptura EMA' : t; })(),
             slPerc:            parseFloat(req.body.slPerc)  || 1.0,
+            useBreakeven:      req.body.useBreakeven === true,
+            breakevenTrigger:  Number.isFinite(parseFloat(req.body.breakevenTrigger)) ? parseFloat(req.body.breakevenTrigger) : 0.3,
+            breakevenOffset:   Number.isFinite(parseFloat(req.body.breakevenOffset))  ? parseFloat(req.body.breakevenOffset)  : 0.12,
             stopEMAs:          (() => {
                 const t = req.body.stopType;
                 if (t === 'Ruptura EMA 200') return [{ period:200, tf:'1m' }, { period:200, tf:'1m' }];
@@ -3576,6 +3603,11 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             fundingPerc:          Number.isFinite(parseFloat(req.body.fundingPerc))   ? parseFloat(req.body.fundingPerc)   : 0.01,
             initialCapital:       parseFloat(req.body.initialCapital) || 1000,
         };
+        // Un offset >= trigger pondría el stop de breakeven en o por encima del precio de
+        // disparo: la posición cerraría casi seguro en la vela siguiente. Configuración inválida.
+        if (p.useBreakeven && p.breakevenOffset >= p.breakevenTrigger) {
+            return res.status(400).json({ error: 'Breakeven: el offset debe ser menor que el % de disparo.' });
+        }
         const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 365);
         const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
         // Fuente de velas: 'bd' (cache local, default) o 'binance' (descarga en vivo).

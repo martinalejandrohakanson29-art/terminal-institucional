@@ -1125,8 +1125,9 @@
                 const exitDot = 3;
                 const exitC = reason === 'TP'  ? '#26a69a'
                             : reason === 'SL'  ? '#ef5350'
+                            : reason === 'BE'  ? '#00acc1'
                             : reason === 'EMA' ? '#ff9800' : '#94a3b8';
-                const exitY = reason === 'TP' ? yTP : reason === 'SL' ? ySL : coordinates[1].y;
+                const exitY = reason === 'TP' ? yTP : (reason === 'SL' || reason === 'BE') ? ySL : coordinates[1].y;
                 return [
                     // Triángulo entrada — violeta
                     { type: 'polygon', ignoreEvent: true, attrs: { coordinates: tri },
