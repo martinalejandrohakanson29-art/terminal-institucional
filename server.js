@@ -2933,6 +2933,49 @@ app.put('/api/wspp-config', autenticar, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Endpoint de test WSPP: dispara una notificación de prueba usando la config guardada del usuario.
+app.post('/api/wspp-test', autenticar, async (req, res) => {
+    try {
+        const r = await pool.query(
+            'SELECT estrategia, webhook_url, telefono FROM wspp_notificaciones WHERE usuario_id=$1 AND activo=true',
+            [req.usuario.id]
+        );
+        const cfg = r.rows[0];
+        if (!cfg) return res.status(400).json({ error: 'No hay configuración activa de WSPP.' });
+        if (!cfg.webhook_url) return res.status(400).json({ error: 'Falta la Webhook URL.' });
+        if (!cfg.telefono) return res.status(400).json({ error: 'Falta el número de WhatsApp.' });
+
+        const payload = {
+            estrategia: cfg.estrategia,
+            tipo_senal: 'compra',
+            telefono:   cfg.telefono,
+            simbolo:    'BTCUSDT',
+            precio:     95000,
+            timestamp:  Date.now(),
+            prueba:     true,
+        };
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        try {
+            const resp = await fetch(cfg.webhook_url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+            if (!resp.ok) return res.status(502).json({ error: `Webhook respondió ${resp.status}` });
+        } catch (fetchErr) {
+            clearTimeout(timeoutId);
+            return res.status(502).json({ error: 'No se pudo conectar al webhook: ' + fetchErr.message });
+        }
+
+        console.log(`[WSPP] Prueba enviada → ${cfg.telefono} (${cfg.estrategia})`);
+        res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Endpoint de test: ejecuta una orden real en la cuenta (testnet) del propio usuario.
 // Con `prueba:true` arma una entrada de verificación: usa el precio actual de mercado,
 // TP/SL bien cortos (±0.15%) para que se gatille rápido, y una qty mínima que respeta

@@ -3237,6 +3237,27 @@
             }
         }
 
+        async function probarWspp() {
+            const msgEl = document.getElementById('wspp-msg');
+            const btn   = document.getElementById('wspp-btn-prueba');
+            btn.disabled = true;
+            btn.textContent = '⏳ Enviando…';
+            msgEl.style.display = 'none';
+            try {
+                const r = await fetch('/api/wspp-test', { method: 'POST', credentials: 'same-origin' });
+                const data = await r.json();
+                if (!r.ok) throw new Error(data.error || 'Error desconocido');
+                msgEl.style.cssText = 'display:block;background:#f0fdf4;border:1px solid #86efac;color:#16a34a;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;';
+                msgEl.textContent = '✓ Mensaje de prueba enviado. Revisá tu WhatsApp.';
+            } catch (e) {
+                msgEl.style.cssText = 'display:block;background:#fef2f2;border:1px solid #fca5a5;color:#dc2626;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;';
+                msgEl.textContent = 'Error: ' + e.message;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '📨 Prueba';
+            }
+        }
+
         async function desactivarWspp() {
             try {
                 const cfg = wsppConfig || {};
@@ -3345,6 +3366,11 @@
                 <div style="font-size:11px;color:#64748b;line-height:1.5;">Cuando la estrategia genere la señal configurada, el terminal llamará a este webhook con los datos de la señal. n8n se encarga de enviar el mensaje por WhatsApp vía EvolutionAPI.</div>
             </div>
 
+            <div style="display:flex;gap:10px;margin-bottom:10px;">
+                <button id="wspp-btn-prueba" onclick="probarWspp()" style="flex:1;padding:10px;border:1px solid #f59e0b;border-radius:6px;font-size:13px;background:#fff;color:#b45309;cursor:pointer;font-weight:bold;">
+                    📨 Prueba
+                </button>
+            </div>
             <div style="display:flex;gap:10px;">
                 <button onclick="desactivarWspp()" style="flex:1;padding:10px;border:1px solid #ef5350;border-radius:6px;font-size:13px;background:#fff;color:#ef5350;cursor:pointer;font-weight:bold;">
                     ⏹ Desactivar
