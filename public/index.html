@@ -3168,7 +3168,7 @@
             try {
                 const r = await fetch('/api/estrategias', { credentials: 'same-origin' });
                 const data = await r.json();
-                const lista = data.estrategias || [];
+                const lista = Array.isArray(data) ? data : (data.estrategias || []);
                 sel.innerHTML = '<option value="">— Elegir estrategia —</option>'
                     + lista.map(e => `<option value="${e.nombre.replace(/"/g,'&quot;')}">${e.nombre}</option>`).join('');
             } catch (_) {}
