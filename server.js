@@ -179,6 +179,18 @@ async function inicializarBaseDeDatos() {
         );
         INSERT INTO auto_trading_config (id) VALUES (1) ON CONFLICT DO NOTHING;
     `;
+    const queryTablaWspp = `
+        CREATE TABLE IF NOT EXISTS wspp_notificaciones (
+            id           SERIAL PRIMARY KEY,
+            usuario_id   INTEGER REFERENCES usuarios(id) ON DELETE CASCADE,
+            estrategia   VARCHAR(100) NOT NULL,
+            tipo_senal   VARCHAR(20)  NOT NULL DEFAULT 'compra',
+            webhook_url  TEXT,
+            activo       BOOLEAN      NOT NULL DEFAULT false,
+            actualizado_en TIMESTAMP  DEFAULT NOW(),
+            UNIQUE(usuario_id)
+        );
+    `;
 
     try {
         await pool.query(queryTablaBallenas);
@@ -190,6 +202,7 @@ async function inicializarBaseDeDatos() {
         await pool.query(queryTablaConfigUsuario);
         await pool.query(queryTablaEstrategias);
         await pool.query(queryTablaAutoTrading);
+        await pool.query(queryTablaWspp);
 
         await pool.query(`
             DO $$ BEGIN
@@ -280,6 +293,9 @@ async function inicializarBaseDeDatos() {
         `);
         // account_id en auto_trading_entradas para separar entradas por cuenta (= usuario_id).
         await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS account_id INTEGER`);
+        await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS telefono VARCHAR(30)`);
+        await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_enviada VARCHAR(10)`);
+        await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_ts BIGINT`);
 
         await pool.query(`INSERT INTO configuracion (clave, valor) VALUES ('limite_bd', 1.0) ON CONFLICT (clave) DO NOTHING`);
 
@@ -2779,6 +2795,16 @@ setTimeout(async () => {
         ejecutarAutoTrading();
         setInterval(ejecutarAutoTrading, 60 * 1000);
     }, msToNextClose);
+
+}, 5000);
+
+// Notificaciones WhatsApp: bloque independiente, alineado al cierre de vela (+2 s)
+setTimeout(() => {
+    const msToNextCloseWspp = 60000 - (Date.now() % 60000) + 2000;
+    setTimeout(() => {
+        tickWsppNotificaciones();
+        setInterval(tickWsppNotificaciones, 60 * 1000);
+    }, msToNextCloseWspp);
 }, 5000);
 
 // ── Endpoints de Auto-Trading (per-usuario; alias de /api/mi-cuenta para la UI actual) ──
@@ -2873,6 +2899,37 @@ app.get('/api/admin/autotrading', autenticar, soloAdmin, async (req, res) => {
              ORDER BY u.username ASC`
         );
         res.json(r.rows);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Notificaciones WhatsApp ───────────────────────────────────────────────────
+app.get('/api/wspp-config', autenticar, async (req, res) => {
+    try {
+        const r = await pool.query(
+            'SELECT estrategia, tipo_senal, webhook_url, telefono, activo, ultima_senal_enviada, ultima_senal_ts FROM wspp_notificaciones WHERE usuario_id=$1',
+            [req.usuario.id]
+        );
+        res.json(r.rows[0] || null);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/wspp-config', autenticar, async (req, res) => {
+    const { estrategia, tipo_senal, webhook_url, telefono, activo } = req.body;
+    if (activo && !estrategia) return res.status(400).json({ error: 'Seleccioná una estrategia' });
+    try {
+        await pool.query(
+            `INSERT INTO wspp_notificaciones (usuario_id, estrategia, tipo_senal, webhook_url, telefono, activo, actualizado_en)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW())
+             ON CONFLICT (usuario_id) DO UPDATE SET
+                estrategia     = EXCLUDED.estrategia,
+                tipo_senal     = EXCLUDED.tipo_senal,
+                webhook_url    = EXCLUDED.webhook_url,
+                telefono       = EXCLUDED.telefono,
+                activo         = EXCLUDED.activo,
+                actualizado_en = NOW()`,
+            [req.usuario.id, estrategia || null, tipo_senal || 'compra', webhook_url || null, telefono || null, activo !== false]
+        );
+        res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -3263,6 +3320,104 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         signal, timestamp: ts, entry: close, tp, sl,
         indicadores: { rsi15: rsiVal, rsiTf: rsiTf_sn, macd5, macdTf: macdTf_sn, adx: adxValue, adxTf: adxTf_sn, vwap: vwapVal_sn, vwapTf: vwapTf_sn, emaAngSlope: emaAngSlope_sn, emaAngTf: emaAngTf_sn, oiSlope: oiSlope_sn, topRatio: topRatioVal_sn, topSlope: topSlopeVal_sn, globalRatio: globRatioVal_sn, cvdSlope: cvdSlope_sn, horarioOk, above, below, nearEMA, deltaRolling, whaleDelta, alignVals }
     };
+}
+
+// ── Ticker de Notificaciones WhatsApp ─────────────────────────────────────
+async function tickWsppNotificaciones() {
+    try {
+        const cfgs = await pool.query(
+            `SELECT w.id, w.usuario_id, w.estrategia, w.tipo_senal,
+                    w.webhook_url, w.telefono, w.ultima_senal_enviada
+             FROM wspp_notificaciones w
+             WHERE w.activo = true
+               AND w.webhook_url IS NOT NULL AND w.webhook_url <> ''
+               AND w.telefono    IS NOT NULL AND w.telefono    <> ''`
+        );
+        if (!cfgs.rows.length) return;
+
+        const [bars1m, bars5m, bars15m] = await Promise.all([
+            fetchKlinesBatch('1m', 6000),
+            fetchKlinesBatch('5m', 800),
+            fetchKlinesBatch('15m', 800),
+        ]);
+
+        for (const cfg of cfgs.rows) {
+            try {
+                const stratRes = await pool.query(
+                    'SELECT params FROM estrategias_guardadas WHERE usuario_id=$1 AND nombre=$2',
+                    [cfg.usuario_id, cfg.estrategia]
+                );
+                if (!stratRes.rows.length) continue;
+                const p = stratRes.rows[0].params;
+
+                const [whaleRes, oiRes, lsRes] = await Promise.all([
+                    pool.query(
+                        `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
+                         FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 ORDER BY fecha ASC`,
+                        [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5]
+                    ),
+                    p.useOIFilter
+                        ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC', [((parseInt(p.oiLookbackMin) || 30) + 10) * 60])
+                        : Promise.resolve({ rows: [] }),
+                    (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
+                        ? pool.query('SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC', [Math.max(1800, ((parseInt(p.topSlopeLookbackMin) || 15) + 10) * 60)])
+                        : Promise.resolve({ rows: [] }),
+                ]);
+
+                const resultado = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows, lsRes.rows);
+                const signal = resultado.signal; // 'long' | 'short' | null
+
+                if (!signal) {
+                    if (cfg.ultima_senal_enviada) {
+                        await pool.query('UPDATE wspp_notificaciones SET ultima_senal_enviada=NULL WHERE id=$1', [cfg.id]);
+                    }
+                    continue;
+                }
+
+                const tipoSenal = signal === 'long' ? 'compra' : 'venta';
+                const debeNotificar = cfg.tipo_senal === 'ambas' || cfg.tipo_senal === tipoSenal;
+                if (!debeNotificar) continue;
+
+                // Dedup: no re-notificar mientras la señal sea la misma
+                if (cfg.ultima_senal_enviada === signal) continue;
+
+                const payload = {
+                    estrategia: cfg.estrategia,
+                    tipo_senal: tipoSenal,
+                    telefono:   cfg.telefono,
+                    simbolo:    'BTCUSDT',
+                    precio:     resultado.entry,
+                    timestamp:  Date.now(),
+                };
+
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 8000);
+                try {
+                    const resp = await fetch(cfg.webhook_url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                        signal: controller.signal,
+                    });
+                    if (resp.ok || resp.status < 500) {
+                        await pool.query(
+                            'UPDATE wspp_notificaciones SET ultima_senal_enviada=$1, ultima_senal_ts=$2 WHERE id=$3',
+                            [signal, Date.now(), cfg.id]
+                        );
+                        console.log(`[WSPP] Notificación enviada: ${signal.toUpperCase()} — "${cfg.estrategia}" → ${cfg.telefono}`);
+                    } else {
+                        console.warn(`[WSPP] Webhook ${resp.status} para usuario ${cfg.usuario_id}`);
+                    }
+                } finally {
+                    clearTimeout(timer);
+                }
+            } catch (e) {
+                console.warn(`[WSPP] Error en config ${cfg.id}:`, e.message);
+            }
+        }
+    } catch (e) {
+        console.error('[WSPP] Error en ticker:', e.message);
+    }
 }
 
 app.get('/api/estrategia/signal', autenticar, async (req, res) => {

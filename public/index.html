@@ -337,6 +337,13 @@
                     <button onclick="abrirConfigAutoTrading()" style="height:22px;padding:0 6px;border:1px solid #d1d4dc;border-radius:4px;font-size:10px;background:#f8fafc;color:#64748b;cursor:pointer;" title="Configurar AutoBot">⚙</button>
                 </div>
 
+                <!-- Notificaciones WhatsApp -->
+                <div style="display:flex; align-items:center; gap:4px; border-left:2px solid #d1d4dc; margin-left:3px; padding-left:6px;">
+                    <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;">Notif</span>
+                    <span id="wspp-dot" style="width:7px;height:7px;border-radius:50%;background:#94a3b8;flex-shrink:0;" title="WhatsApp notificaciones"></span>
+                    <button onclick="abrirConfigWspp()" style="height:22px;padding:0 7px;border:1px solid #d1d4dc;border-radius:4px;font-size:10px;background:#f8fafc;color:#25D366;cursor:pointer;font-weight:bold;" title="Configurar notificaciones WhatsApp">📱 WSPP</button>
+                </div>
+
                 <!-- Navegación + acciones -->
                 <div style="display:flex; align-items:center; gap:3px; border-left:2px solid #d1d4dc; margin-left:3px; padding-left:5px;">
                     <a href="/estrategias" class="btn-tiempo" style="text-decoration:none;">Backtest</a>
@@ -2981,6 +2988,9 @@
                 setInterval(actualizarStatusAutoTrading, 30000);
             }
 
+            // Notificaciones WhatsApp: restaurar estado del dot al cargar
+            await cargarEstadoWspp();
+
             // RSI 15m: carga inicial + websocket
             await cargarVelas15m();
             iniciarSocket15m();
@@ -3137,6 +3147,111 @@
             }
         }
 
+        // ---- Notificaciones WhatsApp ----
+        let wsppConfig = null;
+
+        async function cargarEstadoWspp() {
+            try {
+                const r = await fetch('/api/wspp-config', { credentials: 'same-origin' });
+                if (!r.ok) return;
+                wsppConfig = await r.json();
+                document.getElementById('wspp-dot').style.background =
+                    wsppConfig && wsppConfig.activo ? '#25D366' : '#94a3b8';
+            } catch (_) {}
+        }
+
+        async function abrirConfigWspp() {
+            const sel     = document.getElementById('wspp-strat-sel');
+            const msgEl   = document.getElementById('wspp-msg');
+            msgEl.style.display = 'none';
+
+            try {
+                const r = await fetch('/api/estrategias', { credentials: 'same-origin' });
+                const data = await r.json();
+                const lista = data.estrategias || [];
+                sel.innerHTML = '<option value="">— Elegir estrategia —</option>'
+                    + lista.map(e => `<option value="${e.nombre.replace(/"/g,'&quot;')}">${e.nombre}</option>`).join('');
+            } catch (_) {}
+
+            // Precargar config guardada
+            await cargarEstadoWspp();
+            const ultimoEl = document.getElementById('wspp-ultimo-envio');
+            if (wsppConfig) {
+                if (wsppConfig.estrategia) sel.value = wsppConfig.estrategia;
+                document.getElementById('wspp-signal-type').value = wsppConfig.tipo_senal  || 'compra';
+                document.getElementById('wspp-telefono').value    = wsppConfig.telefono    || '';
+                document.getElementById('wspp-webhook-url').value  = wsppConfig.webhook_url || '';
+
+                if (wsppConfig.ultima_senal_ts) {
+                    const ts = new Date(parseInt(wsppConfig.ultima_senal_ts));
+                    const hora = ts.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' });
+                    const fecha = ts.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' });
+                    const senal = wsppConfig.ultima_senal_enviada === 'long' ? '🟢 COMPRA' : '🔴 VENTA';
+                    ultimoEl.style.display = 'block';
+                    ultimoEl.innerHTML = `Último envío: <strong>${senal}</strong> · ${fecha} ${hora} (ARG)`;
+                } else {
+                    ultimoEl.style.display = 'none';
+                }
+            } else {
+                ultimoEl.style.display = 'none';
+            }
+
+            document.getElementById('modal-wspp-overlay').style.display = 'flex';
+        }
+
+        function cerrarConfigWspp() {
+            document.getElementById('modal-wspp-overlay').style.display = 'none';
+        }
+
+        async function guardarConfigWspp() {
+            const estrategia   = document.getElementById('wspp-strat-sel').value;
+            const tipo_senal   = document.getElementById('wspp-signal-type').value;
+            const telefono     = document.getElementById('wspp-telefono').value.trim();
+            const webhook_url  = document.getElementById('wspp-webhook-url').value.trim();
+            const msgEl        = document.getElementById('wspp-msg');
+
+            if (!estrategia) {
+                msgEl.style.cssText = 'display:block;background:#fef2f2;border:1px solid #fca5a5;color:#dc2626;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;';
+                msgEl.textContent = 'Seleccioná una estrategia.';
+                return;
+            }
+
+            try {
+                const r = await fetch('/api/wspp-config', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ estrategia, tipo_senal, telefono, webhook_url, activo: true })
+                });
+                if (!r.ok) throw new Error((await r.json()).error);
+
+                wsppConfig = { estrategia, tipo_senal, telefono, webhook_url, activo: true };
+                document.getElementById('wspp-dot').style.background = '#25D366';
+
+                msgEl.style.cssText = 'display:block;background:#f0fdf4;border:1px solid #86efac;color:#16a34a;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;';
+                msgEl.textContent = `✓ Notificaciones activadas para "${estrategia}".`;
+                setTimeout(() => cerrarConfigWspp(), 1400);
+            } catch (e) {
+                msgEl.style.cssText = 'display:block;background:#fef2f2;border:1px solid #fca5a5;color:#dc2626;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;';
+                msgEl.textContent = 'Error: ' + e.message;
+            }
+        }
+
+        async function desactivarWspp() {
+            try {
+                const cfg = wsppConfig || {};
+                await fetch('/api/wspp-config', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ estrategia: cfg.estrategia || '', tipo_senal: cfg.tipo_senal || 'compra', webhook_url: cfg.webhook_url || '', activo: false })
+                });
+            } catch (_) {}
+            wsppConfig = null;
+            document.getElementById('wspp-dot').style.background = '#94a3b8';
+            cerrarConfigWspp();
+        }
+
     </script>
 
     <!-- Modal Auto-Trading Config -->
@@ -3187,6 +3302,57 @@
                 </button>
             </div>
             <div style="margin-top:12px;font-size:10px;color:#94a3b8;text-align:center;">Tu cuenta · Testnet Binance Futures · Evalúa cada 60s</div>
+        </div>
+    </div>
+
+    <!-- Modal Notificaciones WhatsApp -->
+    <div id="modal-wspp-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:4000;align-items:center;justify-content:center;" onclick="if(event.target===this)cerrarConfigWspp()">
+        <div style="background:#fff;border-radius:10px;padding:26px;width:360px;box-shadow:0 10px 40px rgba(0,0,0,0.2);" onclick="event.stopPropagation()">
+
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
+                <h3 style="font-size:15px;margin:0;">📱 Notificaciones WhatsApp</h3>
+                <button onclick="cerrarConfigWspp()" style="background:none;border:none;cursor:pointer;font-size:20px;color:#94a3b8;line-height:1;padding:0;">×</button>
+            </div>
+
+            <div id="wspp-msg" style="display:none;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;"></div>
+
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Estrategia a monitorear</label>
+            <select id="wspp-strat-sel" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;background:#f8fafc;box-sizing:border-box;">
+                <option value="">— Elegir estrategia —</option>
+            </select>
+
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Notificar cuando</label>
+            <select id="wspp-signal-type" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:16px;background:#f8fafc;box-sizing:border-box;">
+                <option value="compra">🟢 Señal de compra</option>
+                <option value="venta">🔴 Señal de venta</option>
+                <option value="ambas">⚡ Compra y venta</option>
+            </select>
+
+            <!-- Teléfono destino -->
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">WhatsApp destino</label>
+            <input type="tel" id="wspp-telefono" placeholder="+549 11 1234-5678" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;box-sizing:border-box;" />
+
+            <!-- Webhook n8n -->
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Webhook URL <span style="font-weight:normal;color:#94a3b8;">(n8n)</span></label>
+            <input type="url" id="wspp-webhook-url" placeholder="https://tu-n8n.com/webhook/..." style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:12px;margin-bottom:16px;box-sizing:border-box;background:#f8fafc;" />
+
+            <!-- Estado último envío -->
+            <div id="wspp-ultimo-envio" style="display:none;border:1px solid #e5e7eb;border-radius:8px;padding:10px 12px;margin-bottom:14px;background:#fafafa;font-size:11px;color:#64748b;"></div>
+
+            <!-- Bloque integración -->
+            <div style="border:1px solid #dcfce7;border-radius:8px;padding:12px;margin-bottom:18px;background:#f0fdf4;">
+                <div style="font-size:11px;font-weight:bold;color:#16a34a;margin-bottom:4px;">n8n + EvolutionAPI</div>
+                <div style="font-size:11px;color:#64748b;line-height:1.5;">Cuando la estrategia genere la señal configurada, el terminal llamará a este webhook con los datos de la señal. n8n se encarga de enviar el mensaje por WhatsApp vía EvolutionAPI.</div>
+            </div>
+
+            <div style="display:flex;gap:10px;">
+                <button onclick="desactivarWspp()" style="flex:1;padding:10px;border:1px solid #ef5350;border-radius:6px;font-size:13px;background:#fff;color:#ef5350;cursor:pointer;font-weight:bold;">
+                    ⏹ Desactivar
+                </button>
+                <button onclick="guardarConfigWspp()" style="flex:1;padding:10px;border:none;border-radius:6px;font-size:13px;background:#25D366;color:#fff;cursor:pointer;font-weight:bold;">
+                    ✓ Activar
+                </button>
+            </div>
         </div>
     </div>
 

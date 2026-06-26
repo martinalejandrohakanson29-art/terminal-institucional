@@ -1,0 +1,114 @@
+{
+  "name": "Terminal Institucional – Notificaciones WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "terminal-senal",
+        "responseMode": "onReceived",
+        "responseData": "noData",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "a1f0e2b3-0001-4c00-8000-100000000001",
+      "name": "Webhook – Señal Terminal",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "a1f0e2b3-0001-4c00-8000-100000000001"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Payload esperado del Terminal Institucional:\n// {\n//   estrategia : string   (nombre de la estrategia)\n//   tipo_senal : string   ('compra' | 'venta')\n//   telefono   : string   (número WhatsApp destino, ej. '5493515280277' o '+549...' o '...@s.whatsapp.net')\n//   simbolo    : string   (ej. 'BTCUSDT')\n//   precio     : number   (precio al momento de la señal)\n//   timestamp  : number   (Unix ms)\n// }\n\nconst body = $input.first().json.body;\n\n// Normalizar número: quitar @s.whatsapp.net y espacios/guiones/+ si los hubiera\nconst telefonoRaw = (body.telefono || '').replace('@s.whatsapp.net', '').replace(/[\\s\\-\\+]/g, '');\n\nconst senal = (body.tipo_senal || 'compra').toLowerCase();\nconst emoji = senal === 'venta' ? '🔴' : '🟢';\nconst tipo  = senal === 'venta' ? 'VENTA' : 'COMPRA';\n\nconst fecha = new Date(body.timestamp || Date.now());\nconst opciones = { timeZone: 'America/Argentina/Buenos_Aires' };\nconst hora = fecha.toLocaleTimeString('es-AR', { ...opciones, hour: '2-digit', minute: '2-digit' });\nconst fechaStr = fecha.toLocaleDateString('es-AR', { ...opciones, day: '2-digit', month: '2-digit', year: '2-digit' });\n\nconst precio = Number(body.precio || 0)\n  .toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n\nconst texto =\n  `${emoji} *SEÑAL DE ${tipo}*\\n` +\n  `━━━━━━━━━━━━━━\\n` +\n  `📌 *Estrategia:* ${body.estrategia || '—'}\\n` +\n  `📊 *Símbolo:* ${body.simbolo || 'BTCUSDT'}\\n` +\n  `💵 *Precio:* $${precio}\\n` +\n  `🕐 *${fechaStr} ${hora} (ARG)*\\n\\n` +\n  `_Terminal Institucional_`;\n\nreturn [{ json: { telefono: telefonoRaw, texto } }];"
+      },
+      "id": "a1f0e2b3-0002-4c00-8000-100000000002",
+      "name": "Formatear Mensaje",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://evo-r6g3c98f82vdigtfjnl2pxlw.187.77.224.120.sslip.io:8080/message/sendText/revolucionmotos1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "B7F9C7FE50E4-41C9-B35A-3E5A9A905C51"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "keypairs",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{ $json.telefono }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.texto }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1f0e2b3-0003-4c00-8000-100000000003",
+      "name": "Enviar WhatsApp – EvolutionAPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300]
+    }
+  ],
+  "connections": {
+    "Webhook – Señal Terminal": {
+      "main": [
+        [
+          {
+            "node": "Formatear Mensaje",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatear Mensaje": {
+      "main": [
+        [
+          {
+            "node": "Enviar WhatsApp – EvolutionAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a1f0e2b3-ffff-4c00-8000-100000000000",
+  "meta": {
+    "instanceId": "terminal-institucional",
+    "templateCredsSetupCompleted": true
+  },
+  "id": "terminal-wspp-001",
+  "tags": [
+    {
+      "name": "terminal",
+      "createdAt": "2026-06-26T00:00:00.000Z",
+      "updatedAt": "2026-06-26T00:00:00.000Z"
+    },
+    {
+      "name": "whatsapp",
+      "createdAt": "2026-06-26T00:00:00.000Z",
+      "updatedAt": "2026-06-26T00:00:00.000Z"
+    }
+  ]
+}
