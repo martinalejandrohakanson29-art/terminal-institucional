@@ -39,23 +39,17 @@
             {
               "name": "apikey",
               "value": "B7F9C7FE50E4-41C9-B35A-3E5A9A905C51"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
             }
           ]
         },
         "sendBody": true,
-        "specifyBody": "keypairs",
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "number",
-              "value": "={{ $json.telefono }}"
-            },
-            {
-              "name": "text",
-              "value": "={{ $json.texto }}"
-            }
-          ]
-        },
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $json.telefono, text: $json.texto }) }}",
         "options": {}
       },
       "id": "a1f0e2b3-0003-4c00-8000-100000000003",
