@@ -1654,6 +1654,23 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         }
     }
 
+    // EMA de Tendencia — sesgo direccional: precio arriba de la EMA habilita long, debajo
+    // habilita short. Temporalidad propia (incluye 1h vía agregarVelas1m, igual que ADX).
+    const useEmaTrendFilter = p.useEmaTrendFilter === true;
+    const emaTrendTf  = p.emaTrendTf  || '1h';
+    const emaTrendLen = p.emaTrendLen || 21;
+    let emaTrendDirect = null, emaTrendByTs = null, tsEmaTrend = null;
+    if (useEmaTrendFilter) {
+        if (emaTrendTf === '1m') {
+            emaTrendDirect = calcEMA(c1m, emaTrendLen);
+        } else {
+            const barsTrend = emaTrendTf === '5m' ? bars5m : emaTrendTf === '15m' ? bars15m : agregarVelas1m(bars1m, 3600000);
+            const arr = calcEMA(barsTrend.map(b => parseFloat(b[4])), emaTrendLen);
+            emaTrendByTs = new Map(barsTrend.map((b, i) => [parseInt(b[6]), arr[i]]));
+            tsEmaTrend   = barsTrend.map(b => parseInt(b[6])).sort((a, b) => a - b);
+        }
+    }
+
     // VWAP — configurable timeframe y sesión
     const vwapTf_bt      = p.vwapTf      || '5m';
     const vwapSession_bt = p.vwapSession || 'daily';
@@ -1942,6 +1959,12 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                 const emaAngOkLong  = !useEmaAngFilter || (emaAngSlope !== null && emaAngSlope >=  emaAngGate);
                 const emaAngOkShort = !useEmaAngFilter || (emaAngSlope !== null && emaAngSlope <= -emaAngGate);
 
+                // EMA de Tendencia — sesgo direccional según la posición del precio respecto a la EMA
+                const emaTrendVal = !useEmaTrendFilter ? null
+                    : emaTrendTf === '1m' ? emaTrendDirect[i] : lookupHTF(tsEmaTrend, emaTrendByTs, tsClose);
+                const emaTrendOkLong  = !useEmaTrendFilter || (emaTrendVal !== null && close > emaTrendVal);
+                const emaTrendOkShort = !useEmaTrendFilter || (emaTrendVal !== null && close < emaTrendVal);
+
                 // Open Interest — confirma que el OI viene subiendo (dinero nuevo). Aplica a ambos lados.
                 let oiOk = !useOIFilter, oiSlopeVal = null;
                 if (useOIFilter && oiTs) {
@@ -1974,7 +1997,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                 const cvdOkLong  = !useCVDFilter || (cvdSlope !== null && cvdSlope > 0);
                 const cvdOkShort = !useCVDFilter || (cvdSlope !== null && cvdSlope < 0);
 
-                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong && emaAngOkLong && oiOk && topOkLong && retailOkLong && topSlopeOkLong && cvdOkLong) {
+                if (p.enableLongs && above && alignLong && (!useRsiFilter || rsiVal >= rsiLongMin) && (!useMacdFilter || macd5 > sig5) && pullOK && deltaOkLong && whaleOkLong && adxOk && vwapOkLong && emaAngOkLong && emaTrendOkLong && oiOk && topOkLong && retailOkLong && topSlopeOkLong && cvdOkLong) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -1982,7 +2005,7 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                         const sl = p.stopType === 'Porcentaje' ? close * (1 - p.slPerc / 100) : (stopEmaVals.length ? Math.max(...stopEmaVals) : close * 0.99);
                         posiciones.push({ side: 1, entry: close, entryBarIdx: i, tp, sl, capitalAtEntry: capEntrada, oiSlope: oiSlopeVal, topRatio: topRatioVal, globalRatio: globRatioVal });
                     }
-                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort && oiOk && topOkShort && retailOkShort && topSlopeOkShort && cvdOkShort) {
+                } else if (p.enableShorts && below && alignShort && (!useRsiFilter || rsiVal <= rsiShortMax) && (!useMacdFilter || macd5 < sig5) && pullOK && deltaOkShort && whaleOkShort && adxOk && vwapOkShort && emaAngOkShort && emaTrendOkShort && oiOk && topOkShort && retailOkShort && topSlopeOkShort && cvdOkShort) {
                     const capEntrada = calcCapitalEntrada(p, capital, posiciones);
                     if (capEntrada <= 0) { /* sin capital disponible, no entrar */ }
                     else {
@@ -3143,6 +3166,22 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         }
     }
 
+    // EMA de Tendencia — sesgo direccional (idéntico al backtest)
+    const useEmaTrendFilter_sn = p.useEmaTrendFilter === true;
+    const emaTrendTf_sn  = p.emaTrendTf  || '1h';
+    const emaTrendLen_sn = p.emaTrendLen || 21;
+    let emaTrendSnDirect = null, emaTrendSnByTs = null, emaTrendSnTs = null;
+    if (useEmaTrendFilter_sn) {
+        if (emaTrendTf_sn === '1m') {
+            emaTrendSnDirect = calcEMA(c1m, emaTrendLen_sn);
+        } else {
+            const barsTrend_sn = emaTrendTf_sn === '5m' ? bars5m : emaTrendTf_sn === '15m' ? bars15m : agregarVelas1m(bars1m, 3600000);
+            const arr = calcEMA(barsTrend_sn.map(b => parseFloat(b[4])), emaTrendLen_sn);
+            emaTrendSnByTs = new Map(barsTrend_sn.map((b, i) => [parseInt(b[6]), arr[i]]));
+            emaTrendSnTs   = [...emaTrendSnByTs.keys()].sort((a, b) => a - b);
+        }
+    }
+
     // VWAP — configurable timeframe y sesión
     const vwapTf_sn      = p.vwapTf      || '5m';
     const vwapSession_sn = p.vwapSession || 'daily';
@@ -3283,6 +3322,12 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const emaAngOkLong_sn  = !useEmaAngFilter_sn || (emaAngSlope_sn !== null && emaAngSlope_sn >=  emaAngGate_sn);
     const emaAngOkShort_sn = !useEmaAngFilter_sn || (emaAngSlope_sn !== null && emaAngSlope_sn <= -emaAngGate_sn);
 
+    // EMA de Tendencia — sesgo direccional según la posición del precio respecto a la EMA
+    const emaTrendVal_sn = !useEmaTrendFilter_sn ? null
+        : emaTrendTf_sn === '1m' ? emaTrendSnDirect[i] : lookupHTF(emaTrendSnTs, emaTrendSnByTs, tsClose);
+    const emaTrendOkLong_sn  = !useEmaTrendFilter_sn || (emaTrendVal_sn !== null && close > emaTrendVal_sn);
+    const emaTrendOkShort_sn = !useEmaTrendFilter_sn || (emaTrendVal_sn !== null && close < emaTrendVal_sn);
+
     // Open Interest — confirma que el OI viene subiendo (idéntico al backtest). Aplica a ambos lados.
     const useOIFilter_sn = p.useOIFilter === true;
     const oiLookbackMs_sn = (p.oiLookbackMin || 30) * 60000;
@@ -3342,9 +3387,9 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const topSlopeOkShort_sn = !useTopSlopeFilter_sn || (topSlopeVal_sn !== null && topSlopeVal_sn < -(p.topSlopeMin ?? 0));
 
     let signal = null;
-    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn && emaAngOkLong_sn && oiOk_sn && topOkLong_sn && retailOkLong_sn && topSlopeOkLong_sn && cvdOkLong_sn)
+    if (p.enableLongs !== false && horarioOk && above && alignLong && (!useRsiFilter_sn || rsiVal >= rsiLongMin_sn) && (!useMacdFilter_sn || macd5 > sig5) && nearEMA && deltaOkLong && whaleOkLong && adxOk && vwapOkLong_sn && emaAngOkLong_sn && emaTrendOkLong_sn && oiOk_sn && topOkLong_sn && retailOkLong_sn && topSlopeOkLong_sn && cvdOkLong_sn)
         signal = 'long';
-    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn && emaAngOkShort_sn && oiOk_sn && topOkShort_sn && retailOkShort_sn && topSlopeOkShort_sn && cvdOkShort_sn)
+    else if (p.enableShorts !== false && horarioOk && below && alignShort && (!useRsiFilter_sn || rsiVal <= rsiShortMax_sn) && (!useMacdFilter_sn || macd5 < sig5) && nearEMA && deltaOkShort && whaleOkShort && adxOk && vwapOkShort_sn && emaAngOkShort_sn && emaTrendOkShort_sn && oiOk_sn && topOkShort_sn && retailOkShort_sn && topSlopeOkShort_sn && cvdOkShort_sn)
         signal = 'short';
 
     const tpPerc = p.tpPerc ?? 0.5;
@@ -3807,6 +3852,9 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             useADXFilter:        req.body.useADXFilter === true,
             adxTf:               ['1m','5m','15m','1h'].includes(req.body.adxTf) ? req.body.adxTf : '15m',
             adxThreshold:        parseInt(req.body.adxThreshold) || 25,
+            useEmaTrendFilter:   req.body.useEmaTrendFilter === true,
+            emaTrendTf:          ['1m','5m','15m','1h'].includes(req.body.emaTrendTf) ? req.body.emaTrendTf : '1h',
+            emaTrendLen:         parseInt(req.body.emaTrendLen) || 21,
             useVwapFilter:       req.body.useVwapFilter === true,
             vwapTf:              ['1m','5m','15m'].includes(req.body.vwapTf) ? req.body.vwapTf : '5m',
             vwapSession:         ['daily','weekly','monthly'].includes(req.body.vwapSession) ? req.body.vwapSession : 'daily',

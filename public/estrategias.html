@@ -557,6 +557,29 @@
                 </div>
             </div>
         </div>
+        <div class="form-section collapsible" data-ctrl="p-ema-trend">
+            <h3>EMA de Tendencia</h3>
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-ema-trend" class="form-check">
+                </div>
+                <div class="form-row">
+                    <label>Temporalidad</label>
+                    <select id="p-ema-trend-tf" class="form-select">
+                        <option value="1m">1m</option>
+                        <option value="5m">5m</option>
+                        <option value="15m">15m</option>
+                        <option value="1h" selected>1h</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>EMA Length</label>
+                    <input type="number" id="p-ema-trend-len" class="form-input" value="21" min="2" max="1000">
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">Precio arriba de la EMA → solo longs · debajo → solo shorts</div>
+            </div>
+        </div>
         <div class="form-section collapsible" data-ctrl="p-oi">
             <h3>Open Interest</h3>
             <div class="section-body">
@@ -976,6 +999,9 @@
             emaAngMinSlope:    numOrDefault('p-emaang-minslope', 0.25),
             emaAngStrongSlope: numOrDefault('p-emaang-strongslope', 0.60),
             emaAngMode:        document.getElementById('p-emaang-mode').value,
+            useEmaTrendFilter: document.getElementById('p-ema-trend').checked,
+            emaTrendTf:        document.getElementById('p-ema-trend-tf').value,
+            emaTrendLen:       parseInt(document.getElementById('p-ema-trend-len').value) || 21,
             useOIFilter:       document.getElementById('p-oi').checked,
             oiLookbackMin:     parseInt(document.getElementById('p-oi-lookback').value)  || 30,
             oiThreshold:       numOrDefault('p-oi-threshold', 0.5),
@@ -1202,6 +1228,7 @@
             { label: `MACD ${params.macdTf||'5m'}`, activo: params.useMacdFilter !== false, desc: `${params.macdFast||12}/${params.macdSlow||26}/${params.macdSignal||9}` },
             { label: `EMA∠ ${params.emaAngTf||'15m'}`, activo: params.useEmaAngFilter === true,
               desc: `EMA${params.emaAngLen||200} · ${params.emaAngMode==='strong'?`≥${params.emaAngStrongSlope??0.6}`:`≥${params.emaAngMinSlope??0.25}`} · ${params.emaAngSlopeBars||10}v/ATR${params.emaAngAtr||14}` },
+            { label: `EMA Tendencia ${params.emaTrendTf||'1h'}`, activo: params.useEmaTrendFilter === true, desc: `EMA${params.emaTrendLen||21}` },
             { label: 'Open Interest', activo: params.useOIFilter === true, desc: `↑≥${params.oiThreshold??0.5}% / ${params.oiLookbackMin||30}m` },
             { label: 'Top Traders',   activo: params.useTopTraderFilter === true, desc: `seguir · L/S ≥${params.topTraderRatio??1.05}` },
             { label: 'Retail (fade)', activo: params.useRetailFilter === true,    desc: `contrarian · extremo ${params.retailExtreme??2.0}` },
@@ -1414,6 +1441,9 @@
         document.getElementById('p-emaang-minslope').value     = p.emaAngMinSlope    ?? 0.25;
         document.getElementById('p-emaang-strongslope').value  = p.emaAngStrongSlope ?? 0.60;
         document.getElementById('p-emaang-mode').value         = p.emaAngMode || 'min';
+        document.getElementById('p-ema-trend').checked     = p.useEmaTrendFilter === true;
+        document.getElementById('p-ema-trend-tf').value    = p.emaTrendTf  || '1h';
+        document.getElementById('p-ema-trend-len').value   = p.emaTrendLen || 21;
         document.getElementById('p-oi').checked            = !!p.useOIFilter;
         document.getElementById('p-oi-lookback').value     = p.oiLookbackMin ?? 30;
         document.getElementById('p-oi-threshold').value    = p.oiThreshold   ?? 0.5;
