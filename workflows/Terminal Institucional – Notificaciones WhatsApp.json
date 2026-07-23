@@ -1,0 +1,190 @@
+{
+  "name": "Terminal Institucional – Notificaciones WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "terminal-senal",
+        "options": {}
+      },
+      "id": "8807c548-73aa-41bd-8961-0eda914b7c31",
+      "name": "Webhook – Señal Terminal",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        1488,
+        368
+      ],
+      "webhookId": "a1f0e2b3-0001-4c00-8000-100000000001"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Payload esperado del Terminal Institucional:\n// {\n//   estrategia : string   (nombre de la estrategia)\n//   tipo_senal : string   ('compra' | 'venta')\n//   canal      : string   ('whatsapp' | 'discord')\n//   telefono   : string   (número WhatsApp destino, solo si canal='whatsapp')\n//   discord_webhook_url : string (URL del webhook de Discord, solo si canal='discord')\n//   simbolo    : string   (ej. 'BTCUSDT')\n//   precio     : number   (precio al momento de la señal)\n//   timestamp  : number   (Unix ms)\n// }\n\nconst body = $input.first().json.body;\nconst canal = (body.canal || 'whatsapp').toLowerCase() === 'discord' ? 'discord' : 'whatsapp';\n\n// Normalizar número: quitar @s.whatsapp.net y espacios/guiones/+ si los hubiera\nconst telefonoRaw = (body.telefono || '').replace('@s.whatsapp.net', '').replace(/[\\s\\-\\+]/g, '');\n\nconst senal = (body.tipo_senal || 'compra').toLowerCase();\nconst emoji = senal === 'venta' ? '🔴' : '🟢';\nconst tipo  = senal === 'venta' ? 'VENTA' : 'COMPRA';\n\nconst fecha = new Date(body.timestamp || Date.now());\nconst opciones = { timeZone: 'America/Argentina/Buenos_Aires' };\nconst hora = fecha.toLocaleTimeString('es-AR', { ...opciones, hour: '2-digit', minute: '2-digit' });\nconst fechaStr = fecha.toLocaleDateString('es-AR', { ...opciones, day: '2-digit', month: '2-digit', year: '2-digit' });\n\nconst precio = Number(body.precio || 0)\n  .toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n\n// WhatsApp usa *negrita*, Discord usa **negrita**\nconst b = canal === 'discord' ? '**' : '*';\n\nconst texto =\n  `${emoji} ${b}SEÑAL DE ${tipo}${b}\\n` +\n  `━━━━━━━━━━━━━━\\n` +\n  `📌 ${b}Estrategia:${b} ${body.estrategia || '—'}\\n` +\n  `📊 ${b}Símbolo:${b} ${body.simbolo || 'BTCUSDT'}\\n` +\n  `💵 ${b}Precio:${b} $${precio}\\n` +\n  `🕐 ${b}${fechaStr} ${hora} (ARG)${b}\\n\\n` +\n  `_Terminal Institucional_`;\n\nreturn [{ json: {\n  canal,\n  telefono: telefonoRaw,\n  discord_webhook_url: body.discord_webhook_url || '',\n  texto,\n} }];"
+      },
+      "id": "278ce882-5799-4aac-b69d-9f20d4808bab",
+      "name": "Formatear Mensaje",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1728,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b1e2c3d4-0001-4a00-8000-000000000001",
+              "leftValue": "={{ $json.canal }}",
+              "rightValue": "discord",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1e2c3d4-0002-4a00-8000-000000000002",
+      "name": "¿Canal = Discord?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1968,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.discord_webhook_url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.texto }) }}",
+        "options": {}
+      },
+      "id": "b1e2c3d4-0003-4a00-8000-000000000003",
+      "name": "Enviar Discord – Webhook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2208,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://evo-r6g3c98f82vdigtfjnl2pxlw.187.77.224.120.sslip.io/message/sendText/Nueva",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "B7F9C7FE50E4-41C9-B35A-3E5A9A905C51"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $json.telefono, text: $json.texto }) }}",
+        "options": {}
+      },
+      "id": "896f09ff-ba67-4f0e-a4ca-5f022691a9fe",
+      "name": "Enviar WhatsApp – EvolutionAPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2208,
+        496
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook – Señal Terminal": {
+      "main": [
+        [
+          {
+            "node": "Formatear Mensaje",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatear Mensaje": {
+      "main": [
+        [
+          {
+            "node": "¿Canal = Discord?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Canal = Discord?": {
+      "main": [
+        [
+          {
+            "node": "Enviar Discord – Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Enviar WhatsApp – EvolutionAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "de595e3a-d214-4adc-b222-965cac54b26c",
+  "meta": {
+    "instanceId": "1ffa4689379dbe5d3cafe19727d0deedbb35a5b0b2feb6e132aacd0e0feb3432"
+  },
+  "id": "O915fd3KUVu9qBrP",
+  "tags": [
+    {
+      "updatedAt": "2026-06-26T13:21:58.445Z",
+      "createdAt": "2026-06-26T13:21:58.445Z",
+      "id": "bFklveO1iuxZiX8E",
+      "name": "terminal"
+    },
+    {
+      "updatedAt": "2026-06-26T13:21:58.435Z",
+      "createdAt": "2026-06-26T13:21:58.435Z",
+      "id": "oBeczZIJlBjkRUC8",
+      "name": "whatsapp"
+    }
+  ]
+}

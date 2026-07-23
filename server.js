@@ -296,6 +296,9 @@ async function inicializarBaseDeDatos() {
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS telefono VARCHAR(30)`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_enviada VARCHAR(10)`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_ts BIGINT`);
+        // Migración: canal de notificación (whatsapp | discord) y webhook directo de Discord.
+        await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS canal VARCHAR(20) NOT NULL DEFAULT 'whatsapp'`);
+        await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS discord_webhook_url TEXT`);
 
         await pool.query(`INSERT INTO configuracion (clave, valor) VALUES ('limite_bd', 1.0) ON CONFLICT (clave) DO NOTHING`);
 
@@ -2906,7 +2909,9 @@ app.get('/api/admin/autotrading', autenticar, soloAdmin, async (req, res) => {
 app.get('/api/wspp-config', autenticar, async (req, res) => {
     try {
         const r = await pool.query(
-            'SELECT estrategia, tipo_senal, webhook_url, telefono, activo, ultima_senal_enviada, ultima_senal_ts FROM wspp_notificaciones WHERE usuario_id=$1',
+            `SELECT estrategia, tipo_senal, canal, webhook_url, telefono, discord_webhook_url,
+                    activo, ultima_senal_enviada, ultima_senal_ts
+             FROM wspp_notificaciones WHERE usuario_id=$1`,
             [req.usuario.id]
         );
         res.json(r.rows[0] || null);
@@ -2914,20 +2919,25 @@ app.get('/api/wspp-config', autenticar, async (req, res) => {
 });
 
 app.put('/api/wspp-config', autenticar, async (req, res) => {
-    const { estrategia, tipo_senal, webhook_url, telefono, activo } = req.body;
+    const { estrategia, tipo_senal, canal, webhook_url, telefono, discord_webhook_url, activo } = req.body;
+    const canalNorm = canal === 'discord' ? 'discord' : 'whatsapp';
     if (activo && !estrategia) return res.status(400).json({ error: 'Seleccioná una estrategia' });
+    if (activo && canalNorm === 'discord' && !discord_webhook_url) return res.status(400).json({ error: 'Falta la URL del webhook de Discord' });
+    if (activo && canalNorm === 'whatsapp' && !telefono) return res.status(400).json({ error: 'Falta el número de WhatsApp' });
     try {
         await pool.query(
-            `INSERT INTO wspp_notificaciones (usuario_id, estrategia, tipo_senal, webhook_url, telefono, activo, actualizado_en)
-             VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            `INSERT INTO wspp_notificaciones (usuario_id, estrategia, tipo_senal, canal, webhook_url, telefono, discord_webhook_url, activo, actualizado_en)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
              ON CONFLICT (usuario_id) DO UPDATE SET
-                estrategia     = EXCLUDED.estrategia,
-                tipo_senal     = EXCLUDED.tipo_senal,
-                webhook_url    = EXCLUDED.webhook_url,
-                telefono       = EXCLUDED.telefono,
-                activo         = EXCLUDED.activo,
-                actualizado_en = NOW()`,
-            [req.usuario.id, estrategia || null, tipo_senal || 'compra', webhook_url || null, telefono || null, activo !== false]
+                estrategia           = EXCLUDED.estrategia,
+                tipo_senal           = EXCLUDED.tipo_senal,
+                canal                = EXCLUDED.canal,
+                webhook_url          = EXCLUDED.webhook_url,
+                telefono             = EXCLUDED.telefono,
+                discord_webhook_url  = EXCLUDED.discord_webhook_url,
+                activo               = EXCLUDED.activo,
+                actualizado_en       = NOW()`,
+            [req.usuario.id, estrategia || null, tipo_senal || 'compra', canalNorm, webhook_url || null, telefono || null, discord_webhook_url || null, activo !== false]
         );
         res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2937,18 +2947,24 @@ app.put('/api/wspp-config', autenticar, async (req, res) => {
 app.post('/api/wspp-test', autenticar, async (req, res) => {
     try {
         const r = await pool.query(
-            'SELECT estrategia, webhook_url, telefono FROM wspp_notificaciones WHERE usuario_id=$1 AND activo=true',
+            'SELECT estrategia, canal, webhook_url, telefono, discord_webhook_url FROM wspp_notificaciones WHERE usuario_id=$1 AND activo=true',
             [req.usuario.id]
         );
         const cfg = r.rows[0];
-        if (!cfg) return res.status(400).json({ error: 'No hay configuración activa de WSPP.' });
+        if (!cfg) return res.status(400).json({ error: 'No hay configuración activa de notificaciones.' });
         if (!cfg.webhook_url) return res.status(400).json({ error: 'Falta la Webhook URL.' });
-        if (!cfg.telefono) return res.status(400).json({ error: 'Falta el número de WhatsApp.' });
+        if (cfg.canal === 'discord') {
+            if (!cfg.discord_webhook_url) return res.status(400).json({ error: 'Falta la URL del webhook de Discord.' });
+        } else if (!cfg.telefono) {
+            return res.status(400).json({ error: 'Falta el número de WhatsApp.' });
+        }
 
         const payload = {
             estrategia: cfg.estrategia,
             tipo_senal: 'compra',
+            canal:      cfg.canal || 'whatsapp',
             telefono:   cfg.telefono,
+            discord_webhook_url: cfg.discord_webhook_url,
             simbolo:    'BTCUSDT',
             precio:     95000,
             timestamp:  Date.now(),
@@ -2971,7 +2987,8 @@ app.post('/api/wspp-test', autenticar, async (req, res) => {
             return res.status(502).json({ error: 'No se pudo conectar al webhook: ' + fetchErr.message });
         }
 
-        console.log(`[WSPP] Prueba enviada → ${cfg.telefono} (${cfg.estrategia})`);
+        const destinoLog = cfg.canal === 'discord' ? cfg.discord_webhook_url : cfg.telefono;
+        console.log(`[WSPP] Prueba enviada → ${destinoLog} (${cfg.estrategia})`);
         res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -3369,12 +3386,15 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
 async function tickWsppNotificaciones() {
     try {
         const cfgs = await pool.query(
-            `SELECT w.id, w.usuario_id, w.estrategia, w.tipo_senal,
-                    w.webhook_url, w.telefono, w.ultima_senal_enviada
+            `SELECT w.id, w.usuario_id, w.estrategia, w.tipo_senal, w.canal,
+                    w.webhook_url, w.telefono, w.discord_webhook_url, w.ultima_senal_enviada
              FROM wspp_notificaciones w
              WHERE w.activo = true
                AND w.webhook_url IS NOT NULL AND w.webhook_url <> ''
-               AND w.telefono    IS NOT NULL AND w.telefono    <> ''`
+               AND (
+                     (w.canal = 'discord' AND w.discord_webhook_url IS NOT NULL AND w.discord_webhook_url <> '')
+                  OR (w.canal <> 'discord' AND w.telefono IS NOT NULL AND w.telefono <> '')
+               )`
         );
         if (!cfgs.rows.length) return;
 
@@ -3427,7 +3447,9 @@ async function tickWsppNotificaciones() {
                 const payload = {
                     estrategia: cfg.estrategia,
                     tipo_senal: tipoSenal,
+                    canal:      cfg.canal || 'whatsapp',
                     telefono:   cfg.telefono,
+                    discord_webhook_url: cfg.discord_webhook_url,
                     simbolo:    'BTCUSDT',
                     precio:     resultado.entry,
                     timestamp:  Date.now(),
@@ -3447,7 +3469,8 @@ async function tickWsppNotificaciones() {
                             'UPDATE wspp_notificaciones SET ultima_senal_enviada=$1, ultima_senal_ts=$2 WHERE id=$3',
                             [signal, Date.now(), cfg.id]
                         );
-                        console.log(`[WSPP] Notificación enviada: ${signal.toUpperCase()} — "${cfg.estrategia}" → ${cfg.telefono}`);
+                        const destinoLog = cfg.canal === 'discord' ? cfg.discord_webhook_url : cfg.telefono;
+                        console.log(`[WSPP] Notificación enviada: ${signal.toUpperCase()} — "${cfg.estrategia}" → ${destinoLog} (${cfg.canal || 'whatsapp'})`);
                     } else {
                         console.warn(`[WSPP] Webhook ${resp.status} para usuario ${cfg.usuario_id}`);
                     }

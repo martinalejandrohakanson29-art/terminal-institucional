@@ -3155,8 +3155,9 @@
                 const r = await fetch('/api/wspp-config', { credentials: 'same-origin' });
                 if (!r.ok) return;
                 wsppConfig = await r.json();
-                document.getElementById('wspp-dot').style.background =
-                    wsppConfig && wsppConfig.activo ? '#25D366' : '#94a3b8';
+                const activo = wsppConfig && wsppConfig.activo;
+                const colorActivo = wsppConfig && wsppConfig.canal === 'discord' ? '#5865F2' : '#25D366';
+                document.getElementById('wspp-dot').style.background = activo ? colorActivo : '#94a3b8';
             } catch (_) {}
         }
 
@@ -3179,7 +3180,9 @@
             if (wsppConfig) {
                 if (wsppConfig.estrategia) sel.value = wsppConfig.estrategia;
                 document.getElementById('wspp-signal-type').value = wsppConfig.tipo_senal  || 'compra';
-                document.getElementById('wspp-telefono').value    = wsppConfig.telefono    || '';
+                document.getElementById('wspp-canal-sel').value    = wsppConfig.canal       || 'whatsapp';
+                document.getElementById('wspp-telefono').value     = wsppConfig.telefono    || '';
+                document.getElementById('wspp-discord-webhook-url').value = wsppConfig.discord_webhook_url || '';
                 document.getElementById('wspp-webhook-url').value  = wsppConfig.webhook_url || '';
 
                 if (wsppConfig.ultima_senal_ts) {
@@ -3193,10 +3196,25 @@
                     ultimoEl.style.display = 'none';
                 }
             } else {
+                document.getElementById('wspp-canal-sel').value = 'whatsapp';
+                document.getElementById('wspp-discord-webhook-url').value = '';
                 ultimoEl.style.display = 'none';
             }
 
+            actualizarCanalWspp();
             document.getElementById('modal-wspp-overlay').style.display = 'flex';
+        }
+
+        function actualizarCanalWspp() {
+            const canal = document.getElementById('wspp-canal-sel').value;
+            const esDiscord = canal === 'discord';
+            document.getElementById('wspp-whatsapp-fields').style.display = esDiscord ? 'none' : 'block';
+            document.getElementById('wspp-discord-fields').style.display  = esDiscord ? 'block' : 'none';
+            document.getElementById('wspp-modal-titulo').textContent = esDiscord ? '💬 Notificaciones Discord' : '📱 Notificaciones WhatsApp';
+            document.getElementById('wspp-integracion-titulo').textContent = esDiscord ? 'n8n + Discord' : 'n8n + EvolutionAPI';
+            document.getElementById('wspp-integracion-desc').textContent = esDiscord
+                ? 'Cuando la estrategia genere la señal configurada, el terminal llamará a este webhook con los datos de la señal. n8n se encarga de enviar el mensaje al canal de Discord mediante la URL del webhook indicada arriba.'
+                : 'Cuando la estrategia genere la señal configurada, el terminal llamará a este webhook con los datos de la señal. n8n se encarga de enviar el mensaje por WhatsApp vía EvolutionAPI.';
         }
 
         function cerrarConfigWspp() {
@@ -3206,7 +3224,9 @@
         async function guardarConfigWspp() {
             const estrategia   = document.getElementById('wspp-strat-sel').value;
             const tipo_senal   = document.getElementById('wspp-signal-type').value;
+            const canal        = document.getElementById('wspp-canal-sel').value;
             const telefono     = document.getElementById('wspp-telefono').value.trim();
+            const discord_webhook_url = document.getElementById('wspp-discord-webhook-url').value.trim();
             const webhook_url  = document.getElementById('wspp-webhook-url').value.trim();
             const msgEl        = document.getElementById('wspp-msg');
 
@@ -3215,18 +3235,28 @@
                 msgEl.textContent = 'Seleccioná una estrategia.';
                 return;
             }
+            if (canal === 'discord' && !discord_webhook_url) {
+                msgEl.style.cssText = 'display:block;background:#fef2f2;border:1px solid #fca5a5;color:#dc2626;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;';
+                msgEl.textContent = 'Cargá la URL del webhook de Discord.';
+                return;
+            }
+            if (canal !== 'discord' && !telefono) {
+                msgEl.style.cssText = 'display:block;background:#fef2f2;border:1px solid #fca5a5;color:#dc2626;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;';
+                msgEl.textContent = 'Cargá el número de WhatsApp destino.';
+                return;
+            }
 
             try {
                 const r = await fetch('/api/wspp-config', {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'same-origin',
-                    body: JSON.stringify({ estrategia, tipo_senal, telefono, webhook_url, activo: true })
+                    body: JSON.stringify({ estrategia, tipo_senal, canal, telefono, discord_webhook_url, webhook_url, activo: true })
                 });
                 if (!r.ok) throw new Error((await r.json()).error);
 
-                wsppConfig = { estrategia, tipo_senal, telefono, webhook_url, activo: true };
-                document.getElementById('wspp-dot').style.background = '#25D366';
+                wsppConfig = { estrategia, tipo_senal, canal, telefono, discord_webhook_url, webhook_url, activo: true };
+                document.getElementById('wspp-dot').style.background = canal === 'discord' ? '#5865F2' : '#25D366';
 
                 msgEl.style.cssText = 'display:block;background:#f0fdf4;border:1px solid #86efac;color:#16a34a;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;';
                 msgEl.textContent = `✓ Notificaciones activadas para "${estrategia}".`;
@@ -3265,7 +3295,12 @@
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'same-origin',
-                    body: JSON.stringify({ estrategia: cfg.estrategia || '', tipo_senal: cfg.tipo_senal || 'compra', webhook_url: cfg.webhook_url || '', activo: false })
+                    body: JSON.stringify({
+                        estrategia: cfg.estrategia || '', tipo_senal: cfg.tipo_senal || 'compra',
+                        canal: cfg.canal || 'whatsapp', telefono: cfg.telefono || '',
+                        discord_webhook_url: cfg.discord_webhook_url || '', webhook_url: cfg.webhook_url || '',
+                        activo: false
+                    })
                 });
             } catch (_) {}
             wsppConfig = null;
@@ -3331,7 +3366,7 @@
         <div style="background:#fff;border-radius:10px;padding:26px;width:360px;box-shadow:0 10px 40px rgba(0,0,0,0.2);" onclick="event.stopPropagation()">
 
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
-                <h3 style="font-size:15px;margin:0;">📱 Notificaciones WhatsApp</h3>
+                <h3 id="wspp-modal-titulo" style="font-size:15px;margin:0;">📱 Notificaciones WhatsApp</h3>
                 <button onclick="cerrarConfigWspp()" style="background:none;border:none;cursor:pointer;font-size:20px;color:#94a3b8;line-height:1;padding:0;">×</button>
             </div>
 
@@ -3343,15 +3378,30 @@
             </select>
 
             <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Notificar cuando</label>
-            <select id="wspp-signal-type" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:16px;background:#f8fafc;box-sizing:border-box;">
+            <select id="wspp-signal-type" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;background:#f8fafc;box-sizing:border-box;">
                 <option value="compra">🟢 Señal de compra</option>
                 <option value="venta">🔴 Señal de venta</option>
                 <option value="ambas">⚡ Compra y venta</option>
             </select>
 
-            <!-- Teléfono destino -->
-            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">WhatsApp destino</label>
-            <input type="tel" id="wspp-telefono" placeholder="+549 11 1234-5678" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;box-sizing:border-box;" />
+            <!-- Canal de notificación -->
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Canal</label>
+            <select id="wspp-canal-sel" onchange="actualizarCanalWspp()" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:16px;background:#f8fafc;box-sizing:border-box;">
+                <option value="whatsapp">📱 WhatsApp</option>
+                <option value="discord">💬 Discord</option>
+            </select>
+
+            <!-- Teléfono destino (WhatsApp) -->
+            <div id="wspp-whatsapp-fields">
+                <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">WhatsApp destino</label>
+                <input type="tel" id="wspp-telefono" placeholder="+549 11 1234-5678" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;box-sizing:border-box;" />
+            </div>
+
+            <!-- Webhook destino (Discord) -->
+            <div id="wspp-discord-fields" style="display:none;">
+                <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Webhook de Discord</label>
+                <input type="url" id="wspp-discord-webhook-url" placeholder="https://discord.com/api/webhooks/..." style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:12px;margin-bottom:14px;box-sizing:border-box;" />
+            </div>
 
             <!-- Webhook n8n -->
             <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Webhook URL <span style="font-weight:normal;color:#94a3b8;">(n8n)</span></label>
@@ -3362,8 +3412,8 @@
 
             <!-- Bloque integración -->
             <div style="border:1px solid #dcfce7;border-radius:8px;padding:12px;margin-bottom:18px;background:#f0fdf4;">
-                <div style="font-size:11px;font-weight:bold;color:#16a34a;margin-bottom:4px;">n8n + EvolutionAPI</div>
-                <div style="font-size:11px;color:#64748b;line-height:1.5;">Cuando la estrategia genere la señal configurada, el terminal llamará a este webhook con los datos de la señal. n8n se encarga de enviar el mensaje por WhatsApp vía EvolutionAPI.</div>
+                <div id="wspp-integracion-titulo" style="font-size:11px;font-weight:bold;color:#16a34a;margin-bottom:4px;">n8n + EvolutionAPI</div>
+                <div id="wspp-integracion-desc" style="font-size:11px;color:#64748b;line-height:1.5;">Cuando la estrategia genere la señal configurada, el terminal llamará a este webhook con los datos de la señal. n8n se encarga de enviar el mensaje por WhatsApp vía EvolutionAPI.</div>
             </div>
 
             <div style="display:flex;gap:10px;margin-bottom:10px;">
