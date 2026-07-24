@@ -1788,6 +1788,12 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
             return null;
         });
         if (alignVals.some(v => !v)) continue;
+        // El alineamiento se evalúa por período (de la EMA más chica a la más grande),
+        // no por el orden en que el usuario cargó la lista en la UI.
+        const alignValsOrdered = pbEMAConfig
+            .map(({ period }, idx) => ({ period, val: alignVals[idx] }))
+            .sort((a, b) => a.period - b.period)
+            .map(x => x.val);
         const stopEmaVals = stopEmaArrays.map(s => s.arr ? s.arr[i] : lookupHTF(s.tsArr, s.map, tsClose)).filter(v => v != null);
 
         const rsiRaw  = rsiTf === '1m'  ? rsiDirect[i]  : lookupHTF(tsRsi,  rsiByTs,  tsClose);
@@ -1918,8 +1924,8 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
             ) {
                 const above = alignVals.every(v => close > v);
                 const below = alignVals.every(v => close < v);
-                const bullAlign = alignVals.length < 2 || alignVals.every((v, j) => j === 0 || alignVals[j-1] > v);
-                const bearAlign = alignVals.length < 2 || alignVals.every((v, j) => j === 0 || alignVals[j-1] < v);
+                const bullAlign = alignValsOrdered.length < 2 || alignValsOrdered.every((v, j) => j === 0 || alignValsOrdered[j-1] > v);
+                const bearAlign = alignValsOrdered.length < 2 || alignValsOrdered.every((v, j) => j === 0 || alignValsOrdered[j-1] < v);
                 const pbVals = alignVals;
                 const nearEMA = pbVals.some(e => Math.abs(close - e) / close * 100 <= (p.pullbackPerc ?? 0.2));
                 const pullOK     = !p.usePullbackFilter || (pbVals.length > 0 && nearEMA);
@@ -3233,6 +3239,12 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         return null;
     });
     if (alignVals.some(v => !v)) return { signal: null, reason: 'emas_no_calentadas', indicadores: {} };
+    // El alineamiento se evalúa por período (de la EMA más chica a la más grande),
+    // no por el orden en que el usuario cargó la lista en la UI.
+    const alignValsOrdered = pbEMAConfig
+        .map(({ period }, idx) => ({ period, val: alignVals[idx] }))
+        .sort((a, b) => a.period - b.period)
+        .map(x => x.val);
 
     const rsiLookup  = rsiTf_sn  === '1m' ? rsiSnDirect[i]  : lookupHTF(rsiSnTs,  rsiSnByTs,  tsClose);
     const macdLookup = macdTf_sn === '1m' ? macdSnDirect[i] : lookupHTF(macdSnTs, macdSnByTs, tsClose);
@@ -3254,8 +3266,8 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
 
     const above     = alignVals.every(v => close > v);
     const below     = alignVals.every(v => close < v);
-    const bullAlign = alignVals.length < 2 || alignVals.every((v, j) => j === 0 || alignVals[j-1] > v);
-    const bearAlign = alignVals.length < 2 || alignVals.every((v, j) => j === 0 || alignVals[j-1] < v);
+    const bullAlign = alignValsOrdered.length < 2 || alignValsOrdered.every((v, j) => j === 0 || alignValsOrdered[j-1] > v);
+    const bearAlign = alignValsOrdered.length < 2 || alignValsOrdered.every((v, j) => j === 0 || alignValsOrdered[j-1] < v);
 
     const pbSnVals = alignVals;
     const nearEMA = !p.usePullbackFilter || (pbSnVals.length > 0 && pbSnVals.some(e =>
