@@ -196,6 +196,32 @@
         }
         .form-section.collapsible > .section-body { margin-top: 8px; }
         .form-section.collapsible.collapsed > .section-body { display: none; }
+
+        /* ─── Buscador de condicionales ───
+           Los condicionales viven ocultos hasta que se agregan al panel desde el buscador;
+           solo los agregados (.en-panel) se ven y afectan la estrategia. */
+        .form-section.cond { display: none; }
+        .form-section.cond.en-panel { display: block; }
+        .cond-lista {
+            margin-top: 6px; max-height: 240px; overflow-y: auto;
+            border: 1px solid #e2e8f0; border-radius: 6px; background: #fff;
+        }
+        .cond-item {
+            display: flex; align-items: center; gap: 8px; width: 100%;
+            padding: 7px 10px; border: none; border-bottom: 1px solid #f0f2f5;
+            background: #fff; cursor: pointer; text-align: left; font-size: 12px; color: #374151;
+        }
+        .cond-item:last-child { border-bottom: none; }
+        .cond-item:hover { background: #eff6ff; }
+        .cond-item .cond-mas { color: #2962FF; font-weight: bold; flex-shrink: 0; }
+        .cond-item .cond-nombre { font-weight: 600; }
+        .cond-item .cond-desc { font-size: 10px; color: #94a3b8; line-height: 1.3; }
+        .cond-vacio { padding: 8px 10px; font-size: 11px; color: #94a3b8; }
+        .cond-quitar {
+            border: none; background: transparent; color: #cbd5e1; font-size: 11px;
+            cursor: pointer; padding: 0 2px; margin-left: auto; flex-shrink: 0; line-height: 1;
+        }
+        .cond-quitar:hover { color: #ef5350; }
     </style>
 </head>
 <body>
@@ -425,6 +451,19 @@
                 <input type="checkbox" id="p-fds" class="form-check">
             </div>
             <div style="font-size:10px;color:#94a3b8;margin-top:2px;">Todo en horario Argentina (UTC-3, sin DST)</div>
+        </div>
+
+        <!-- ═══ Buscador de condicionales ═══ -->
+        <div class="form-section" id="cond-buscador">
+            <h3>Condicionales</h3>
+            <input type="text" id="cond-search" class="strat-name-input" style="width:100%;"
+                   placeholder="🔍 Buscar condicional (RSI, ballenas, OI…)"
+                   oninput="renderCondLista()" autocomplete="off">
+            <div id="cond-lista" class="cond-lista"></div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:6px;line-height:1.4;">
+                Solo los condicionales agregados al panel afectan la estrategia.
+                Se quitan con la ✕ de cada sección.
+            </div>
         </div>
 
         <div class="form-section collapsible" data-ctrl="p-rsi">
@@ -962,7 +1001,7 @@
     setInterval(actualizarEstadoCache, 30000);
 
     function getParams() {
-        return {
+        const p = {
             fuenteDatos:       fuenteSeleccionada,
             initialCapital:    parseFloat(document.getElementById('p-capital').value) || 1000,
             lookbackDays:      parseInt(document.getElementById('p-days').value) || 7,
@@ -1048,6 +1087,13 @@
             palancaActivo:        document.getElementById('p-palanca-activo').checked,
             palancaValor:         parseInt(document.getElementById('p-palanca-valor').value) || 1,
         };
+        // Los condicionales que NO están en el panel jamás afectan la estrategia: su flag
+        // se fuerza a false aunque el checkbox interno (oculto) hubiera quedado marcado.
+        CONDICIONALES.forEach(c => {
+            const sec = seccionCond(c.key);
+            if (!sec || !sec.classList.contains('en-panel')) p[c.flag] = false;
+        });
+        return p;
     }
 
     async function ejecutar() {
@@ -1499,6 +1545,8 @@
         toggleStopType();
         toggleBreakeven();
         refreshCollapsibles();
+        // El panel muestra exactamente los condicionales que la estrategia cargada usa.
+        sincronizarPanelCondicionales();
     }
 
     function cargarEstrategia() {
@@ -1603,8 +1651,113 @@
         });
     }
 
+    // ── Buscador de condicionales ────────────────────────────────
+    // Catálogo: key = data-cond de la sección, ctrl = checkbox de activación existente,
+    // flag = nombre del parámetro que getParams manda al backtest, kw = palabras de búsqueda.
+    const CONDICIONALES = [
+        { key:'rsi',       ctrl:'p-rsi',       flag:'useRsiFilter',       label:'RSI',                       desc:'Momentum: long si RSI ≥ umbral, short si ≤',        kw:'rsi momentum indice fuerza relativa sobrecompra sobreventa' },
+        { key:'macd',      ctrl:'p-macd',      flag:'useMacdFilter',      label:'MACD',                      desc:'Cruce MACD vs señal como dirección',                kw:'macd cruce convergencia divergencia señal' },
+        { key:'pullback',  ctrl:'p-pullback',  flag:'usePullbackFilter',  label:'Pullback a EMAs',           desc:'Entrar solo cerca de una EMA (retroceso)',          kw:'pullback retroceso ema medias cercania distancia' },
+        { key:'ema-align', ctrl:'p-ema-align', flag:'useEmaAlignment',    label:'Alineamiento EMAs',         desc:'EMA 50>100>200>500 (inverso en shorts)',            kw:'alineamiento ema orden tendencia medias apiladas' },
+        { key:'emaang',    ctrl:'p-emaang',    flag:'useEmaAngFilter',    label:'Angulación EMA',            desc:'Pendiente mínima de la EMA (fuerza de tendencia)',  kw:'angulacion pendiente slope ema inclinacion angulo' },
+        { key:'ema-trend', ctrl:'p-ema-trend', flag:'useEmaTrendFilter',  label:'EMA de Tendencia',          desc:'Precio arriba de la EMA → solo longs (y viceversa)',kw:'ema tendencia sesgo direccion bias trend' },
+        { key:'oi',        ctrl:'p-oi',        flag:'useOIFilter',        label:'Open Interest',             desc:'Entra solo si el OI sube (dinero nuevo)',           kw:'open interest oi interes abierto futuros dinero nuevo' },
+        { key:'toptrader', ctrl:'p-toptrader', flag:'useTopTraderFilter', label:'Top Traders (nivel)',       desc:'Seguir smart money: ratio L/S de top traders',      kw:'top traders smart money ratio long short nivel seguir' },
+        { key:'topslope',  ctrl:'p-topslope',  flag:'useTopSlopeFilter',  label:'Top Traders (pendiente)',   desc:'Cambio del ratio: acumulación / distribución',      kw:'top traders pendiente slope acumulacion distribucion smart money cambio' },
+        { key:'retail',    ctrl:'p-retail',    flag:'useRetailFilter',    label:'Retail (fade)',             desc:'Contrarian: no entrar con el retail sobrecargado',  kw:'retail fade contrarian minoristas extremo' },
+        { key:'max-time',  ctrl:'p-max-time',  flag:'useMaxTradeTime',    label:'Tiempo en operación',       desc:'Cierra la posición a los N minutos',                kw:'tiempo maximo operacion salida minutos time exit' },
+        { key:'cooldown',  ctrl:'p-cooldown',  flag:'useCooldown',        label:'Cooldown',                  desc:'Espera N minutos después de cerrar un trade',       kw:'cooldown espera pausa enfriamiento reentrada' },
+        { key:'delta',     ctrl:'p-delta',     flag:'useDeltaFilter',     label:'Delta de Volumen',          desc:'Delta comprador/vendedor de las últimas N velas',   kw:'delta volumen order flow compras ventas taker' },
+        { key:'cvd',       ctrl:'p-cvd',       flag:'useCVDFilter',       label:'CVD (Delta Acumulado)',     desc:'Flujo taker neto acumulado, ventana larga',         kw:'cvd delta acumulado cumulative volume flujo order flow' },
+        { key:'whale',     ctrl:'p-whale',     flag:'useWhaleFilter',     label:'Confirmación Ballenas',     desc:'Delta de trades grandes en la ventana',             kw:'ballenas whale grandes ordenes confirmacion btc' },
+        { key:'adx',       ctrl:'p-adx',       flag:'useADXFilter',       label:'ADX (Fuerza de Tendencia)', desc:'Solo entra con tendencia fuerte (ADX ≥ umbral)',    kw:'adx fuerza tendencia dmi rango' },
+        { key:'vwap',      ctrl:'p-vwap',      flag:'useVwapFilter',      label:'VWAP',                      desc:'Dirección y/o pullback respecto del VWAP',          kw:'vwap precio promedio ponderado volumen sesion' },
+    ];
+
+    function seccionCond(key) { return document.querySelector(`.form-section.cond[data-cond="${key}"]`); }
+
+    // Marca las secciones del catálogo como condicionales (ocultas hasta agregarlas) y les
+    // inyecta el botón ✕ en el header. Se hace por JS para no tocar el HTML de cada sección.
+    function initCondicionales() {
+        CONDICIONALES.forEach(c => {
+            const sec = document.querySelector(`.form-section[data-ctrl="${c.ctrl}"]`);
+            if (!sec) return;
+            sec.classList.add('cond');
+            sec.dataset.cond = c.key;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'cond-quitar';
+            btn.title = 'Quitar del panel (deja de afectar la estrategia)';
+            btn.textContent = '✕';
+            btn.addEventListener('click', (ev) => { ev.stopPropagation(); quitarCond(c.key); });
+            sec.querySelector('h3').appendChild(btn);
+        });
+        sincronizarPanelCondicionales();
+    }
+
+    function agregarCond(key) {
+        const c = CONDICIONALES.find(x => x.key === key);
+        const sec = seccionCond(key);
+        if (!c || !sec) return;
+        sec.classList.add('en-panel');
+        // Agregarlo al panel ES activarlo (el change dispara el toggle del colapsable).
+        const ctrl = document.getElementById(c.ctrl);
+        if (!ctrl.checked) { ctrl.checked = true; ctrl.dispatchEvent(new Event('change')); }
+        sec.classList.remove('collapsed');
+        sec.classList.add('sec-active');
+        document.getElementById('cond-search').value = '';
+        renderCondLista();
+    }
+
+    function quitarCond(key) {
+        const c = CONDICIONALES.find(x => x.key === key);
+        const sec = seccionCond(key);
+        if (!c || !sec) return;
+        sec.classList.remove('en-panel');
+        const ctrl = document.getElementById(c.ctrl);
+        if (ctrl.checked) { ctrl.checked = false; ctrl.dispatchEvent(new Event('change')); }
+        renderCondLista();
+    }
+
+    // El panel refleja los checkboxes de activación: al abrir la página muestra los
+    // condicionales default y al cargar una estrategia, exactamente los que esa usa.
+    function sincronizarPanelCondicionales() {
+        CONDICIONALES.forEach(c => {
+            const sec = seccionCond(c.key);
+            const ctrl = document.getElementById(c.ctrl);
+            if (sec && ctrl) sec.classList.toggle('en-panel', ctrl.checked);
+        });
+        renderCondLista();
+    }
+
+    // Búsqueda insensible a mayúsculas y acentos ("angulacion" encuentra "Angulación").
+    function normalizarTexto(s) {
+        return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    }
+
+    function renderCondLista() {
+        const q = normalizarTexto(document.getElementById('cond-search').value.trim());
+        const disponibles = CONDICIONALES
+            .filter(c => { const s = seccionCond(c.key); return s && !s.classList.contains('en-panel'); })
+            .filter(c => !q || normalizarTexto(`${c.label} ${c.kw}`).includes(q));
+        const lista = document.getElementById('cond-lista');
+        if (!disponibles.length) {
+            lista.innerHTML = `<div class="cond-vacio">${q ? 'Sin resultados.' : 'Todos los condicionales están en el panel.'}</div>`;
+            return;
+        }
+        lista.innerHTML = disponibles.map(c => `
+            <button type="button" class="cond-item" onclick="agregarCond('${c.key}')">
+                <span class="cond-mas">+</span>
+                <span style="min-width:0;">
+                    <div class="cond-nombre">${c.label}</div>
+                    <div class="cond-desc">${c.desc}</div>
+                </span>
+            </button>`).join('');
+    }
+
     renderPullbackEMAList();
     initCollapsibles();
+    initCondicionales();
     inicializarEstrategias();
 
     function buildEquitySVG(equity, initialCapital) {
