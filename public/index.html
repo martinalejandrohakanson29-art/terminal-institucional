@@ -1902,7 +1902,8 @@
         }
 
         // BingX no expone taker_buy_base en su WS de klines (mismo límite que en el server):
-        // el delta en vivo del gráfico queda en 0 para BingX hasta que se acumule server-side.
+        // se emite V=null ("sin dato") y el gráfico muestra delta 0 para esa vela, en vez de
+        // inventar un delta = -volumen ("todo ventas") que sería ficticio.
         function crearKlineWSBingX(interval) {
             const facade = { onopen: null, onmessage: null, onclose: null, onerror: null, readyState: 0 };
             const real = new WebSocket('wss://open-api-swap.bingx.com/swap-market');
@@ -1923,7 +1924,7 @@
                 try { msg = JSON.parse(text); } catch (err) { return; }
                 if (!Array.isArray(msg.data)) return;
                 for (const d of msg.data) {
-                    const k = { t: Number(d.T), o: d.o, h: d.h, l: d.l, c: d.c, v: d.v, V: '0' };
+                    const k = { t: Number(d.T), o: d.o, h: d.h, l: d.l, c: d.c, v: d.v, V: null };
                     if (facade.onmessage) facade.onmessage({ data: JSON.stringify({ k }) });
                 }
             };
@@ -2032,8 +2033,13 @@
                 tiemposVelasActivas = [];
 
                 allVelas.forEach(v => {
-                    const ts = v[0], vol = parseFloat(v[5]), c = parseFloat(v[9]), vt = vol - c;
-                    velasActuales.push({ timestamp: ts, open: parseFloat(v[1]), high: parseFloat(v[2]), low: parseFloat(v[3]), close: parseFloat(v[4]), volume: vol, delta: c - vt, compras: c, ventas: vt, oi: null, topR: null, globalR: null });
+                    // v[9] null = vela sin taker_buy_base (BingX antes de que el collector de
+                    // delta arrancara): compras/ventas/delta quedan null ("sin dato") — con 0
+                    // el delta se dibujaría como -volumen, un "todo ventas" ficticio.
+                    const ts = v[0], vol = parseFloat(v[5]);
+                    const c  = v[9] == null ? null : parseFloat(v[9]);
+                    const vt = c == null ? null : vol - c;
+                    velasActuales.push({ timestamp: ts, open: parseFloat(v[1]), high: parseFloat(v[2]), low: parseFloat(v[3]), close: parseFloat(v[4]), volume: vol, delta: c == null ? null : c - vt, compras: c, ventas: vt, oi: null, topR: null, globalR: null });
                     tiemposVelasActivas.push(ts);
                 });
 
@@ -2075,13 +2081,16 @@
                     try {
                         const k = JSON.parse(e.data).k;
                         if (!k) return;
-                        const ts = k.t, vol = parseFloat(k.v), c = parseFloat(k.V), vt = vol - c;
+                        // k.V null = exchange sin taker_buy_base en su WS (BingX) → delta sin dato.
+                        const ts = k.t, vol = parseFloat(k.v);
+                        const c  = k.V == null ? null : parseFloat(k.V);
+                        const vt = c == null ? null : vol - c;
                         const ultima = velasActuales.length > 0 ? velasActuales[velasActuales.length - 1] : null;
                         const mismaVela = ultima && ultima.timestamp === ts;
                         const oiActual = mismaVela ? ultima.oi : null;
                         const topRActual = mismaVela ? ultima.topR : null;
                         const globalRActual = mismaVela ? ultima.globalR : null;
-                        const kActualizada = { timestamp: ts, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: vol, delta: c - vt, compras: c, ventas: vt, oi: oiActual, topR: topRActual, globalR: globalRActual };
+                        const kActualizada = { timestamp: ts, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: vol, delta: c == null ? null : c - vt, compras: c, ventas: vt, oi: oiActual, topR: topRActual, globalR: globalRActual };
                         if (ultima && ultima.timestamp === ts) velasActuales[velasActuales.length - 1] = kActualizada;
                         else { velasActuales.push(kActualizada); tiemposVelasActivas.push(ts); }
                         chart.updateData(kActualizada);

@@ -33,9 +33,15 @@ function exchangeConsultado(req) {
 // esté "activo" para señales y ejecución. Por defecto, solo el activo (no cambia el
 // comportamiento ni el costo de nadie que no lo configure explícitamente).
 // Ej.: EXCHANGES_INGESTA=binance,bingx
-const EXCHANGES_INGESTA = [...new Set(
-    (process.env.EXCHANGES_INGESTA || EXCHANGE_ACTIVO).split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
-)];
+// El exchange ACTIVO siempre se ingesta aunque el env lo omita: sin sus klines/ballenas/OI
+// en BD las señales no tendrían datos (nunca entrarían) y /api/klines quedaría vacío, todo
+// en silencio. Se avisa para que quien configuró el env sepa que se corrigió solo.
+const ingestaEnv = (process.env.EXCHANGES_INGESTA || EXCHANGE_ACTIVO)
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+if (process.env.EXCHANGES_INGESTA && !ingestaEnv.includes(EXCHANGE_ACTIVO)) {
+    console.warn(`⚠️ EXCHANGES_INGESTA (${process.env.EXCHANGES_INGESTA}) no incluía el exchange activo "${EXCHANGE_ACTIVO}" — se agrega automáticamente.`);
+}
+const EXCHANGES_INGESTA = [...new Set([EXCHANGE_ACTIVO, ...ingestaEnv])];
 const exchangesIngesta = EXCHANGES_INGESTA.map(getExchange);
 console.log(`📥 Exchanges en ingesta: ${exchangesIngesta.map(e => e.name).join(', ')}`);
 
@@ -562,6 +568,11 @@ setInterval(() => {
 // Todo el estado mutable (reconexión, acumulador de delta) vive DENTRO de esta factory,
 // una instancia independiente por exchange — así dos exchanges corriendo a la vez nunca
 // comparten ni pisan el estado del otro (dos "PERP" de exchanges distintos no colisionan).
+// Acumuladores de delta en memoria, por exchange (minutoSeg -> { buy, sell, intentos }).
+// Expuestos a nivel módulo para que la evaluación de señales pueda leer el delta del minuto
+// recién cerrado ANTES de que el flush de 60s lo vuelque a klines_1m (ver completarDeltaFaltante).
+const acumuladoresDelta = new Map(); // exchangeName -> Map(minutoSeg -> { buy, sell, intentos })
+
 function crearIngestaBallenas(ex) {
     const wsConectando = new Set();
 
@@ -570,6 +581,7 @@ function crearIngestaBallenas(ex) {
     // el minuto ya cerró. Si la fila de esa vela aún no llegó por el sync de klines, se
     // reintenta en el próximo ciclo (hasta 5 veces) antes de descartar el incremento.
     const deltaAcumMinuto = new Map(); // minutoSeg -> { buy, sell, intentos }
+    if (ex.necesitaAcumularDelta) acumuladoresDelta.set(ex.name, deltaAcumMinuto);
 
     function acumularDelta(tsMs, qty, isSell) {
         const minuto = Math.floor(tsMs / 60000) * 60;
@@ -1572,9 +1584,13 @@ async function fetchKlinesDesdeBD(interval, days, ex = exch) {
              FROM klines_1m WHERE open_time >= $1::bigint AND exchange = $2 ORDER BY open_time ASC`,
             [desde, ex.name]
         );
+        // taker_buy_base NULL (velas BingX sin delta acumulado) se propaga como null, NO como 0:
+        // con 0 el delta calculado sería -volumen ("todo ventas"), un dato ficticio. Los
+        // consumidores (gráfico, filtros de delta/CVD) tratan null como "sin dato" / aporte 0.
         return r.rows.map(f => [
             Number(f.open_time), Number(f.open), Number(f.high), Number(f.low),
-            Number(f.close), Number(f.volume), Number(f.close_time), 0, 0, Number(f.taker_buy_base)
+            Number(f.close), Number(f.volume), Number(f.close_time), 0, 0,
+            f.taker_buy_base == null ? null : Number(f.taker_buy_base)
         ]);
     }
     // Derivamos 5m / 15m agregando las velas de 1m por bucket temporal.
@@ -1599,9 +1615,11 @@ async function fetchKlinesDesdeBD(interval, days, ex = exch) {
          ORDER BY b ASC`,
         [desde, bucket, Date.now(), ex.name]
     );
+    // SUM(taker_buy_base) es NULL si TODAS las velas 1m del bucket están sin delta → null.
     return r.rows.map(f => [
         Number(f.open_time), Number(f.open), Number(f.high), Number(f.low),
-        Number(f.close), Number(f.volume), Number(f.close_time), 0, 0, Number(f.taker_buy_base)
+        Number(f.close), Number(f.volume), Number(f.close_time), 0, 0,
+        f.taker_buy_base == null ? null : Number(f.taker_buy_base)
     ]);
 }
 
@@ -1615,23 +1633,55 @@ function agregarVelas1m(bars1m, bucketMs) {
     let cur = null, curB = -1;
     for (const b of bars1m) {
         const bk = Math.floor(parseInt(b[0]) / bucketMs);
+        // taker_buy_base null (BingX sin delta acumulado) no debe contaminar la suma del
+        // bucket: se suma solo lo conocido, y si NINGUNA vela 1m tenía dato queda null.
+        const tb = b[9] == null ? null : parseFloat(b[9]);
         if (bk !== curB) {
             if (cur) out.push(cur);
             curB = bk;
             cur = [bk * bucketMs, parseFloat(b[1]), parseFloat(b[2]), parseFloat(b[3]),
-                   parseFloat(b[4]), parseFloat(b[5]), bk * bucketMs + bucketMs - 1, 0, 0, parseFloat(b[9])];
+                   parseFloat(b[4]), parseFloat(b[5]), bk * bucketMs + bucketMs - 1, 0, 0, tb];
         } else {
             cur[2] = Math.max(cur[2], parseFloat(b[2]));
             cur[3] = Math.min(cur[3], parseFloat(b[3]));
             cur[4] = parseFloat(b[4]);
             cur[5] += parseFloat(b[5]);
-            cur[9] += parseFloat(b[9]);
+            if (tb != null) cur[9] = (cur[9] ?? 0) + tb;
         }
     }
     if (cur) out.push(cur);
     const lastClose1m = bars1m.length ? parseInt(bars1m[bars1m.length - 1][6]) : 0;
     while (out.length && out[out.length - 1][6] > lastClose1m) out.pop();
     return out;
+}
+
+// Completa taker_buy_base (índice 9) en velas 1m traídas por REST de un exchange que no lo
+// provee en sus klines (BingX): primero desde klines_1m en BD (delta ya acumulado por el WS
+// de trades) y, para los minutos aún no volcados por el flush de 60s (típicamente la vela
+// recién cerrada), desde el acumulador en memoria. Sin esto, los filtros de delta/CVD de las
+// señales en vivo recibirían null → NaN y bloquearían silenciosamente todas las entradas.
+// Las velas que igual queden sin dato permanecen en null (aporte 0 en los cálculos).
+async function completarDeltaFaltante(bars1m, ex) {
+    if (!ex.necesitaAcumularDelta || !Array.isArray(bars1m) || !bars1m.length) return bars1m;
+    try {
+        const r = await pool.query(
+            `SELECT open_time, taker_buy_base FROM klines_1m
+             WHERE exchange = $1 AND open_time >= $2::bigint AND taker_buy_base IS NOT NULL`,
+            [ex.name, Number(bars1m[0][0])]
+        );
+        const porTiempo = new Map(r.rows.map(f => [Number(f.open_time), Number(f.taker_buy_base)]));
+        const acumLive = acumuladoresDelta.get(ex.name);
+        for (const b of bars1m) {
+            if (b[9] != null) continue;
+            const bd = porTiempo.get(Number(b[0]));
+            if (bd != null) { b[9] = bd; continue; }
+            const acc = acumLive && acumLive.get(Math.floor(Number(b[0]) / 60000) * 60);
+            if (acc) b[9] = acc.buy;
+        }
+    } catch (e) {
+        console.error(`[Delta ${ex.name}] No se pudo completar taker_buy_base desde BD:`, e.message);
+    }
+    return bars1m;
 }
 
 function lookupHTF(sortedTs, byTs, target) {
@@ -1861,12 +1911,14 @@ function runBacktest(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         globTs = [...globByTs.keys()].sort((a, b) => a - b);
     }
 
-    // Delta de volumen — prefix sum para rolling sum O(1) por barra
+    // Delta de volumen — prefix sum para rolling sum O(1) por barra.
+    // b[9] null (BingX sin taker_buy_base para esa vela) aporta delta 0: ni NaN (que
+    // bloquearía silenciosamente todo filtro de delta/CVD) ni "todo ventas" (bv=0 → -tv).
     const deltaPfx = new Array(bars1m.length + 1).fill(0);
     for (let i = 0; i < bars1m.length; i++) {
-        const bv = parseFloat(bars1m[i][9]); // takerBuyBaseAssetVolume
+        const bv = bars1m[i][9] == null ? null : parseFloat(bars1m[i][9]); // takerBuyBaseAssetVolume
         const tv = parseFloat(bars1m[i][5]); // total volume
-        deltaPfx[i + 1] = deltaPfx[i] + (bv - (tv - bv));
+        deltaPfx[i + 1] = deltaPfx[i] + (Number.isFinite(bv) ? bv - (tv - bv) : 0);
     }
 
     // CVD (Cumulative Volume Delta) — reutiliza deltaPfx. Slope = diferencia del acumulado
@@ -2541,12 +2593,23 @@ function iniciarMonitorPrecio(wsUrl, entorno) {
 // Monitor de precio para BingX: reutiliza el mismo feed de trades del adapter (gzip +
 // ping/pong resueltos ahí) en vez de un WS plano — BingX no distingue demo/real en precio,
 // así que hay una sola clave de mercado ('bingx') para todas las cuentas de ese exchange.
+// IDEMPOTENTE: se puede pedir desde varios lugares (arranque, reconciliación, gestión de
+// salidas) sin abrir conexiones duplicadas — necesario porque también debe correr cuando el
+// exchange activo es OTRO pero quedan posiciones BingX vivas cuyo TP/SL se evalúa por tick.
+let monitorBingXIniciado = false;
 function iniciarMonitorPrecioBingX() {
+    if (monitorBingXIniciado) return;
+    monitorBingXIniciado = true;
+    conectarMonitorPrecioBingX();
+}
+function conectarMonitorPrecioBingX() {
     const mercado = 'bingx';
     if (monitorConectando.has(mercado)) return;
     monitorConectando.add(mercado);
-    const feed = exch.whaleFeeds.find(f => f.connect);
-    if (!feed) return;
+    // Adapter de BingX SIEMPRE (no `exch`): el monitor debe funcionar igual cuando el
+    // exchange activo es Binance.
+    const feed = getExchange('bingx').whaleFeeds.find(f => f.connect);
+    if (!feed) { monitorConectando.delete(mercado); return; }
 
     const ws = feed.connect({
         onOpen: () => {
@@ -2560,7 +2623,7 @@ function iniciarMonitorPrecioBingX() {
         },
         onClose: () => {
             monitorConectando.delete(mercado);
-            setTimeout(iniciarMonitorPrecioBingX, 5000);
+            setTimeout(conectarMonitorPrecioBingX, 5000);
         },
         onError: (err) => {
             console.error(`Error WebSocket precio (${mercado}):`, err.message);
@@ -2676,36 +2739,72 @@ async function ejecutarAutoTrading() {
             }
         }
 
-        // GUARD DE SEGURIDAD: una cuenta solo se procesa si su exchange coincide con el
+        // GUARD DE SEGURIDAD: una cuenta solo abre ENTRADAS si su exchange coincide con el
         // exchange activo de DATOS (exch.name). Si no coincidieran, las señales se calcularían
         // sobre precios de un exchange y las órdenes/TP/SL se ejecutarían en otro — exactamente
         // la divergencia de precio (~$100 observados) que motivó esta migración. Las cuentas que
-        // no calzan simplemente no se gestionan este ciclo (ni entradas ni salidas), con un aviso
-        // único para no inundar el log.
+        // no calzan pero tienen posiciones ABIERTAS sí se gestionan (solo salidas: tiempo /
+        // stop EMA), con velas de SU propio exchange — nunca con las del activo.
+        const cuentasSoloSalidas = new Map(); // uid -> row (otro exchange, con posiciones vivas)
         for (const [uid, row] of rowsByUid) {
             const cuentaExchange = row.exchange || 'binance';
             if (cuentaExchange !== exch.name) {
                 rowsByUid.delete(uid);
+                if (posDe(uid).length) cuentasSoloSalidas.set(uid, row);
                 if (!avisoCuentasOmitidas.has(uid)) {
-                    console.warn(`⚠️ [AutoTrading u${uid}] Cuenta configurada en "${cuentaExchange}" pero el exchange activo de datos es "${exch.name}" — se omite (no se abren ni gestionan posiciones) hasta que coincidan.`);
+                    console.warn(`⚠️ [AutoTrading u${uid}] Cuenta configurada en "${cuentaExchange}" pero el exchange activo de datos es "${exch.name}" — no se abren entradas nuevas hasta que coincidan (las posiciones abiertas se siguen gestionando con datos de ${cuentaExchange}).`);
                     avisoCuentasOmitidas.add(uid);
                 }
             }
         }
-        if (rowsByUid.size === 0) return;
+        if (rowsByUid.size === 0 && cuentasSoloSalidas.size === 0) return;
 
-        // Datos de mercado COMPARTIDOS: se descargan una sola vez por ciclo (BTCUSDT es igual
-        // para todas las cuentas). Velas suficientes para que EMA/MACD/RSI/ADX converjan
-        // (6000 de 1m = ~100 velas 1h derivadas, para que el ADX 1h converja como en backtest).
-        const [bars1m, bars5m, bars15m] = await Promise.all([
-            fetchKlinesBatch('1m',  6000),
-            fetchKlinesBatch('5m',  800),
-            fetchKlinesBatch('15m', 800),
-        ]);
+        if (rowsByUid.size > 0) {
+            // Datos de mercado COMPARTIDOS: se descargan una sola vez por ciclo (BTCUSDT es igual
+            // para todas las cuentas). Velas suficientes para que EMA/MACD/RSI/ADX converjan
+            // (6000 de 1m = ~100 velas 1h derivadas, para que el ADX 1h converja como en backtest).
+            const [bars1m, bars5m, bars15m] = await Promise.all([
+                fetchKlinesBatch('1m',  6000),
+                fetchKlinesBatch('5m',  800),
+                fetchKlinesBatch('15m', 800),
+            ]);
+            // BingX: las velas REST vienen sin taker_buy_base — completarlo desde BD/acumulador
+            // para que los filtros de delta/CVD de las señales tengan dato real.
+            await completarDeltaFaltante(bars1m, exch);
 
-        for (const [uid, row] of rowsByUid) {
-            try { await procesarCuenta(row, bars1m, bars5m, bars15m); }
-            catch (e) { console.error(`[AutoTrading u${uid}] Error procesando cuenta:`, e.message); }
+            for (const [uid, row] of rowsByUid) {
+                try { await procesarCuenta(row, bars1m, bars5m, bars15m); }
+                catch (e) { console.error(`[AutoTrading u${uid}] Error procesando cuenta:`, e.message); }
+            }
+        }
+
+        // Cuentas de OTRO exchange con posiciones abiertas: gestión de salidas únicamente,
+        // con velas de su propio exchange (una descarga por exchange distinto, no por cuenta).
+        if (cuentasSoloSalidas.size > 0) {
+            const porExchange = new Map(); // exchangeName -> [rows]
+            for (const row of cuentasSoloSalidas.values()) {
+                const nombre = row.exchange || 'binance';
+                if (!porExchange.has(nombre)) porExchange.set(nombre, []);
+                porExchange.get(nombre).push(row);
+            }
+            for (const [nombre, rows] of porExchange) {
+                try {
+                    const exOtro = getExchange(nombre);
+                    if (nombre === 'bingx') iniciarMonitorPrecioBingX(); // TP/SL por tick con SU precio
+                    const [b1, b5, b15] = await Promise.all([
+                        fetchKlinesBatch('1m',  6000, exOtro),
+                        fetchKlinesBatch('5m',  800,  exOtro),
+                        fetchKlinesBatch('15m', 800,  exOtro),
+                    ]);
+                    await completarDeltaFaltante(b1, exOtro);
+                    for (const row of rows) {
+                        try { await procesarCuenta(row, b1, b5, b15, true); }
+                        catch (e) { console.error(`[AutoTrading u${row.usuario_id}] Error gestionando salidas (${nombre}):`, e.message); }
+                    }
+                } catch (e) {
+                    console.error(`[AutoTrading] Error en gestión de salidas de ${nombre}:`, e.message);
+                }
+            }
         }
     } catch (e) {
         console.error('[AutoTrading] Error en loop:', e.message);
@@ -2716,7 +2815,9 @@ async function ejecutarAutoTrading() {
 
 // Procesa UNA cuenta: gestiona salidas y evalúa/abre entrada según su estrategia, usando los
 // datos de mercado compartidos del ciclo. Aislada por try/catch en el llamador.
-async function procesarCuenta(row, bars1m, bars5m, bars15m) {
+// Con soloSalidas=true (cuenta de un exchange distinto al activo) SOLO gestiona salidas de
+// las posiciones vivas — jamás abre entradas, que exigen señales del exchange activo.
+async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false) {
     let ctx;
     try { ctx = ctxDeCuenta(row); }
     catch (e) { console.error(`[AutoTrading u${row.usuario_id}] No se pudo descifrar la clave:`, e.message); return; }
@@ -2732,6 +2833,9 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
 
     // Gestionar salidas de sub-posiciones abiertas (tiempo / EMA). El WS cubre TP/SL fijos.
     if (arr.length > 0) await gestionarPosicionAbierta(ctx, p, bars1m, bars5m, bars15m);
+
+    // Cuenta de otro exchange: solo salidas — nunca abrir entradas acá.
+    if (soloSalidas) return;
 
     // Cuenta apagada: solo gestionar salidas, no abrir nuevas entradas.
     if (!row.habilitado) return;
@@ -2902,7 +3006,19 @@ setTimeout(async () => {
 
     iniciarMonitorPrecio(WS_PRECIO_BINANCE_POR_ENTORNO.testnet, 'binance:testnet');
     iniciarMonitorPrecio(WS_PRECIO_BINANCE_POR_ENTORNO.real,    'binance:real');
-    if (exch.name === 'bingx') iniciarMonitorPrecioBingX();
+    // El monitor BingX arranca si es el exchange activo, o si alguna cuenta BingX tiene el
+    // bot encendido o posiciones abiertas: sus TP/SL por tick se evalúan con el precio de
+    // SU mercado aunque el activo sea otro exchange.
+    try {
+        const hayBingx = exch.name === 'bingx'
+            || [...ctxActivos.values()].some(c => c.exchange === 'bingx')
+            || (await pool.query(
+                   `SELECT 1 FROM cuentas_trading WHERE exchange = 'bingx' AND api_key IS NOT NULL AND habilitado = true LIMIT 1`
+               )).rows.length > 0;
+        if (hayBingx) iniciarMonitorPrecioBingX();
+    } catch (e) {
+        if (exch.name === 'bingx') iniciarMonitorPrecioBingX();
+    }
 
     // Reconciliación periódica: detecta posiciones cerradas por el exchange (Algo TP/SL) y
     // posiciones huérfanas (exchange con posición, libro vacío) sin depender del reinicio.
@@ -2919,6 +3035,9 @@ setTimeout(async () => {
                     try { ctx = ctxDeCuenta(row); ctxActivos.set(uid, ctx); }
                     catch (_) { continue; }
                 }
+                // Cuenta BingX detectada en runtime (p.ej. recién configurada): asegurar su
+                // feed de precio para el TP/SL por tick (idempotente).
+                if (ctx.exchange === 'bingx') iniciarMonitorPrecioBingX();
                 await reconciliarCuenta(ctx).catch(() => {});
             }
         } catch (e) { console.error('[AutoTrading] Error en pasada de reconciliación:', e.message); }
@@ -2955,15 +3074,17 @@ app.get('/api/autotrading', autenticar, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/autotrading', autenticar, async (req, res) => {
+// Handler compartido por PUT /api/autotrading y PUT /api/mi-cuenta/autotrading (la UI usa
+// ambos alias con la misma semántica — antes eran dos copias que ya habían divergido).
+async function actualizarConfigAutotrading(req, res) {
     const { habilitado, estrategia_nombre, position_usdt } = req.body;
     try {
         const cuenta = await pool.query(
-            'SELECT api_key, api_secret_cifrado, base_url FROM cuentas_trading WHERE usuario_id = $1',
+            'SELECT api_key, api_secret_cifrado, base_url, exchange FROM cuentas_trading WHERE usuario_id = $1',
             [req.usuario.id]
         );
         if (!cuenta.rows.length || !cuenta.rows[0].api_key) {
-            return res.status(400).json({ error: 'Primero cargá tus claves de Binance' });
+            return res.status(400).json({ error: 'Primero cargá las claves API de tu exchange (Binance o BingX)' });
         }
         if (habilitado === true && !estrategia_nombre) {
             return res.status(400).json({ error: 'Seleccioná una estrategia para encender el bot' });
@@ -2985,22 +3106,34 @@ app.put('/api/autotrading', autenticar, async (req, res) => {
                 req.usuario.id,
             ]
         );
+        // Reset de la última señal al cambiar config / encender, para re-evaluar limpio.
         if (estrategia_nombre !== undefined || habilitado === true) {
             await pool.query('UPDATE cuentas_trading SET ultima_senal = NULL WHERE usuario_id = $1', [req.usuario.id]);
         }
+        // Snapshot del capital inicial al encender (base para sizing "% capital inicial").
         if (habilitado === true) {
             try {
                 const c = cuenta.rows[0];
-                const bal = await balanceDeCuenta({ apiKey: c.api_key, secret: descifrarSecreto(c.api_secret_cifrado), base: c.base_url });
+                // El ctx DEBE llevar el exchange de la cuenta: sin él, balanceDeCuenta cae al
+                // adapter de Binance, que contra una cuenta BingX falla y deja capital_inicial_ref
+                // nulo — el sizing "% capital inicial" degeneraría en "% capital actual" sin aviso.
+                const bal = await balanceDeCuenta({
+                    apiKey:   c.api_key,
+                    secret:   descifrarSecreto(c.api_secret_cifrado),
+                    base:     c.base_url,
+                    exchange: c.exchange || 'binance',
+                });
                 await pool.query('UPDATE cuentas_trading SET capital_inicial_ref = $1 WHERE usuario_id = $2', [bal.wallet, req.usuario.id]);
-                console.log(`[AutoTrading u${req.usuario.id}] Capital inicial de referencia: ${bal.wallet} USDT`);
+                console.log(`[AutoTrading u${req.usuario.id}] Capital inicial de referencia: ${bal.wallet} USDT (${c.exchange || 'binance'})`);
             } catch (e) {
                 console.error(`[AutoTrading u${req.usuario.id}] No se pudo snapshotear capital inicial:`, e.message);
             }
         }
         res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
-});
+}
+
+app.put('/api/autotrading', autenticar, actualizarConfigAutotrading);
 
 app.get('/api/autotrading/status', autenticar, async (req, res) => {
     try {
@@ -3131,11 +3264,11 @@ app.post('/api/wspp-test', autenticar, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Endpoint de test: ejecuta una orden real en la cuenta (testnet) del propio usuario.
+// Endpoint de test: ejecuta una orden real en la cuenta (demo/testnet) del propio usuario.
 // Con `prueba:true` arma una entrada de verificación: usa el precio actual de mercado,
 // TP/SL bien cortos (±0.15%) para que se gatille rápido, y una qty mínima que respeta
-// el notional mínimo de Binance. Sirve para validar de punta a punta (incluidas las
-// órdenes de protección Algo) sin tener que esperar una señal real.
+// el notional mínimo del exchange de la cuenta. Sirve para validar de punta a punta
+// (incluidas las órdenes de protección) sin tener que esperar una señal real.
 app.post('/api/autotrading/test', autenticar, async (req, res) => {
     const signal       = req.body.signal                    || 'long';
     const positionUsdt = parseFloat(req.body.positionUsdt)  || 100;
@@ -3145,11 +3278,14 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
 
     try {
         const cr = await pool.query('SELECT * FROM cuentas_trading WHERE usuario_id = $1', [req.usuario.id]);
-        if (!cr.rows.length || !cr.rows[0].api_key) return res.status(400).json({ error: 'Cargá tus claves de Binance primero' });
+        if (!cr.rows.length || !cr.rows[0].api_key) return res.status(400).json({ error: 'Cargá las claves API de tu exchange primero' });
         let ctx;
         try { ctx = ctxDeCuenta(cr.rows[0]); }
         catch (e) { return res.status(500).json({ error: 'No se pudo descifrar la clave: ' + e.message }); }
         ctxActivos.set(req.usuario.id, ctx);
+        // Cuenta BingX: asegurar su feed de precio (idempotente) — sin él, precioDeCtx
+        // nunca tendría dato y la prueba respondería 503 indefinidamente.
+        if (ctx.exchange === 'bingx') iniciarMonitorPrecioBingX();
 
         if (req.body.prueba) {
             // Precio de referencia del mercado de ESTA cuenta (testnet o real), no de un feed global.
@@ -3386,11 +3522,12 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         Math.abs(close - e) / close * 100 <= (p.pullbackPerc ?? 0.2)
     ));
 
+    // Velas sin taker_buy_base (b[9] null, BingX) aportan delta 0 — ver deltaPfx.
     const deltaSlice   = bars1m.slice(-(p.deltaVelas ?? 3));
     const deltaRolling = deltaSlice.reduce((s, b) => {
         const totalVol = parseFloat(b[5]);
-        const buyVol   = parseFloat(b[9]);
-        return s + (2 * buyVol - totalVol);
+        const buyVol   = b[9] == null ? null : parseFloat(b[9]);
+        return s + (Number.isFinite(buyVol) ? 2 * buyVol - totalVol : 0);
     }, 0);
     const deltaOkLong  = !p.useDeltaFilter || deltaRolling > 0;
     const deltaOkShort = !p.useDeltaFilter || deltaRolling < 0;
@@ -3405,7 +3542,8 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
         const start = Math.max(0, bars1m.length - cvdLookback_sn);
         let acc = 0;
         for (let k = start; k < bars1m.length; k++) {
-            acc += 2 * parseFloat(bars1m[k][9]) - parseFloat(bars1m[k][5]);
+            const bv = bars1m[k][9] == null ? null : parseFloat(bars1m[k][9]);
+            acc += Number.isFinite(bv) ? 2 * bv - parseFloat(bars1m[k][5]) : 0;
         }
         cvdSlope_sn = acc;
     }
@@ -3572,6 +3710,9 @@ async function tickWsppNotificaciones() {
             fetchKlinesBatch('5m', 800),
             fetchKlinesBatch('15m', 800),
         ]);
+        // Igual que en ejecutarAutoTrading: sin esto, los filtros de delta/CVD en BingX
+        // evaluarían NaN y las notificaciones nunca dispararían.
+        await completarDeltaFaltante(bars1m, exch);
 
         for (const cfg of cfgs.rows) {
             try {
@@ -3828,56 +3969,8 @@ app.delete('/api/mi-cuenta', autenticar, async (req, res) => {
 });
 
 // Configura estrategia + monto + encendido del bot para la cuenta del usuario.
-app.put('/api/mi-cuenta/autotrading', autenticar, async (req, res) => {
-    const { habilitado, estrategia_nombre, position_usdt } = req.body;
-    try {
-        const cuenta = await pool.query(
-            'SELECT api_key, api_secret_cifrado, base_url FROM cuentas_trading WHERE usuario_id = $1',
-            [req.usuario.id]
-        );
-        if (!cuenta.rows.length || !cuenta.rows[0].api_key) {
-            return res.status(400).json({ error: 'Primero cargá tus claves de Binance' });
-        }
-        if (habilitado === true && !estrategia_nombre) {
-            return res.status(400).json({ error: 'Seleccioná una estrategia para encender el bot' });
-        }
-        if (estrategia_nombre) {
-            const s = await pool.query(
-                'SELECT 1 FROM estrategias_guardadas WHERE nombre = $1 AND usuario_id = $2',
-                [estrategia_nombre, req.usuario.id]
-            );
-            if (!s.rows.length) return res.status(400).json({ error: 'Estrategia no encontrada' });
-        }
-        await pool.query(
-            `UPDATE cuentas_trading SET
-                habilitado        = COALESCE($1, habilitado),
-                estrategia_nombre = COALESCE($2, estrategia_nombre),
-                position_usdt     = COALESCE($3, position_usdt)
-             WHERE usuario_id = $4`,
-            [
-                habilitado !== undefined ? habilitado : null,
-                estrategia_nombre !== undefined ? estrategia_nombre : null,
-                position_usdt !== undefined ? parseFloat(position_usdt) : null,
-                req.usuario.id,
-            ]
-        );
-        // Reset de la última señal al cambiar config / encender, para re-evaluar limpio.
-        if (estrategia_nombre !== undefined || habilitado === true) {
-            await pool.query('UPDATE cuentas_trading SET ultima_senal = NULL WHERE usuario_id = $1', [req.usuario.id]);
-        }
-        // Snapshot del capital inicial al encender (base para sizing "% capital inicial").
-        if (habilitado === true) {
-            try {
-                const c = cuenta.rows[0];
-                const bal = await balanceDeCuenta({ apiKey: c.api_key, secret: descifrarSecreto(c.api_secret_cifrado), base: c.base_url });
-                await pool.query('UPDATE cuentas_trading SET capital_inicial_ref = $1 WHERE usuario_id = $2', [bal.wallet, req.usuario.id]);
-            } catch (e) {
-                console.error(`[AutoTrading] No se pudo snapshotear capital de usuario ${req.usuario.id}:`, e.message);
-            }
-        }
-        res.json({ ok: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
+// Mismo handler que PUT /api/autotrading (ver actualizarConfigAutotrading).
+app.put('/api/mi-cuenta/autotrading', autenticar, actualizarConfigAutotrading);
 
 // Estado liviano de la cuenta del usuario (para el indicador en la UI).
 app.get('/api/mi-cuenta/status', autenticar, async (req, res) => {
@@ -4025,7 +4118,7 @@ app.post('/api/backtest', autenticar, async (req, res) => {
         // para que el lookback de las primeras velas tenga muestra previa.
         const oiDesdeSeg = Math.floor((periodStart.getTime() - (p.oiLookbackMin || 30) * 60000) / 1000);
         const [bars1m, bars5m, bars15m, whaleRes, oiRes, lsRes] = await Promise.all([
-            cargarKlines('1m',  days * 1440),
+            cargarKlines('1m',  days * 1440).then(b => fuente === 'bd' ? b : completarDeltaFaltante(b, exch)),
             cargarKlines('5m',  days * 288),
             cargarKlines('15m', days * 96),
             pool.query(
@@ -4130,10 +4223,12 @@ app.get('/api/klines', autenticar, async (req, res) => {
 });
 
 app.get('/api/klines/estado', autenticar, async (req, res) => {
+    // Acepta ?exchange= igual que el resto de las lecturas; sin el parámetro cae al activo.
+    const exVista = exchangeConsultado(req);
     try {
         const r = await pool.query(
             'SELECT COUNT(*)::int AS filas, MIN(open_time) AS primera, MAX(open_time) AS ultima FROM klines_1m WHERE exchange = $1',
-            [exch.name]
+            [exVista.name]
         );
         const row = r.rows[0];
         const diasCobertura = row.primera
@@ -4144,7 +4239,8 @@ app.get('/api/klines/estado', autenticar, async (req, res) => {
             primera: row.primera ? Number(row.primera) : null,
             ultima:  row.ultima  ? Number(row.ultima)  : null,
             diasCobertura: Math.round(diasCobertura * 10) / 10,
-            sincronizando: sincronizandoKlines.get(exch.name) || false,
+            exchange: exVista.name,
+            sincronizando: sincronizandoKlines.get(exVista.name) || false,
             diasObjetivo: DIAS_CACHE_KLINES,
         });
     } catch (err) {
@@ -4241,7 +4337,7 @@ app.get('/api/snapshot', autenticar, async (req, res) => {
             return {
                 ts: iso(sb[0]),
                 o: sb[1], h: sb[2], l: sb[3], c: sb[4],
-                vol: rnd(sb[5]), delta: rnd(2 * sb[9] - sb[5]),
+                vol: rnd(sb[5]), delta: sb[9] == null ? null : rnd(2 * sb[9] - sb[5]),
                 ema50: rnd(ema50[p1m], 1), ema100: rnd(ema100[p1m], 1),
                 ema200: rnd(ema200[p1m], 1), ema500: rnd(ema500[p1m], 1),
                 rsi15m: rnd(lookupHTF(ts15m, rsiByTs, tsC), 1),
@@ -4272,7 +4368,7 @@ app.get('/api/snapshot', autenticar, async (req, res) => {
             if (b[2] > maxP) maxP = b[2];
             if (b[3] < minP) minP = b[3];
             volTotal  += b[5];
-            deltaAcum += 2 * b[9] - b[5];
+            if (b[9] != null) deltaAcum += 2 * b[9] - b[5]; // velas sin delta (BingX) no aportan
         }
         const whales   = whaleRes.rows.map(w => ({ ts: parseFloat(w.ts_sec) * 1000, btc: parseFloat(w.cantidad), precio: parseFloat(w.precio), esVenta: w.es_venta }));
         const wCompras = whales.filter(w => !w.esVenta), wVentas = whales.filter(w => w.esVenta);
