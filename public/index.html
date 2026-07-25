@@ -2416,10 +2416,18 @@
             // No mostrar entradas del autobot mientras el backtest esté activo en el gráfico
             if (localStorage.getItem('backtestTrades')) return;
             try {
-                const res = await fetch('/api/autotrading/entradas', { credentials: 'same-origin' });
+                const res = await fetch(`/api/autotrading/entradas?exchange=${selectExchange.value}`, { credentials: 'same-origin' });
                 if (!res.ok) return;
                 const entradas = await res.json();
-                if (!entradas || entradas.length === 0) return;
+                if (!entradas || entradas.length === 0) {
+                    // Vacío para este exchange (ej. recién cambiaste de vista): limpiar cualquier
+                    // marcador que haya quedado dibujado del exchange anterior.
+                    if (_ultimaEntradaAutobotId !== -1) {
+                        chart.removeOverlay({ groupId: 'autobot-entradas' });
+                        _ultimaEntradaAutobotId = -1;
+                    }
+                    return;
+                }
 
                 const ultimaId = entradas[0]?.id ?? -1;
                 if (ultimaId === _ultimaEntradaAutobotId) return; // sin cambios

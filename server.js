@@ -315,6 +315,11 @@ async function inicializarBaseDeDatos() {
         // EXCHANGE_ACTIVO global para que se procese — si no coincide, se omite (ver guard en
         // ejecutarAutoTrading) para nunca mezclar señales de un exchange con órdenes de otro.
         await pool.query(`ALTER TABLE cuentas_trading ADD COLUMN IF NOT EXISTS exchange VARCHAR(10) NOT NULL DEFAULT 'binance'`);
+        // Cada entrada real queda tageada con el exchange donde se ejecutó (todas las existentes
+        // son de Binance, único exchange con ejecución hasta ahora). Sin esto, el panel del
+        // gráfico dibujaba las entradas de Binance encima de las velas de BingX al cambiar el
+        // selector de vista — visualmente engañoso, niveles de precio de un exchange sobre otro.
+        await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS exchange VARCHAR(10) NOT NULL DEFAULT 'binance'`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS telefono VARCHAR(30)`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_enviada VARCHAR(10)`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_ts BIGINT`);
@@ -2811,9 +2816,9 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
         // Usar el precio de fill real (avgPrice) en vez del cierre de vela estimado.
         const fillEntry = ordenEntrada.avgPrice || resultado.entry;
         const ins = await pool.query(
-            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8, $8) RETURNING id`,
-            [Date.now(), nuevaSenal, fillEntry, resultado.tp, resultado.sl, qty, stopType, row.usuario_id]
+            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8, $8, $9) RETURNING id`,
+            [Date.now(), nuevaSenal, fillEntry, resultado.tp, resultado.sl, qty, stopType, row.usuario_id, ctx.exchange]
         );
         const sub = {
             id: ins.rows[0].id, lado: nuevaSenal, qty, entry: fillEntry,
@@ -3007,15 +3012,19 @@ app.get('/api/autotrading/status', autenticar, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Filtrado por exchange (?exchange=...): las entradas reales quedan tageadas con el exchange
+// donde se ejecutaron, para no dibujar niveles de precio de un exchange sobre las velas de
+// otro (ver migración de auto_trading_entradas.exchange y exchangeConsultado).
 app.get('/api/autotrading/entradas', autenticar, async (req, res) => {
+    const exVista = exchangeConsultado(req);
     try {
         const r = await pool.query(
             `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl,
                     estado, precio_cierre, razon_cierre, ts_cierre
              FROM auto_trading_entradas
-             WHERE usuario_id = $1
+             WHERE usuario_id = $1 AND exchange = $2
              ORDER BY ts DESC LIMIT 200`,
-            [req.usuario.id]
+            [req.usuario.id, exVista.name]
         );
         res.json(r.rows);
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3167,9 +3176,9 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
         let proteccion = null;
         if (resEntrada.ok) {
             const ins = await pool.query(
-                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'Porcentaje', 'abierta', $7, $7) RETURNING id`,
-                [Date.now(), signal, entry, tp, sl, qty, req.usuario.id]
+                `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'Porcentaje', 'abierta', $7, $7, $8) RETURNING id`,
+                [Date.now(), signal, entry, tp, sl, qty, req.usuario.id, ctx.exchange]
             );
             const sub = { id: ins.rows[0].id, lado: signal, qty, entry, tp, sl, entryTs: Date.now(), stopType: 'Porcentaje' };
             posDe(req.usuario.id).push(sub);
