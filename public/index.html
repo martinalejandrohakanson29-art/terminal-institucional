@@ -376,8 +376,17 @@
         <div class="header-row">
             <div class="botonera">
 
-                <!-- Temporalidad -->
+                <!-- Exchange: fuente de TODO (velas, ballenas, OI, delta) -->
                 <div style="display:flex; align-items:center; gap:4px;">
+                    <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;">Exchange</span>
+                    <select id="sel-exchange" class="input-rango" onchange="cambiarExchangeGlobal()" style="width:78px;cursor:pointer;font-weight:bold;" title="Exchange: cambia la fuente de velas, ballenas, OI y delta en todo el panel">
+                        <option value="binance">Binance</option>
+                        <option value="bingx">BingX</option>
+                    </select>
+                </div>
+
+                <!-- Temporalidad -->
+                <div style="display:flex; align-items:center; gap:4px; border-left:2px solid #d1d4dc; margin-left:3px; padding-left:6px;">
                     <span style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;">TF</span>
                     <select id="sel-temporalidad" class="input-rango" onchange="cambiarTemporalidad(this.value)" style="width:52px;cursor:pointer;font-weight:bold;" title="Temporalidad">
                         <option value="1m">1m</option>
@@ -564,12 +573,18 @@
         // --- MEMORIA (servidor por usuario) ---
         const inputFiltroGrafico = document.getElementById('filtro-grafico');
         const selectMercadoBallenas = document.getElementById('filtro-mercado');
+        // Selector GLOBAL de exchange: fuente de velas (histórico + en vivo), ballenas, OI y
+        // delta en todo el panel. Independiente del exchange activo del server para
+        // señales/ejecución de auto-trading (ver cambiarExchangeGlobal más abajo).
+        const selectExchange = document.getElementById('sel-exchange');
 
         function aplicarConfigInicial() {
             const fg = cfgGet('filtroGrafico', null);
             if (fg !== null) inputFiltroGrafico.value = fg;
             const mb = cfgGet('mercadoBallenas', null);
             if (mb !== null) selectMercadoBallenas.value = mb;
+            const ex = cfgGet('exchangeSeleccionado', null);
+            if (ex !== null) selectExchange.value = ex;
         }
 
         inputFiltroGrafico.addEventListener('change', function() {
@@ -1878,6 +1893,55 @@
             else { btn.style.color='#94a3b8'; btn.style.borderColor='#94a3b8'; chart.removeOverlay({ groupId:'whales' }); }
         }
 
+        // --- MULTI-EXCHANGE: velas históricas + WS en vivo ---
+        // Reemplaza los fetch/WS directos a Binance por: histórico vía nuestro propio server
+        // (ya cachea klines de cada exchange, ver /api/klines) y WS en vivo directo al exchange
+        // elegido (Binance sin cambios; BingX con su framing propio: gzip + subscribe + ping/pong).
+        function urlVelasHistoricas(interval, limit) {
+            return `/api/klines?interval=${interval}&limit=${limit}&exchange=${selectExchange.value}`;
+        }
+
+        // BingX no expone taker_buy_base en su WS de klines (mismo límite que en el server):
+        // el delta en vivo del gráfico queda en 0 para BingX hasta que se acumule server-side.
+        function crearKlineWSBingX(interval) {
+            const facade = { onopen: null, onmessage: null, onclose: null, onerror: null, readyState: 0 };
+            const real = new WebSocket('wss://open-api-swap.bingx.com/swap-market');
+            real.binaryType = 'arraybuffer';
+            real.onopen = () => {
+                facade.readyState = 1;
+                real.send(JSON.stringify({ id: 'kline-' + interval, reqType: 'sub', dataType: `BTC-USDT@kline_${interval}` }));
+                if (facade.onopen) facade.onopen();
+            };
+            real.onmessage = async (e) => {
+                let text;
+                try {
+                    const stream = new Blob([e.data]).stream().pipeThrough(new DecompressionStream('gzip'));
+                    text = await new Response(stream).text();
+                } catch (err) { return; }
+                if (text === 'Ping') { real.send('Pong'); return; }
+                let msg;
+                try { msg = JSON.parse(text); } catch (err) { return; }
+                if (!Array.isArray(msg.data)) return;
+                for (const d of msg.data) {
+                    const k = { t: Number(d.T), o: d.o, h: d.h, l: d.l, c: d.c, v: d.v, V: '0' };
+                    if (facade.onmessage) facade.onmessage({ data: JSON.stringify({ k }) });
+                }
+            };
+            real.onerror = (err) => { if (facade.onerror) facade.onerror(err); };
+            real.onclose = () => { facade.readyState = 3; if (facade.onclose) facade.onclose(); };
+            facade.close = () => { try { real.close(); } catch (_) {} };
+            return facade;
+        }
+
+        // Drop-in replacement de `new WebSocket('wss://stream.binance.com.../kline_X')`: mismo
+        // objeto (onopen/onmessage/onclose/onerror/close/readyState), así el código que ya
+        // arma y consume estos sockets no cambia salvo esta línea de creación.
+        function crearKlineSocket(interval) {
+            return selectExchange.value === 'bingx'
+                ? crearKlineWSBingX(interval)
+                : new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${interval}`);
+        }
+
         // --- VARIABLES GLOBALES DE DATOS ---
         let binanceSocket = null;
         let binanceSocketIntencional = false;
@@ -1953,20 +2017,10 @@
             }
 
             try {
-                const limitePorPedido = 1000, totalPedidos = 10;
-                console.log(`🚀 Cargando ${totalPedidos * limitePorPedido} velas para ${temporalidad}...`);
+                const totalVelas = 10000;
+                console.log(`🚀 Cargando ${totalVelas} velas de ${selectExchange.value} para ${temporalidad}...`);
 
-                const duracionMs  = DURACION_INTERVALO[temporalidad] || 60000;
-                const tamañoBloque = limitePorPedido * duracionMs;
-                const ahora = Date.now();
-
-                const pedidos = Array.from({ length: totalPedidos }, (_, i) => {
-                    let url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${temporalidad}&limit=${limitePorPedido}`;
-                    if (i > 0) url += `&endTime=${ahora - i * tamañoBloque}`;
-                    return fetch(url).then(r => r.json()).catch(() => []);
-                });
-
-                const resultados = await Promise.all(pedidos);
+                const resultados = [await fetch(urlVelasHistoricas(temporalidad, totalVelas)).then(r => r.json()).catch(() => [])];
                 const seen = new Set();
                 const allVelas = [];
                 resultados.flat().forEach(v => {
@@ -1986,9 +2040,10 @@
                 // Cargar OI + ratios y mergearlos ANTES del primer applyNewData (sin flash).
                 // Los ratios se mergean aunque el panel esté oculto, así al activarlo ya hay datos.
                 try {
+                    const exVista = selectExchange.value;
                     const [oiResp, lsResp] = await Promise.all([
-                        fetch('/api/open-interest'),
-                        fetch('/api/long-short'),
+                        fetch(`/api/open-interest?exchange=${exVista}`),
+                        fetch(`/api/long-short?exchange=${exVista}`),
                     ]);
                     memoriaOIBD  = await oiResp.json();
                     memoriaLSRBD = await lsResp.json();
@@ -2005,7 +2060,7 @@
                 actualizarDisplayDeltaVol();
                 pedirHistorialBallenas(); // después de que las velas están listas
 
-                binanceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${temporalidad}`);
+                binanceSocket = crearKlineSocket(temporalidad);
                 binanceSocket.onopen  = () => actualizarEstadoConexion('kline', true);
                 binanceSocket.onerror = (e) => console.error('Error kline socket:', e);
                 binanceSocket.onclose = () => {
@@ -2048,6 +2103,20 @@
             actualizarDisplayRSI15m();
         }
 
+        // Cambia el exchange fuente de TODO el panel: velas (histórico + en vivo), RSI/EMA∠ de
+        // temporalidad propia, ballenas, histograma y OI en vivo. No toca el exchange activo
+        // para señales/ejecución del auto-trading (eso sigue siendo EXCHANGE_ACTIVO del server).
+        function cambiarExchangeGlobal() {
+            guardarConfigServidor('exchangeSeleccionado', selectExchange.value).catch(() => {});
+            cargarDatos(temporalidadActual);
+            cargarVelas15m();
+            iniciarSocket15m();
+            if (rsiVisible) activarFuentesRSI();
+            if (emaAngVisible) activarFuentesEMAang();
+            pedirHistorialBallenas();
+            actualizarOpenInterestEnVivo();
+        }
+
         function restaurarDibujos(tf) {
             const dibujos = registroDibujos[tf] || [];
             dibujos.forEach(d => {
@@ -2067,7 +2136,8 @@
             // 7 días de tape alcanzan para los marcadores (solo se dibujan sobre velas cargadas)
             // y para el delta 24h; el mercado se filtra server-side según el selector.
             const mercado = selectMercadoBallenas.value;
-            fetch(`/api/ballenas?horas=168${mercado ? `&mercado=${mercado}` : ''}`, { credentials: 'same-origin' })
+            const exchange = selectExchange.value;
+            fetch(`/api/ballenas?horas=168&exchange=${exchange}${mercado ? `&mercado=${mercado}` : ''}`, { credentials: 'same-origin' })
                 .then(r => r.json())
                 .then(datos => {
                     const nuevoTiempo = datos.length > 0 ? datos[0].tiempo_segundos : -1;
@@ -2132,7 +2202,7 @@
 
         // --- OPEN INTEREST EN VIVO (via proxy del servidor, sin CORS) ---
         function actualizarOpenInterestEnVivo() {
-            fetch('/api/oi-live')
+            fetch(`/api/oi-live?exchange=${selectExchange.value}`)
                 .then(r => r.json())
                 .then(datos => {
                     if (velasActuales.length > 0 && datos.openInterest) {
@@ -2185,7 +2255,8 @@
         async function cargarHistograma() {
             try {
                 const mercado = selectMercadoBallenas.value;
-                const res = await fetch(`/api/whale-histogram?horas=${histoHoras}&bucket=${histoBucket}${mercado ? `&mercado=${mercado}` : ''}`, { credentials: 'same-origin' });
+                const exchange = selectExchange.value;
+                const res = await fetch(`/api/whale-histogram?horas=${histoHoras}&bucket=${histoBucket}&exchange=${exchange}${mercado ? `&mercado=${mercado}` : ''}`, { credentials: 'same-origin' });
                 if (!res.ok) return;
                 renderizarHistograma(await res.json());
             } catch (e) {
@@ -2417,6 +2488,7 @@
             const config = {
                 filtroGrafico:  parseFloat(inputFiltroGrafico.value),
                 mercadoBallenas: selectMercadoBallenas.value,
+                exchangeSeleccionado: selectExchange.value,
                 histoHoras,
                 histoBucket,
                 temporalidad:   temporalidadActual,
@@ -2509,7 +2581,7 @@
 
         async function cargarVelas15m() {
             try {
-                const resp = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=1000');
+                const resp = await fetch(urlVelasHistoricas('15m', 1000));
                 const datos = await resp.json();
                 velas15m = datos.map(v => ({ timestamp: v[0], close: parseFloat(v[4]) }));
                 actualizarDisplayRSI15m();
@@ -2519,7 +2591,7 @@
 
         function iniciarSocket15m() {
             if (socket15m && socket15m.readyState <= 1) socket15m.close();
-            socket15m = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_15m');
+            socket15m = crearKlineSocket('15m');
             socket15m.onmessage = function(e) {
                 const k = JSON.parse(e.data).k;
                 const ts = k.t, close = parseFloat(k.c);
@@ -2568,7 +2640,7 @@
         async function cargarVelasRSI() {
             const tf = configRSI.timeframe;
             try {
-                const resp = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${tf}&limit=1000`);
+                const resp = await fetch(urlVelasHistoricas(tf, 1000));
                 const datos = await resp.json();
                 // Ignora respuesta si la temporalidad cambió mientras se descargaba
                 if (configRSI.timeframe !== tf) return;
@@ -2581,7 +2653,7 @@
             if (socketRSI && socketRSI.readyState <= 1) { socketRSIIntencional = true; socketRSI.close(); }
             const tf = configRSI.timeframe;
             socketRSIIntencional = false;
-            socketRSI = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${tf}`);
+            socketRSI = crearKlineSocket(tf);
             socketRSI.onmessage = function(e) {
                 if (configRSI.timeframe !== tf) return;
                 const k = JSON.parse(e.data).k;
@@ -2646,7 +2718,7 @@
         async function cargarVelasEMAang() {
             const tf = configEMAang.timeframe;
             try {
-                const resp = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${tf}&limit=1000`);
+                const resp = await fetch(urlVelasHistoricas(tf, 1000));
                 const datos = await resp.json();
                 if (configEMAang.timeframe !== tf) return;
                 velasEMAang = datos.map(v => ({
@@ -2661,7 +2733,7 @@
             if (socketEMAang && socketEMAang.readyState <= 1) { socketEMAangIntencional = true; socketEMAang.close(); }
             const tf = configEMAang.timeframe;
             socketEMAangIntencional = false;
-            socketEMAang = new WebSocket(`wss://stream.binance.com:9443/ws/btcusdt@kline_${tf}`);
+            socketEMAang = crearKlineSocket(tf);
             socketEMAang.onmessage = function(e) {
                 if (configEMAang.timeframe !== tf) return;
                 const k = JSON.parse(e.data).k;
@@ -2861,6 +2933,7 @@
                 // Filtros
                 if (cfg.filtroGrafico   != null) inputFiltroGrafico.value = cfg.filtroGrafico;
                 if (cfg.mercadoBallenas != null) selectMercadoBallenas.value = cfg.mercadoBallenas;
+                if (cfg.exchangeSeleccionado != null) selectExchange.value = cfg.exchangeSeleccionado;
                 if (cfg.histoHoras    != null) { histoHoras = cfg.histoHoras; document.querySelectorAll('[data-h]').forEach(b => b.classList.toggle('btn-activo', parseInt(b.dataset.h) === histoHoras)); }
                 if (cfg.histoBucket   != null) { histoBucket = cfg.histoBucket; document.querySelectorAll('[data-b]').forEach(b => b.classList.toggle('btn-activo', parseInt(b.dataset.b) === histoBucket)); }
 
@@ -3025,9 +3098,10 @@
                 const r = await fetch('/api/mi-cuenta', { credentials: 'same-origin' });
                 const c = r.ok ? await r.json() : {};
                 if (c.configurada) {
-                    estadoEl.textContent = `✅ ${c.api_key_mascara} · ${c.entorno || 'testnet'}`;
+                    estadoEl.textContent = `✅ ${c.api_key_mascara} · ${c.exchange || 'binance'} · ${c.entorno || 'demo'}`;
                     estadoEl.style.color = c.entorno === 'real' ? '#ef5350' : '#26a69a';
-                    document.getElementById('at-entorno').value = c.entorno === 'real' ? 'real' : 'testnet';
+                    document.getElementById('at-exchange').value = c.exchange || 'binance';
+                    document.getElementById('at-entorno').value = c.entorno === 'real' ? 'real' : 'demo';
                     actualizarAvisoEntorno();
                     // Limpiar inputs (no precargamos claves)
                     document.getElementById('at-api-key').value = '';
@@ -3046,22 +3120,23 @@
         async function guardarClavesBinance() {
             const api_key    = document.getElementById('at-api-key').value.trim();
             const api_secret = document.getElementById('at-api-secret').value.trim();
+            const exchange   = document.getElementById('at-exchange').value;
             const entorno    = document.getElementById('at-entorno').value;
             const msgEl = document.getElementById('at-msg');
             const btn   = document.getElementById('at-guardar-claves');
             if (!api_key || !api_secret) {
                 mostrarMsgAT('Completá API Key y API Secret', true); return;
             }
-            if (entorno === 'real' && !confirm('Vas a vincular una cuenta REAL: las órdenes usan plata de verdad. ¿Continuar?')) return;
+            if (entorno === 'real' && !confirm(`Vas a vincular una cuenta REAL de ${exchange}: las órdenes usan plata de verdad. ¿Continuar?`)) return;
             btn.disabled = true; btn.textContent = 'Verificando…';
             try {
                 const res = await fetch('/api/mi-cuenta', {
                     method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-                    body: JSON.stringify({ api_key, api_secret, entorno })
+                    body: JSON.stringify({ api_key, api_secret, exchange, entorno })
                 });
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.error || 'no se pudo guardar');
-                mostrarMsgAT(`✅ Claves vinculadas · balance ${Number(data.balance_usdt).toFixed(2)} USDT (${data.entorno})`, false);
+                mostrarMsgAT(`✅ Claves vinculadas (${data.exchange}) · balance ${Number(data.balance_usdt).toFixed(2)} USDT (${data.entorno})`, false);
                 await refrescarEstadoCuenta();
             } catch (e) {
                 mostrarMsgAT('Error: ' + e.message, true);
@@ -3070,13 +3145,18 @@
             }
         }
 
-        // Ajusta el texto de ayuda según el entorno elegido (testnet vs real).
+        // Ajusta el texto de ayuda según exchange + entorno elegidos.
         function actualizarAvisoEntorno() {
-            const entorno = document.getElementById('at-entorno').value;
+            const exchange = document.getElementById('at-exchange').value;
+            const entorno  = document.getElementById('at-entorno').value;
             const aviso = document.getElementById('at-aviso-entorno');
+            const nombreExchange = exchange === 'bingx' ? 'BingX' : 'Binance';
             if (entorno === 'real') {
-                aviso.innerHTML = 'Las claves se guardan cifradas. Usá claves de <b>Futures REAL</b> (fapi.binance.com), sin permiso de retiro. ⚠️ Opera con plata de verdad.';
+                aviso.innerHTML = `Las claves se guardan cifradas. Usá claves de <b>${nombreExchange} Futures REAL</b>, sin permiso de retiro. ⚠️ Opera con plata de verdad.`;
                 aviso.style.color = '#ef5350';
+            } else if (exchange === 'bingx') {
+                aviso.innerHTML = 'Las claves se guardan cifradas. Usá una API key <b>VST (demo)</b> creada en el panel de BingX — a diferencia de Binance, la demo de BingX opera sobre el mismo precio real, solo con saldo virtual.';
+                aviso.style.color = '#94a3b8';
             } else {
                 aviso.innerHTML = 'Las claves se guardan cifradas. Usá claves de <b>Futures Testnet</b>, sin permiso de retiro.';
                 aviso.style.color = '#94a3b8';
@@ -3316,17 +3396,23 @@
             <h3 style="margin-bottom:18px;font-size:15px;">AutoBot — Configuración</h3>
             <div id="at-msg" style="display:none;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;"></div>
 
-            <!-- Cuenta Binance (claves API por usuario) -->
+            <!-- Cuenta de trading (claves API por usuario, cualquier exchange soportado) -->
             <div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:16px;background:#fafafa;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                    <span style="font-size:12px;font-weight:bold;color:#374151;">Cuenta Binance</span>
+                    <span style="font-size:12px;font-weight:bold;color:#374151;">Cuenta de trading</span>
                     <span id="at-cuenta-estado" style="font-size:11px;font-weight:bold;color:#94a3b8;">— sin vincular —</span>
                 </div>
                 <div id="at-cuenta-form">
+                    <label style="display:block;font-size:11px;font-weight:bold;color:#374151;margin-bottom:4px;">Exchange</label>
+                    <select id="at-exchange" onchange="actualizarAvisoEntorno()"
+                        style="width:100%;padding:7px 9px;border:1px solid #d1d4dc;border-radius:5px;font-size:12px;margin-bottom:7px;box-sizing:border-box;background:#f8fafc;">
+                        <option value="binance">Binance</option>
+                        <option value="bingx">BingX</option>
+                    </select>
                     <label style="display:block;font-size:11px;font-weight:bold;color:#374151;margin-bottom:4px;">Entorno</label>
                     <select id="at-entorno" onchange="actualizarAvisoEntorno()"
                         style="width:100%;padding:7px 9px;border:1px solid #d1d4dc;border-radius:5px;font-size:12px;margin-bottom:7px;box-sizing:border-box;background:#f8fafc;">
-                        <option value="testnet">🧪 Testnet (plata virtual)</option>
+                        <option value="demo">🧪 Demo (plata virtual)</option>
                         <option value="real">🔴 Real (plata de verdad)</option>
                     </select>
                     <input type="text" id="at-api-key" placeholder="API Key" autocomplete="off"

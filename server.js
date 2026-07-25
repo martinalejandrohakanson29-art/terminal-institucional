@@ -7,6 +7,37 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
+const { getExchange } = require('./lib/exchanges');
+
+// ── Selector de exchange activo (lecturas + ejecución) ──────────────────
+// Controla qué exchange alimenta señales/backtests Y qué broker ejecuta las órdenes
+// (nunca mezclados, ver guard en ejecutarAutoTrading). Todas las QUERIES de lectura
+// (backtest, señal en vivo, paneles) siguen filtrando por este único exchange.
+const EXCHANGE_ACTIVO = (process.env.EXCHANGE_ACTIVO || 'binance').toLowerCase();
+const exch = getExchange(EXCHANGE_ACTIVO);
+console.log(`🔀 Exchange activo (lecturas/ejecución): ${exch.name}`);
+
+// Resuelve qué exchange mostrar en paneles de solo-lectura (ballenas, OI en vivo, histograma)
+// a partir de ?exchange=... en la query. Es un selector de VISTA, independiente del exchange
+// activo para señales/ejecución — nunca toca backtests ni auto-trading. Si el valor no es
+// válido o no viene, cae al exchange activo (comportamiento previo, sin romper nada).
+function exchangeConsultado(req) {
+    const nombre = String(req.query.exchange || '').toLowerCase();
+    if (!nombre) return exch;
+    try { return getExchange(nombre); } catch (_) { return exch; }
+}
+
+// ── Exchanges de INGESTA (recolección) ──────────────────────────────────
+// Lista separada del exchange activo: permite recolectar klines/OI/ballenas/delta de
+// varios exchanges EN PARALELO para ir armando histórico de todos, aunque solo uno
+// esté "activo" para señales y ejecución. Por defecto, solo el activo (no cambia el
+// comportamiento ni el costo de nadie que no lo configure explícitamente).
+// Ej.: EXCHANGES_INGESTA=binance,bingx
+const EXCHANGES_INGESTA = [...new Set(
+    (process.env.EXCHANGES_INGESTA || EXCHANGE_ACTIVO).split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+)];
+const exchangesIngesta = EXCHANGES_INGESTA.map(getExchange);
+console.log(`📥 Exchanges en ingesta: ${exchangesIngesta.map(e => e.name).join(', ')}`);
 
 const app = express();
 app.use(express.json());
@@ -57,25 +88,11 @@ function enmascararClave(clave) {
     return `${clave.slice(0, 4)}…${clave.slice(-4)}`;
 }
 
-// ── Helpers Binance por-cuenta (multi-cuenta) ─────────────────────────
-// Firman y operan con el contexto de cada cuenta { apiKey, secret, base }, en vez de
-// usar claves globales del entorno (cada usuario opera su propia cuenta de Binance).
-function firmarParams(params, secret) {
-    return crypto.createHmac('sha256', secret).update(params).digest('hex');
-}
-
+// ── Helpers de cuenta por-broker (multi-cuenta, multi-exchange) ────────
+// Cada cuenta trae su propio { apiKey, secret, base, exchange }; se despacha al adapter
+// correspondiente (lib/exchanges/{binance,bingx}.js) en vez de asumir un solo broker.
 async function balanceDeCuenta(ctx) {
-    const ts  = Date.now();
-    const q   = `timestamp=${ts}&recvWindow=10000`;
-    const url = `${ctx.base}/fapi/v2/balance?${q}&signature=${firmarParams(q, ctx.secret)}`;
-    const r    = await fetch(url, { headers: { 'X-MBX-APIKEY': ctx.apiKey } });
-    const body = await r.json();
-    if (!Array.isArray(body)) throw new Error(body && body.msg ? body.msg : 'no se pudo leer balance');
-    const usdt = body.find(b => b.asset === 'USDT');
-    return {
-        wallet:     usdt ? parseFloat(usdt.balance) : 0,
-        disponible: usdt ? parseFloat(usdt.availableBalance) : 0,
-    };
+    return getExchange(ctx.exchange || 'binance').trade.getBalance(ctx);
 }
 
 const pool = new Pool({
@@ -293,12 +310,51 @@ async function inicializarBaseDeDatos() {
         `);
         // account_id en auto_trading_entradas para separar entradas por cuenta (= usuario_id).
         await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS account_id INTEGER`);
+        // Fase 2 multi-exchange: cada cuenta de trading indica contra qué exchange ejecuta
+        // (default 'binance' para no romper cuentas ya configuradas). Debe coincidir con el
+        // EXCHANGE_ACTIVO global para que se procese — si no coincide, se omite (ver guard en
+        // ejecutarAutoTrading) para nunca mezclar señales de un exchange con órdenes de otro.
+        await pool.query(`ALTER TABLE cuentas_trading ADD COLUMN IF NOT EXISTS exchange VARCHAR(10) NOT NULL DEFAULT 'binance'`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS telefono VARCHAR(30)`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_enviada VARCHAR(10)`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_ts BIGINT`);
         // Migración: canal de notificación (whatsapp | discord) y webhook directo de Discord.
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS canal VARCHAR(20) NOT NULL DEFAULT 'whatsapp'`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS discord_webhook_url TEXT`);
+
+        // Migración multi-exchange: klines_1m y open_interest quedan taggeadas por exchange
+        // (default 'binance' para no romper los datos ya guardados) y sus PK pasan a ser
+        // compuestas (tiempo, exchange) para que Binance y BingX puedan convivir en la misma
+        // tabla sin pisarse aunque un mismo timestamp exista en ambos.
+        await pool.query(`ALTER TABLE klines_1m ADD COLUMN IF NOT EXISTS exchange VARCHAR(10) NOT NULL DEFAULT 'binance'`);
+        await pool.query(`ALTER TABLE klines_1m ALTER COLUMN taker_buy_base DROP NOT NULL`); // BingX no lo provee en klines
+        await pool.query(`
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'klines_1m_pkey'
+                    AND conkey = (SELECT array_agg(attnum ORDER BY attnum) FROM pg_attribute
+                                  WHERE attrelid = 'klines_1m'::regclass AND attname IN ('open_time','exchange'))
+                ) THEN
+                    ALTER TABLE klines_1m DROP CONSTRAINT IF EXISTS klines_1m_pkey;
+                    ALTER TABLE klines_1m ADD CONSTRAINT klines_1m_pkey PRIMARY KEY (open_time, exchange);
+                END IF;
+            END $$;
+        `);
+        await pool.query(`ALTER TABLE open_interest ADD COLUMN IF NOT EXISTS exchange VARCHAR(10) NOT NULL DEFAULT 'binance'`);
+        await pool.query(`
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'open_interest_pkey'
+                    AND conkey = (SELECT array_agg(attnum ORDER BY attnum) FROM pg_attribute
+                                  WHERE attrelid = 'open_interest'::regclass AND attname IN ('tiempo','exchange'))
+                ) THEN
+                    ALTER TABLE open_interest DROP CONSTRAINT IF EXISTS open_interest_pkey;
+                    ALTER TABLE open_interest ADD CONSTRAINT open_interest_pkey PRIMARY KEY (tiempo, exchange);
+                END IF;
+            END $$;
+        `);
+        // ballenas no tiene PK basada en tiempo (es SERIAL), solo necesita la columna para filtrar.
+        await pool.query(`ALTER TABLE ballenas ADD COLUMN IF NOT EXISTS exchange VARCHAR(10) NOT NULL DEFAULT 'binance'`);
 
         await pool.query(`INSERT INTO configuracion (clave, valor) VALUES ('limite_bd', 1.0) ON CONFLICT (clave) DO NOTHING`);
 
@@ -326,77 +382,73 @@ async function inicializarBaseDeDatos() {
 }
 inicializarBaseDeDatos();
 
-// --- RECOLECTOR DE OPEN INTEREST ---
-async function guardarOpenInterest() {
+// --- RECOLECTOR DE OPEN INTEREST (uno por cada exchange en ingesta) ---
+async function guardarOpenInterest(ex) {
     try {
-        const respuesta = await fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT');
-        const datos = await respuesta.json();
-        if (datos && datos.openInterest) {
-            const valor = parseFloat(datos.openInterest);
-            const tiempoVelaActual = Math.floor(Date.now() / 60000) * 60;
-            await pool.query(
-                `INSERT INTO open_interest (tiempo, valor) VALUES ($1, $2)
-                 ON CONFLICT (tiempo) DO UPDATE SET valor = EXCLUDED.valor`,
-                [tiempoVelaActual, valor]
-            );
-        }
+        const valor = await ex.fetchOpenInterest();
+        const tiempoVelaActual = Math.floor(Date.now() / 60000) * 60;
+        await pool.query(
+            `INSERT INTO open_interest (tiempo, valor, exchange) VALUES ($1, $2, $3)
+             ON CONFLICT (tiempo, exchange) DO UPDATE SET valor = EXCLUDED.valor`,
+            [tiempoVelaActual, valor, ex.name]
+        );
     } catch (error) {
-        console.error('Error al guardar Open Interest:', error);
+        console.error(`Error al guardar Open Interest (${ex.name}):`, error.message);
     }
 }
-setInterval(guardarOpenInterest, 60000);
-guardarOpenInterest();
 
 // Backfill de OI histórico. El recolector live solo acumula OI desde que el server arranca,
 // pero los backtests corren sobre la cache de velas (hasta 365 días). Sin esto el filtro de OI
 // no tendría dato en el tramo histórico y rechazaría todas las entradas.
-// LÍMITE DURO: Binance solo expone OI histórico de los ÚLTIMOS ~30 DÍAS (futures/data/openInterestHist,
-// máx 500 puntos/request). No hay forma de conseguir OI más viejo → el filtro de OI es fiable
-// solo en backtests de ≤ 30 días; más atrás no hay cobertura (se avisa con warning).
-async function backfillOpenInterestHistorico() {
+// LÍMITE DURO Binance: solo expone OI histórico de los ÚLTIMOS ~30 DÍAS (máx 500 puntos/request).
+// BingX: no documenta ningún endpoint de histórico de OI — fetchOpenInterestHist() del adapter
+// devuelve [] y el backfill no hace nada; el filtro de OI en BingX solo cubre desde que este
+// collector arrancó (se avisa con warning igual que la cobertura acotada de Binance).
+async function backfillOpenInterestHistorico(ex) {
     try {
         const PERIOD = '5m', LIMIT = 500, STEP_MS = 5 * 60000;
         const limiteInferior = Date.now() - 30 * 86400000;
         // Solo backfillear si falta cobertura histórica (evita re-trabajo en cada reinicio).
-        const cob = await pool.query('SELECT MIN(tiempo) AS min FROM open_interest');
+        const cob = await pool.query('SELECT MIN(tiempo) AS min FROM open_interest WHERE exchange = $1', [ex.name]);
         const minSeg = cob.rows[0] && cob.rows[0].min ? Number(cob.rows[0].min) : null;
         if (minSeg && minSeg * 1000 <= limiteInferior + 2 * 86400000) {
             return; // ya hay datos que llegan a ~28+ días atrás
         }
         let endTime = Date.now(), pedidos = 0, insertados = 0;
         while (endTime > limiteInferior && pedidos < 25) {
-            const url = `https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=${PERIOD}&limit=${LIMIT}&endTime=${endTime}`;
-            const resp = await fetch(url);
-            const datos = await resp.json();
+            const datos = await ex.fetchOpenInterestHist({ period: PERIOD, limit: LIMIT, endTime });
             if (!Array.isArray(datos) || datos.length === 0) break;
-            // datos: [{ sumOpenInterest, sumOpenInterestValue, timestamp(ms) }] en orden ascendente.
-            // Guardamos sumOpenInterest (OI en BTC), consistente con el recolector live (/openInterest).
+            // datos: [{ valor, timestamp(ms) }] en orden ascendente (normalizado por el adapter).
             const placeholders = [], params = [];
             for (const d of datos) {
-                const valor  = parseFloat(d.sumOpenInterest);
-                const tiempo = Math.floor(Number(d.timestamp) / 60000) * 60; // epoch seg alineado a minuto
-                if (isNaN(valor) || isNaN(tiempo)) continue;
+                const tiempo = Math.floor(d.timestamp / 60000) * 60; // epoch seg alineado a minuto
+                if (isNaN(d.valor) || isNaN(tiempo)) continue;
                 const o = params.length;
-                placeholders.push(`($${o + 1},$${o + 2})`);
-                params.push(tiempo, valor);
+                placeholders.push(`($${o + 1},$${o + 2},$${o + 3})`);
+                params.push(tiempo, d.valor, ex.name);
             }
             if (params.length) {
                 const r = await pool.query(
-                    `INSERT INTO open_interest (tiempo, valor) VALUES ${placeholders.join(',')}
-                     ON CONFLICT (tiempo) DO NOTHING`,
+                    `INSERT INTO open_interest (tiempo, valor, exchange) VALUES ${placeholders.join(',')}
+                     ON CONFLICT (tiempo, exchange) DO NOTHING`,
                     params
                 );
                 insertados += r.rowCount;
             }
-            endTime = Number(datos[0].timestamp) - STEP_MS; // siguiente página, hacia atrás
+            endTime = datos[0].timestamp - STEP_MS; // siguiente página, hacia atrás
             pedidos++;
         }
-        console.log(`[OI] Backfill histórico: ${insertados} puntos nuevos en ${pedidos} requests (cobertura ~30 días).`);
+        console.log(`[OI] Backfill histórico (${ex.name}): ${insertados} puntos nuevos en ${pedidos} requests.`);
     } catch (e) {
-        console.error('[OI] Error en backfill histórico:', e.message);
+        console.error(`[OI] Error en backfill histórico (${ex.name}):`, e.message);
     }
 }
-setTimeout(backfillOpenInterestHistorico, 5000);
+
+for (const ex of exchangesIngesta) {
+    setInterval(() => guardarOpenInterest(ex), 60000);
+    guardarOpenInterest(ex);
+    setTimeout(() => backfillOpenInterestHistorico(ex), 5000);
+}
 
 // --- RECOLECTOR DE RATIOS DE POSICIONAMIENTO (top traders + retail) ---
 // Los endpoints futures/data se actualizan cada 5m, así que polleamos a ese ritmo.
@@ -419,8 +471,14 @@ async function guardarLongShortRatio() {
         console.error('Error al guardar Long/Short ratio:', e.message);
     }
 }
-setInterval(guardarLongShortRatio, 5 * 60000);
-guardarLongShortRatio();
+// BingX no expone un endpoint público de long/short ratio (investigado y confirmado
+// contra la doc y la API real) — este collector corre si Binance está entre los exchanges
+// de ingesta, sea o no el exchange activo para señales/ejecución.
+const binanceEnIngesta = exchangesIngesta.some(e => e.name === 'binance');
+if (binanceEnIngesta) {
+    setInterval(guardarLongShortRatio, 5 * 60000);
+    guardarLongShortRatio();
+}
 
 // Backfill histórico de ratios (~30 días, 5m). Mismo límite duro que el OI: Binance solo
 // expone los últimos ~30 días de futures/data. Top y global se alinean por timestamp.
@@ -466,7 +524,9 @@ async function backfillLongShortRatio() {
         console.error('[LSR] Error en backfill histórico:', e.message);
     }
 }
-setTimeout(backfillLongShortRatio, 7000);
+if (binanceEnIngesta) {
+    setTimeout(backfillLongShortRatio, 7000);
+}
 
 // ── Watchdog de WebSockets ────────────────────────────────────────────
 // Un WS puede quedar mudo sin disparar 'close' (conexión zombi): el feed deja de grabar
@@ -490,57 +550,118 @@ setInterval(() => {
     }
 }, 60 * 1000);
 
-// --- CAZADOR DE BALLENAS (SPOT + PERP) ---
-// Dos feeds paralelos: spot (stream.binance.com) y futuros perp (fstream.binance.com).
-// Cada trade se guarda con su columna `mercado` ('SPOT' o 'PERP') para poder filtrar
-// después. El flujo de futuros captura el apalancamiento y las liquidaciones forzadas,
-// que no están disponibles en el feed de spot.
-const wsBallenasConectando = new Set();
+// --- CAZADOR DE BALLENAS (uno por cada exchange en ingesta) ---
+// Binance expone dos feeds planos (spot + perp, JSON sin comprimir); BingX expone uno solo
+// (perp) con framing propio (gzip + ping/pong), resuelto adentro de ex.whaleFeeds[i].connect.
+// Cada trade se guarda con su columna `mercado` y `exchange` para poder filtrar después.
+// Todo el estado mutable (reconexión, acumulador de delta) vive DENTRO de esta factory,
+// una instancia independiente por exchange — así dos exchanges corriendo a la vez nunca
+// comparten ni pisan el estado del otro (dos "PERP" de exchanges distintos no colisionan).
+function crearIngestaBallenas(ex) {
+    const wsConectando = new Set();
 
-function iniciarRastreadorBallenas(wsUrl, mercado) {
-    if (wsBallenasConectando.has(mercado)) return;
-    wsBallenasConectando.add(mercado);
+    // Acumulador de delta (buy/sell volume) por minuto — solo se usa cuando el exchange no
+    // trae taker_buy_base en sus klines (BingX). Se vuelca a klines_1m cada 60s, una vez que
+    // el minuto ya cerró. Si la fila de esa vela aún no llegó por el sync de klines, se
+    // reintenta en el próximo ciclo (hasta 5 veces) antes de descartar el incremento.
+    const deltaAcumMinuto = new Map(); // minutoSeg -> { buy, sell, intentos }
 
-    const ws = new WebSocket(wsUrl);
-    registrarSaludWS(`ballenas-${mercado}`, ws);
+    function acumularDelta(tsMs, qty, isSell) {
+        const minuto = Math.floor(tsMs / 60000) * 60;
+        let acc = deltaAcumMinuto.get(minuto);
+        if (!acc) { acc = { buy: 0, sell: 0, intentos: 0 }; deltaAcumMinuto.set(minuto, acc); }
+        if (isSell) acc.sell += qty; else acc.buy += qty;
+    }
 
-    ws.on('open', () => {
-        wsBallenasConectando.delete(mercado);
-        console.log(`✅ Cazador de ballenas (${mercado}) conectado.`);
-    });
-
-    ws.on('message', async (data) => {
-        latidoWS(`ballenas-${mercado}`);
-        try {
-            const evento = JSON.parse(data);
-            const cantidad = parseFloat(evento.q);
-            const precio   = parseFloat(evento.p);
-            const es_venta = evento.m;
-            if (cantidad >= limiteGuardadoBD) {
-                await pool.query(
-                    `INSERT INTO ballenas (precio, cantidad, es_venta, mercado) VALUES ($1, $2, $3, $4)`,
-                    [precio, cantidad, es_venta, mercado]
+    async function flushDeltaAcumulado() {
+        const minutoActual = Math.floor(Date.now() / 60000) * 60;
+        for (const [minuto, acc] of deltaAcumMinuto) {
+            if (minuto >= minutoActual) continue; // vela en curso, todavía no cerró
+            try {
+                const r = await pool.query(
+                    `UPDATE klines_1m SET taker_buy_base = COALESCE(taker_buy_base, 0) + $1
+                     WHERE open_time = $2 AND exchange = $3`,
+                    [acc.buy, minuto * 1000, ex.name]
                 );
+                if (r.rowCount > 0) {
+                    deltaAcumMinuto.delete(minuto);
+                } else if (++acc.intentos > 5) {
+                    console.warn(`[Delta ${ex.name}] Vela ${new Date(minuto * 1000).toISOString()} nunca apareció en klines_1m tras 5 intentos — se descarta el delta acumulado.`);
+                    deltaAcumMinuto.delete(minuto);
+                }
+            } catch (e) {
+                console.error(`[Delta ${ex.name}] Error al volcar delta acumulado:`, e.message);
             }
-        } catch (error) {
-            console.error(`Error al guardar trade (${mercado}):`, error);
         }
-    });
+    }
+    if (ex.necesitaAcumularDelta) setInterval(flushDeltaAcumulado, 60000);
 
-    ws.on('error', (err) => {
-        console.error(`Error en WebSocket ballenas (${mercado}):`, err.message);
-        ws.terminate();
-    });
+    function manejarTradeBallena(mercado, { price, qty, isSell, ts }) {
+        if (qty >= limiteGuardadoBD) {
+            pool.query(
+                `INSERT INTO ballenas (precio, cantidad, es_venta, mercado, exchange) VALUES ($1, $2, $3, $4, $5)`,
+                [price, qty, isSell, mercado, ex.name]
+            ).catch(error => console.error(`Error al guardar trade (${ex.name} ${mercado}):`, error.message));
+        }
+        if (ex.necesitaAcumularDelta) acumularDelta(ts || Date.now(), qty, isSell);
+    }
 
-    ws.on('close', () => {
-        wsBallenasConectando.delete(mercado);
-        console.log(`⚠️ Ballenas (${mercado}) reconectando en 5 segundos...`);
-        setTimeout(() => iniciarRastreadorBallenas(wsUrl, mercado), 5000);
-    });
+    function iniciarRastreadorBallenas(feed) {
+        const { mercado } = feed;
+        if (wsConectando.has(mercado)) return;
+        wsConectando.add(mercado);
+
+        const nombreFeed = `ballenas-${ex.name}-${mercado}`;
+        let ws;
+
+        const onOpen = () => {
+            wsConectando.delete(mercado);
+            console.log(`✅ Cazador de ballenas (${mercado}, ${ex.name}) conectado.`);
+        };
+        const onTrade = (trade) => {
+            latidoWS(nombreFeed);
+            manejarTradeBallena(mercado, trade);
+        };
+        const onClose = () => {
+            wsConectando.delete(mercado);
+            console.log(`⚠️ Ballenas (${ex.name} ${mercado}) reconectando en 5 segundos...`);
+            setTimeout(() => iniciarRastreadorBallenas(feed), 5000);
+        };
+        const onError = (err) => {
+            console.error(`Error en WebSocket ballenas (${ex.name} ${mercado}):`, err.message);
+            try { ws.terminate(); } catch (_) {}
+        };
+
+        if (feed.connect) {
+            // Adapter-driven (BingX: gzip + suscripción + ping/pong resueltos adentro).
+            ws = feed.connect({ onOpen, onTrade, onClose, onError });
+        } else {
+            // Binance: WS plano, un trade JSON por mensaje (aggTrade).
+            ws = new WebSocket(feed.url);
+            ws.on('open', onOpen);
+            ws.on('message', (data) => {
+                try {
+                    const evento = JSON.parse(data);
+                    onTrade({
+                        price: parseFloat(evento.p),
+                        qty: parseFloat(evento.q),
+                        isSell: evento.m === true,
+                        ts: Number(evento.T) || Date.now(),
+                    });
+                } catch (error) {
+                    console.error(`Error al parsear trade (${ex.name} ${mercado}):`, error.message);
+                }
+            });
+            ws.on('error', onError);
+            ws.on('close', onClose);
+        }
+        registrarSaludWS(nombreFeed, ws);
+    }
+
+    for (const feed of ex.whaleFeeds) iniciarRastreadorBallenas(feed);
 }
 
-iniciarRastreadorBallenas('wss://stream.binance.com:9443/ws/btcusdt@aggTrade', 'SPOT');
-iniciarRastreadorBallenas('wss://fstream.binance.com/ws/btcusdt@aggTrade',     'PERP');
+for (const ex of exchangesIngesta) crearIngestaBallenas(ex);
 
 // Retención del tape de ballenas: alineada a la ventana de la cache de velas (365 días),
 // que es lo máximo que un backtest puede consultar — más atrás la tabla solo crece sin uso.
@@ -778,14 +899,16 @@ app.get('/api/ballenas', autenticar, async (req, res) => {
     // devolver la tabla entera (100k filas) era puro payload. Default 7 días, máx 30.
     const horas   = Math.min(Math.max(parseInt(req.query.horas) || 168, 1), 720);
     const mercado = ['SPOT', 'PERP'].includes(req.query.mercado) ? req.query.mercado : null;
+    const exVista = exchangeConsultado(req);
     try {
-        const params = [horas];
+        const params = [horas, exVista.name];
         if (mercado) params.push(mercado);
         const query = `
             SELECT precio, cantidad, es_venta, mercado, EXTRACT(EPOCH FROM fecha) as tiempo_segundos
             FROM ballenas
             WHERE fecha >= NOW() - make_interval(hours => $1)
-              ${mercado ? 'AND mercado = $2' : ''}
+              AND exchange = $2
+              ${mercado ? 'AND mercado = $3' : ''}
             ORDER BY fecha DESC
             LIMIT 100000
         `;
@@ -797,13 +920,14 @@ app.get('/api/ballenas', autenticar, async (req, res) => {
 });
 
 app.get('/api/open-interest', autenticar, async (req, res) => {
+    const exVista = exchangeConsultado(req);
     try {
         const query = `
             SELECT tiempo, valor FROM (
-                SELECT tiempo, valor FROM open_interest ORDER BY tiempo DESC LIMIT 10000
+                SELECT tiempo, valor FROM open_interest WHERE exchange = $1 ORDER BY tiempo DESC LIMIT 10000
             ) t ORDER BY tiempo ASC
         `;
-        const resultado = await pool.query(query);
+        const resultado = await pool.query(query, [exVista.name]);
         res.json(resultado.rows);
     } catch (error) {
         res.status(500).json({ error: 'Error interno obteniendo OI' });
@@ -811,17 +935,20 @@ app.get('/api/open-interest', autenticar, async (req, res) => {
 });
 
 app.get('/api/oi-live', autenticar, async (req, res) => {
+    const exVista = exchangeConsultado(req);
     try {
-        const respuesta = await fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT');
-        const datos = await respuesta.json();
-        res.json(datos);
+        const openInterest = await exVista.fetchOpenInterest();
+        res.json({ symbol: exVista.symbol, exchange: exVista.name, openInterest: String(openInterest) });
     } catch (error) {
-        res.status(500).json({ error: 'Error obteniendo OI en vivo' });
+        res.status(500).json({ error: `Error obteniendo OI en vivo (${exVista.name})` });
     }
 });
 
 // Histórico de ratios de posicionamiento para el panel del gráfico.
 app.get('/api/long-short', autenticar, async (req, res) => {
+    // La tabla no tiene columna exchange: es dato Binance-only (BingX no expone este endpoint).
+    // Para no mostrar ratios de Binance mezclados bajo una vista de BingX, se devuelve vacío.
+    if (exchangeConsultado(req).name !== 'binance') return res.json([]);
     try {
         const r = await pool.query(`
             SELECT tiempo, top_pos, global_acc FROM (
@@ -836,6 +963,8 @@ app.get('/api/long-short', autenticar, async (req, res) => {
 
 // Valor actual de los ratios (proxy a Binance, sin CORS) para el tail en vivo del panel.
 app.get('/api/ls-live', autenticar, async (req, res) => {
+    // BingX no expone un endpoint público de long/short ratio (confirmado contra la API real).
+    if (exch.name !== 'binance') return res.json({});
     try {
         const [topR, globR] = await Promise.all([
             fetch('https://fapi.binance.com/futures/data/topLongShortPositionRatio?symbol=BTCUSDT&period=5m&limit=1').then(r => r.json()),
@@ -879,8 +1008,9 @@ app.get('/api/whale-histogram', autenticar, async (req, res) => {
     const horas   = Math.min(Math.max(parseInt(req.query.horas)  || 8,  1), 168);
     const bucket  = [50, 100, 200].includes(parseInt(req.query.bucket)) ? parseInt(req.query.bucket) : 100;
     const mercado = ['SPOT', 'PERP'].includes(req.query.mercado) ? req.query.mercado : null;
+    const exVista = exchangeConsultado(req);
     try {
-        const params = [horas, bucket];
+        const params = [horas, bucket, exVista.name];
         if (mercado) params.push(mercado);
         const result = await pool.query(`
             SELECT
@@ -889,7 +1019,8 @@ app.get('/api/whale-histogram', autenticar, async (req, res) => {
                 ROUND(SUM(CASE WHEN es_venta = true  THEN cantidad ELSE 0 END)::numeric, 2) AS ventas
             FROM ballenas
             WHERE fecha >= NOW() - make_interval(hours => $1)
-              ${mercado ? 'AND mercado = $3' : ''}
+              AND exchange = $3
+              ${mercado ? 'AND mercado = $4' : ''}
             GROUP BY nivel
             HAVING SUM(cantidad) > 0
             ORDER BY nivel DESC
@@ -960,9 +1091,9 @@ async function calcularNiveles({ bucket, dias, tau, umbral, maxZonas }) {
                     SUM(taker_buy_base) AS vol_compra,
                     SUM(volume * EXP(-(($3::bigint - open_time) / 86400000.0) / $4)) AS vol_pond
              FROM klines_1m
-             WHERE open_time >= $1::bigint
+             WHERE open_time >= $1::bigint AND exchange = $5
              GROUP BY nivel ORDER BY nivel ASC`,
-            [desde, bucket, ahora, tau]
+            [desde, bucket, ahora, tau, exch.name]
         ),
         // 2) Volumen ballena por bucket en la misma ventana.
         pool.query(
@@ -970,9 +1101,9 @@ async function calcularNiveles({ bucket, dias, tau, umbral, maxZonas }) {
                     SUM(CASE WHEN es_venta = false THEN cantidad ELSE 0 END) AS compras,
                     SUM(CASE WHEN es_venta = true  THEN cantidad ELSE 0 END) AS ventas
              FROM ballenas
-             WHERE fecha >= to_timestamp($1 / 1000.0)
+             WHERE fecha >= to_timestamp($1 / 1000.0) AND exchange = $3
              GROUP BY nivel`,
-            [desde, bucket]
+            [desde, bucket, exch.name]
         ),
         // 3) Velas 15m para contar toques/rebotes de cada zona y el precio actual.
         fetchKlinesDesdeBD('15m', dias),
@@ -1308,7 +1439,7 @@ function calcVWAP(bars, session = 'daily') {
     return result;
 }
 
-async function fetchKlinesBatch(interval, totalBars) {
+async function fetchKlinesBatch(interval, totalBars, ex = exch) {
     const perReq = 1000;
     const CHUNK = 20; // requests en paralelo por tanda
     const dur = { '1m': 60000, '5m': 300000, '15m': 900000 }[interval] || 60000;
@@ -1316,37 +1447,29 @@ async function fetchKlinesBatch(interval, totalBars) {
     const now = Date.now();
 
     // Cuando se piden pocas velas (p.ej. el sync incremental: ~3 velas), no tiene
-    // sentido pedir 1000 a Binance y descartar 997 por dedup. Acotamos el limit.
+    // sentido pedir 1000 al exchange y descartar 997 por dedup. Acotamos el limit.
     const lim = Math.min(perReq, totalBars);
-    const urls = Array.from({ length: n }, (_, i) =>
-        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${lim}${i > 0 ? `&endTime=${now - i * perReq * dur}` : ''}`
-    );
 
     // No silenciar fallos: un request fallido (p.ej. rate-limit) dejaría huecos de
     // velas que corrompen indicadores y omiten trades sin aviso. Reintentamos y, si
     // persiste, abortamos el backtest con un error claro en vez de correr con datos rotos.
-    async function fetchUrl(url, intento = 0) {
+    async function fetchPage(i, intento = 0) {
         try {
-            const r = await fetch(url);
-            const j = await r.json();
-            if (!Array.isArray(j)) {
-                throw new Error(j && j.msg ? j.msg : `respuesta inesperada (${JSON.stringify(j).slice(0, 100)})`);
-            }
-            return j;
+            return await ex.fetchKlines({ interval, limit: lim, endTime: i > 0 ? now - i * perReq * dur : undefined });
         } catch (e) {
             if (intento < 2) {
                 await new Promise(res => setTimeout(res, 400 * (intento + 1)));
-                return fetchUrl(url, intento + 1);
+                return fetchPage(i, intento + 1);
             }
-            throw new Error(`No se pudieron descargar las velas ${interval} de Binance (${e.message}). Probá con menos días o reintentá.`);
+            throw new Error(`No se pudieron descargar las velas ${interval} de ${ex.name} (${e.message}). Probá con menos días o reintentá.`);
         }
     }
 
     const results = [];
-    for (let i = 0; i < urls.length; i += CHUNK) {
-        const batch = urls.slice(i, i + CHUNK).map(url => fetchUrl(url));
-        const batchResults = await Promise.all(batch);
-        results.push(...batchResults);
+    const paginas = Array.from({ length: n }, (_, i) => i);
+    for (let i = 0; i < paginas.length; i += CHUNK) {
+        const batch = paginas.slice(i, i + CHUNK).map(idx => fetchPage(idx));
+        results.push(...await Promise.all(batch));
     }
 
     const seen = new Set();
@@ -1364,27 +1487,30 @@ async function fetchKlinesBatch(interval, totalBars) {
 // que Binance (índices: 0 openTime, 1 open, 2 high, 3 low, 4 close, 5 volume,
 // 6 closeTime, 9 takerBuyBase) para que runBacktest sea agnóstico de la fuente.
 const DIAS_CACHE_KLINES = 365;
-let sincronizandoKlines = false;
+const sincronizandoKlines = new Map(); // exchangeName -> bool, uno por cada exchange en ingesta
 
-async function upsertKlines1m(velas) {
-    const CHUNK = 500; // 500 filas × 8 params = 4000, bajo el límite de 65535 de PG
+async function upsertKlines1m(velas, exchangeName = exch.name) {
+    const CHUNK = 500; // 500 filas × 9 params ≈ 4500, bajo el límite de 65535 de PG
     let insertadas = 0;
     for (let i = 0; i < velas.length; i += CHUNK) {
         const slice = velas.slice(i, i + CHUNK);
         const placeholders = [];
         const params = [];
         slice.forEach((k, idx) => {
-            const o = idx * 8;
-            placeholders.push(`($${o+1},$${o+2},$${o+3},$${o+4},$${o+5},$${o+6},$${o+7},$${o+8})`);
+            const o = idx * 9;
+            placeholders.push(`($${o+1},$${o+2},$${o+3},$${o+4},$${o+5},$${o+6},$${o+7},$${o+8},$${o+9})`);
+            // k[9] puede venir null (BingX no trae taker_buy_base en klines — se completa
+            // después acumulando el WS de trades, ver acumularDelta/flushDeltaAcumulado).
             params.push(
                 Number(k[0]), parseFloat(k[1]), parseFloat(k[2]), parseFloat(k[3]),
-                parseFloat(k[4]), parseFloat(k[5]), Number(k[6]), parseFloat(k[9])
+                parseFloat(k[4]), parseFloat(k[5]), Number(k[6]),
+                k[9] != null ? parseFloat(k[9]) : null, exchangeName
             );
         });
         const r = await pool.query(
-            `INSERT INTO klines_1m (open_time, open, high, low, close, volume, close_time, taker_buy_base)
+            `INSERT INTO klines_1m (open_time, open, high, low, close, volume, close_time, taker_buy_base, exchange)
              VALUES ${placeholders.join(',')}
-             ON CONFLICT (open_time) DO NOTHING`,
+             ON CONFLICT (open_time, exchange) DO NOTHING`,
             params
         );
         insertadas += r.rowCount;
@@ -1392,51 +1518,54 @@ async function upsertKlines1m(velas) {
     return insertadas;
 }
 
-// Mantiene la cache fresca. Si la tabla está vacía hace el backfill inicial de
-// DIAS_CACHE_KLINES días; si no, trae solo las velas nuevas desde la última guardada.
-async function sincronizarKlines() {
-    if (sincronizandoKlines) return;
-    sincronizandoKlines = true;
+// Mantiene la cache fresca del exchange `ex`. Si la tabla está vacía hace el backfill
+// inicial de DIAS_CACHE_KLINES días; si no, trae solo las velas nuevas desde la última.
+async function sincronizarKlines(ex) {
+    if (sincronizandoKlines.get(ex.name)) return;
+    sincronizandoKlines.set(ex.name, true);
     try {
-        const r = await pool.query('SELECT MAX(open_time) AS ult FROM klines_1m');
+        const r = await pool.query('SELECT MAX(open_time) AS ult FROM klines_1m WHERE exchange = $1', [ex.name]);
         const ult = r.rows[0].ult ? Number(r.rows[0].ult) : null;
         const now = Date.now();
         let faltan;
         if (!ult) {
             faltan = DIAS_CACHE_KLINES * 1440;
-            console.log(`[Klines] BD vacía: backfill inicial de ${DIAS_CACHE_KLINES} días (~${faltan} velas 1m). Puede tardar varios minutos…`);
+            console.log(`[Klines] BD vacía (${ex.name}): backfill inicial de ${DIAS_CACHE_KLINES} días (~${faltan} velas 1m). Puede tardar varios minutos…`);
         } else {
             faltan = Math.ceil((now - ult) / 60000) + 2; // +2 de solape para no perder velas
-            if (faltan <= 2) { sincronizandoKlines = false; return; } // nada nuevo cerrado
+            if (faltan <= 2) { sincronizandoKlines.set(ex.name, false); return; } // nada nuevo cerrado
             faltan = Math.min(faltan, DIAS_CACHE_KLINES * 1440);
         }
-        const velas = await fetchKlinesBatch('1m', faltan);
+        const velas = await fetchKlinesBatch('1m', faltan, ex);
         if (velas.length) {
-            const nuevas = await upsertKlines1m(velas);
+            const nuevas = await upsertKlines1m(velas, ex.name);
             if (nuevas > 0) {
                 const ultIso = new Date(Number(velas[velas.length - 1][0])).toISOString().slice(0, 16).replace('T', ' ');
-                console.log(`[Klines] +${nuevas} velas 1m nuevas (última: ${ultIso} UTC).`);
+                console.log(`[Klines] +${nuevas} velas 1m nuevas (${ex.name}, última: ${ultIso} UTC).`);
             }
         }
         // Descartamos velas más viejas que la ventana de cache para no crecer sin límite.
-        await pool.query('DELETE FROM klines_1m WHERE open_time < $1', [now - DIAS_CACHE_KLINES * 86400000]);
+        await pool.query('DELETE FROM klines_1m WHERE open_time < $1 AND exchange = $2', [now - DIAS_CACHE_KLINES * 86400000, ex.name]);
     } catch (e) {
-        console.error('[Klines] Error al sincronizar:', e.message);
+        console.error(`[Klines] Error al sincronizar (${ex.name}):`, e.message);
     } finally {
-        sincronizandoKlines = false;
+        sincronizandoKlines.set(ex.name, false);
     }
 }
-setInterval(sincronizarKlines, 60000);
-// Arranque diferido: damos tiempo a que inicializarBaseDeDatos cree la tabla.
-setTimeout(sincronizarKlines, 8000);
 
-async function fetchKlinesDesdeBD(interval, days) {
+for (const ex of exchangesIngesta) {
+    setInterval(() => sincronizarKlines(ex), 60000);
+    // Arranque diferido: damos tiempo a que inicializarBaseDeDatos cree la tabla.
+    setTimeout(() => sincronizarKlines(ex), 8000);
+}
+
+async function fetchKlinesDesdeBD(interval, days, ex = exch) {
     const desde = Date.now() - days * 86400000;
     if (interval === '1m') {
         const r = await pool.query(
             `SELECT open_time, open, high, low, close, volume, close_time, taker_buy_base
-             FROM klines_1m WHERE open_time >= $1::bigint ORDER BY open_time ASC`,
-            [desde]
+             FROM klines_1m WHERE open_time >= $1::bigint AND exchange = $2 ORDER BY open_time ASC`,
+            [desde, ex.name]
         );
         return r.rows.map(f => [
             Number(f.open_time), Number(f.open), Number(f.high), Number(f.low),
@@ -1459,11 +1588,11 @@ async function fetchKlinesDesdeBD(interval, days) {
                 MAX(close_time) AS close_time,
                 SUM(taker_buy_base) AS taker_buy_base
          FROM (SELECT open_time, open_time / $2::bigint AS b, open, high, low, close, volume, close_time, taker_buy_base
-               FROM klines_1m WHERE open_time >= $1::bigint) t
+               FROM klines_1m WHERE open_time >= $1::bigint AND exchange = $4) t
          GROUP BY b
          HAVING (b + 1) * $2::bigint <= $3::bigint
          ORDER BY b ASC`,
-        [desde, bucket, Date.now()]
+        [desde, bucket, Date.now(), ex.name]
     );
     return r.rows.map(f => [
         Number(f.open_time), Number(f.open), Number(f.high), Number(f.low),
@@ -2112,10 +2241,12 @@ const BINANCE_SECRET     = process.env.Clave_secreta_Binance;
 // Por defecto testnet (plata virtual). Para operar en real, definir en el entorno
 // BINANCE_BASE=https://fapi.binance.com (y usar claves API de la cuenta real).
 const BINANCE_BASE       = process.env.BINANCE_BASE || 'https://testnet.binancefuture.com';
-// Testnet y real son mercados distintos con precios distintos. Como un usuario puede operar
-// en testnet y otro en real al mismo tiempo, mantenemos un feed de precio por entorno y nunca
-// evaluamos los stops de una cuenta con el precio del otro mercado.
-const WS_PRECIO_POR_ENTORNO = {
+// Testnet y real de Binance son mercados distintos con precios distintos (el WS de testnet
+// tiene su propio libro, poco líquido, que puede divergir del real). BingX en cambio comparte
+// el MISMO precio de mercado entre su cuenta demo (VST) y real — el fondo virtual opera sobre
+// el libro real, solo cambia el balance — así que a BingX le alcanza una sola clave de precio.
+// Mantenemos un feed por mercado y nunca evaluamos los stops de una cuenta con el precio de otro.
+const WS_PRECIO_BINANCE_POR_ENTORNO = {
     testnet: 'wss://stream.binancefuture.com/ws/btcusdt@aggTrade',
     real:    'wss://fstream.binance.com/ws/btcusdt@aggTrade',
 };
@@ -2124,13 +2255,17 @@ const WS_PRECIO_POR_ENTORNO = {
 // posiciones de un símbolo dentro de cada cuenta, así que cada sub-posición vive en memoria
 // y se cierra con una orden reduceOnly PARCIAL, replicando el pyramiding del backtest.
 const posicionesPorCuenta = new Map(); // uid -> [{ id, lado, qty, entry, tp, sl, entryTs, stopType, tpOrderId, slOrderId }]
-const ctxActivos          = new Map(); // uid -> { uid, apiKey, secret, base, marginType } (claves descifradas en memoria)
-const ultimoPrecioPorEntorno = { testnet: null, real: null }; // último precio del WS de futuros por entorno
+const ctxActivos          = new Map(); // uid -> { uid, apiKey, secret, base, marginType, exchange } (claves descifradas en memoria)
+const ultimoPrecioPorMercado = {}; // clave de mercado (ver mercadoDeCtx) -> último precio del WS de futuros
 
-// El entorno de una cuenta se deduce de su base_url (testnet vs producción).
-function entornoDeBase(base) { return String(base).includes('testnet') ? 'testnet' : 'real'; }
+// Clave de mercado de una cuenta: para Binance distingue testnet/real (precios distintos);
+// para BingX es única (demo y real comparten precio de mercado).
+function mercadoDeCtx(ctx) {
+    if ((ctx.exchange || 'binance') !== 'binance') return ctx.exchange;
+    return String(ctx.base).includes('testnet') ? 'binance:testnet' : 'binance:real';
+}
 // Último precio de futuros del mercado en el que opera la cuenta.
-function precioDeCtx(ctx) { return ultimoPrecioPorEntorno[entornoDeBase(ctx.base)]; }
+function precioDeCtx(ctx) { return ultimoPrecioPorMercado[mercadoDeCtx(ctx)] ?? null; }
 
 function posDe(uid) {
     let arr = posicionesPorCuenta.get(uid);
@@ -2140,12 +2275,14 @@ function posDe(uid) {
 
 // Contexto de una cuenta (claves descifradas) a partir de su fila de cuentas_trading.
 function ctxDeCuenta(row) {
+    const exchange = row.exchange || 'binance';
     return {
         uid:        row.usuario_id,
         apiKey:     row.api_key,
         secret:     descifrarSecreto(row.api_secret_cifrado),
-        base:       row.base_url || 'https://testnet.binancefuture.com',
+        base:       row.base_url || getExchange(exchange).trade.baseDemo,
         marginType: (row.margin_type || 'ISOLATED').toUpperCase(),
+        exchange,
     };
 }
 
@@ -2170,62 +2307,28 @@ async function sincronizarPosicionBD(uid) {
     );
 }
 
-function buildCloseUrl(ctx, lado, qty) {
-    const side = lado === 'long' ? 'SELL' : 'BUY';
-    const ts   = Date.now();
-    const p    = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&reduceOnly=true&timestamp=${ts}`;
-    return `${ctx.base}/fapi/v1/order?${p}&signature=${firmarParams(p, ctx.secret)}`;
+// A partir de acá, toda la ejecución despacha al adapter del broker de CADA cuenta
+// (ctx.exchange) en vez de asumir Binance — así una cuenta BingX y una Binance pueden
+// coexistir, cada una hablando con su propio exchange.
+function tradeDe(ctx) { return getExchange(ctx.exchange || 'binance').trade; }
+
+async function colocarOrdenEntrada(ctx, lado, qty) { return tradeDe(ctx).placeEntryOrder(ctx, { lado, qty }); }
+async function colocarOrdenCierre(ctx, lado, qty)  { return tradeDe(ctx).placeCloseOrder(ctx, { lado, qty }); }
+async function colocarOrdenStop(ctx, lado, qty, stopPrice, tipo) {
+    return tradeDe(ctx).placeStopOrder(ctx, { lado, qty, stopPrice, tipo });
 }
 
-function buildEntryUrl(ctx, lado, qty) {
-    const side = lado === 'long' ? 'BUY' : 'SELL';
-    const ts   = Date.now();
-    const p    = `symbol=BTCUSDT&side=${side}&type=MARKET&quantity=${qty}&timestamp=${ts}`;
-    return `${ctx.base}/fapi/v1/order?${p}&signature=${firmarParams(p, ctx.secret)}`;
-}
-
-// BTCUSDT perp tiene tick size 0.1 → los stopPrice deben redondearse a 1 decimal.
-function redondearPrecio(precio) {
-    return Math.round(precio * 10) / 10;
-}
-
-// Orden de protección reduceOnly en el exchange (TAKE_PROFIT_MARKET o STOP_MARKET).
-// Disparada por MARK_PRICE para evitar wicks de precio last. Cierra solo su qty.
-// Desde 2025-12-09 Binance migró las órdenes condicionales al servicio Algo:
-// /fapi/v1/order las rechaza con -4120, así que van por /fapi/v1/algoOrder
-// (algoType=CONDITIONAL, stopPrice → triggerPrice, la respuesta trae algoId).
-function buildStopUrl(ctx, lado, qty, stopPrice, tipo) {
-    const side = lado === 'long' ? 'SELL' : 'BUY';
-    const sp   = redondearPrecio(stopPrice);
-    const ts   = Date.now();
-    const p    = `algoType=CONDITIONAL&symbol=BTCUSDT&side=${side}&type=${tipo}&quantity=${qty}&triggerPrice=${sp}&reduceOnly=true&workingType=MARK_PRICE&timestamp=${ts}`;
-    return `${ctx.base}/fapi/v1/algoOrder?${p}&signature=${firmarParams(p, ctx.secret)}`;
-}
-
-// Cancela una orden de protección por su algoId (las TP/SL ahora son órdenes Algo).
-async function cancelarOrden(ctx, algoId) {
-    if (!algoId) return;
-    try {
-        const ts  = Date.now();
-        const q   = `symbol=BTCUSDT&algoId=${algoId}&timestamp=${ts}`;
-        const url = `${ctx.base}/fapi/v1/algoOrder?${q}&signature=${firmarParams(q, ctx.secret)}`;
-        await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
-    } catch (e) { console.error(`[AutoTrading] Error cancelando orden ${algoId}: ${e.message}`); }
+// Cancela una orden de protección por su id (algoId en Binance, orderId en BingX).
+async function cancelarOrden(ctx, orderId) {
+    if (!orderId) return;
+    try { await tradeDe(ctx).cancelOrder(ctx, orderId); }
+    catch (e) { console.error(`[AutoTrading] Error cancelando orden ${orderId}: ${e.message}`); }
 }
 
 // Barrido: cancela todas las órdenes abiertas del símbolo (al quedar plano / reconciliar).
-// Limpia tanto las condicionales Algo (TP/SL actuales) como cualquier orden clásica residual.
 async function cancelarTodasLasOrdenes(ctx) {
-    const ts = Date.now();
-    const eliminar = async (endpoint) => {
-        try {
-            const q   = `symbol=BTCUSDT&timestamp=${ts}`;
-            const url = `${ctx.base}/${endpoint}?${q}&signature=${firmarParams(q, ctx.secret)}`;
-            await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
-        } catch (e) { console.error(`[AutoTrading] Error cancelando ${endpoint}: ${e.message}`); }
-    };
-    await eliminar('fapi/v1/algoOpenOrders');
-    await eliminar('fapi/v1/allOpenOrders');
+    try { await tradeDe(ctx).cancelAllOrders(ctx); }
+    catch (e) { console.error(`[AutoTrading] Error cancelando todas las órdenes: ${e.message}`); }
 }
 
 // Coloca en el exchange las órdenes de protección de una sub-posición recién abierta.
@@ -2236,17 +2339,13 @@ async function colocarProteccionExchange(ctx, sub) {
     const estado = { tp: null, sl: null }; // null = no intentada; {ok,msg} si se intentó
     try {
         if (sub.tp) {
-            const r = await ejecutarOrdenBinance(ctx,
-                buildStopUrl(ctx, sub.lado, sub.qty, sub.tp, 'TAKE_PROFIT_MARKET'), `TP-EXCH #${sub.id}`);
-            const id = r.body?.algoId ?? r.body?.orderId;
-            if (r.ok && id) sub.tpOrderId = String(id);
+            const r = await colocarOrdenStop(ctx, sub.lado, sub.qty, sub.tp, 'TAKE_PROFIT_MARKET');
+            if (r.ok && r.orderId) sub.tpOrderId = r.orderId;
             estado.tp = { ok: r.ok, msg: r.body?.msg, code: r.body?.code };
         }
         if ((sub.stopType ?? 'Porcentaje') === 'Porcentaje' && sub.sl) {
-            const r = await ejecutarOrdenBinance(ctx,
-                buildStopUrl(ctx, sub.lado, sub.qty, sub.sl, 'STOP_MARKET'), `SL-EXCH #${sub.id}`);
-            const id = r.body?.algoId ?? r.body?.orderId;
-            if (r.ok && id) sub.slOrderId = String(id);
+            const r = await colocarOrdenStop(ctx, sub.lado, sub.qty, sub.sl, 'STOP_MARKET');
+            if (r.ok && r.orderId) sub.slOrderId = r.orderId;
             estado.sl = { ok: r.ok, msg: r.body?.msg, code: r.body?.code };
         }
         await pool.query(
@@ -2280,7 +2379,7 @@ async function cerrarSubPosicion(ctx, pos, razon, precio) {
     // El cierre reduceOnly que sigue es benigno si el exchange ya cerró (Binance lo rechaza -2022).
     await cancelarOrden(ctx, pos.tpOrderId);
     await cancelarOrden(ctx, pos.slOrderId);
-    const rClose = await ejecutarOrdenBinance(ctx, buildCloseUrl(ctx, pos.lado, pos.qty), `CIERRE-${razon}`);
+    const rClose = await colocarOrdenCierre(ctx, pos.lado, pos.qty);
     // Corregir precio_cierre con el fill real si la orden de cierre se ejecutó.
     if (rClose.ok && rClose.body?.avgPrice) {
         const fillClose = parseFloat(rClose.body.avgPrice);
@@ -2292,13 +2391,13 @@ async function cerrarSubPosicion(ctx, pos, razon, precio) {
 
 // TP/SL por tick para TODAS las cuentas con posiciones. El SL fijo por tick solo aplica a
 // stop por Porcentaje; el stop por Ruptura EMA es dinámico (lo gestiona el ciclo de 1 min).
-async function chequearSalida(precio, entorno) {
-    ultimoPrecioPorEntorno[entorno] = precio;
+async function chequearSalida(precio, mercado) {
+    ultimoPrecioPorMercado[mercado] = precio;
     for (const [uid, arr] of posicionesPorCuenta) {
         if (!arr.length) continue;
         const ctx = ctxActivos.get(uid);
         if (!ctx) continue; // sin claves en memoria no podemos cerrar; el exchange igual tiene el TP/SL
-        if (entornoDeBase(ctx.base) !== entorno) continue; // este feed es del otro mercado: no aplica
+        if (mercadoDeCtx(ctx) !== mercado) continue; // este feed es de otro mercado: no aplica
 
         const aCerrar = [];
         for (let i = arr.length - 1; i >= 0; i--) {
@@ -2434,6 +2533,38 @@ function iniciarMonitorPrecio(wsUrl, entorno) {
     });
 }
 
+// Monitor de precio para BingX: reutiliza el mismo feed de trades del adapter (gzip +
+// ping/pong resueltos ahí) en vez de un WS plano — BingX no distingue demo/real en precio,
+// así que hay una sola clave de mercado ('bingx') para todas las cuentas de ese exchange.
+function iniciarMonitorPrecioBingX() {
+    const mercado = 'bingx';
+    if (monitorConectando.has(mercado)) return;
+    monitorConectando.add(mercado);
+    const feed = exch.whaleFeeds.find(f => f.connect);
+    if (!feed) return;
+
+    const ws = feed.connect({
+        onOpen: () => {
+            monitorConectando.delete(mercado);
+            console.log(`✅ Monitor de precio futuros (${mercado}) conectado.`);
+        },
+        onTrade: async (trade) => {
+            latidoWS(`precio-${mercado}`);
+            try { await chequearSalida(trade.price, mercado); }
+            catch (e) { console.error(`Error en monitor de precio (${mercado}):`, e.message); }
+        },
+        onClose: () => {
+            monitorConectando.delete(mercado);
+            setTimeout(iniciarMonitorPrecioBingX, 5000);
+        },
+        onError: (err) => {
+            console.error(`Error WebSocket precio (${mercado}):`, err.message);
+            try { ws.terminate(); } catch (_) {}
+        },
+    });
+    registrarSaludWS(`precio-${mercado}`, ws);
+}
+
 // Log de estado al arrancar
 setTimeout(() => {
     const modo = BINANCE_BASE.includes('testnet') ? '🧪 TESTNET (plata virtual)' : '🔴 REAL (plata de verdad)';
@@ -2442,59 +2573,14 @@ setTimeout(() => {
     console.log(`[AutoTrading] N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL ? '✅ configurado (opcional)' : '➖ no configurado (opcional)'}`);
 }, 3000);
 
-async function ejecutarOrdenBinance(ctx, url, etiqueta) {
-    try {
-        const resp = await fetch(url, {
-            method: 'POST',
-            headers: { 'X-MBX-APIKEY': ctx.apiKey, 'Content-Type': 'application/x-www-form-urlencoded' },
-        });
-        const body = await resp.json();
-        if (resp.ok) {
-            console.log(`[AutoTrading u${ctx.uid}] ✅ Orden ${etiqueta} — orderId: ${body.orderId ?? body.algoId ?? '—'}`);
-        } else {
-            console.error(`[AutoTrading u${ctx.uid}] ❌ Orden ${etiqueta} rechazada — ${body.code}: ${body.msg}`);
-        }
-        return { ok: resp.ok, body };
-    } catch (e) {
-        console.error(`[AutoTrading u${ctx.uid}] ❌ Error red orden ${etiqueta}: ${e.message}`);
-        return { ok: false, error: e.message };
-    }
-}
-
 // Setea el apalancamiento real del símbolo para la cuenta `ctx` (perfil de riesgo del backtest).
 async function setBinanceLeverage(ctx, leverage) {
-    const ts = Date.now();
-    const q  = `symbol=BTCUSDT&leverage=${Math.round(leverage)}&timestamp=${ts}`;
-    const url = `${ctx.base}/fapi/v1/leverage?${q}&signature=${firmarParams(q, ctx.secret)}`;
-    const r = await ejecutarOrdenBinance(ctx, url, `LEVERAGE-${Math.round(leverage)}x`);
-    return r.ok;
+    return tradeDe(ctx).setLeverage(ctx, leverage);
 }
 
-// Asegura que la cuenta `ctx` esté en One-way (no Hedge) y con su margin type. Los códigos
-// -4059 / -4046 significan "no hace falta cambiar" y se tratan como éxito.
+// Asegura que la cuenta `ctx` esté en One-way (no Hedge) y con su margin type correctos.
 async function asegurarConfiguracionCuenta(ctx) {
-    // Modo One-way
-    try {
-        const ts  = Date.now();
-        const q   = `dualSidePosition=false&timestamp=${ts}`;
-        const url = `${ctx.base}/fapi/v1/positionSide/dual?${q}&signature=${firmarParams(q, ctx.secret)}`;
-        const r   = await fetch(url, { method: 'POST', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
-        const b   = await r.json();
-        if (r.ok || b.code === -4059) console.log(`[AutoTrading u${ctx.uid}] Modo de posición: One-way ✅`);
-        else console.warn(`[AutoTrading u${ctx.uid}] ⚠️ No se pudo fijar One-way: ${b.code} ${b.msg}`);
-    } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error modo de posición:`, e.message); }
-
-    // Margin type
-    try {
-        const mt  = ctx.marginType || 'ISOLATED';
-        const ts  = Date.now();
-        const q   = `symbol=BTCUSDT&marginType=${mt}&timestamp=${ts}`;
-        const url = `${ctx.base}/fapi/v1/marginType?${q}&signature=${firmarParams(q, ctx.secret)}`;
-        const r   = await fetch(url, { method: 'POST', headers: { 'X-MBX-APIKEY': ctx.apiKey } });
-        const b   = await r.json();
-        if (r.ok || b.code === -4046) console.log(`[AutoTrading u${ctx.uid}] Margin type: ${mt} ✅`);
-        else console.warn(`[AutoTrading u${ctx.uid}] ⚠️ No se pudo fijar margin type: ${b.code} ${b.msg}`);
-    } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error margin type:`, e.message); }
+    return tradeDe(ctx).asegurarConfiguracionCuenta(ctx);
 }
 
 // Reconcilia el estado en memoria de una cuenta con el exchange. Si el exchange está plano
@@ -2539,14 +2625,7 @@ async function reconciliarCuenta(ctx) {
 
 // Posición NETA real del símbolo en el exchange de la cuenta `ctx` (positionAmt con signo).
 async function obtenerPosicionExchange(ctx) {
-    const ts  = Date.now();
-    const q   = `symbol=BTCUSDT&timestamp=${ts}&recvWindow=10000`;
-    const url = `${ctx.base}/fapi/v2/positionRisk?${q}&signature=${firmarParams(q, ctx.secret)}`;
-    const r    = await fetch(url, { headers: { 'X-MBX-APIKEY': ctx.apiKey } });
-    const body = await r.json();
-    if (!Array.isArray(body)) throw new Error(body && body.msg ? body.msg : 'positionRisk no disponible');
-    const pos = body.find(x => x.symbol === 'BTCUSDT');
-    return pos ? parseFloat(pos.positionAmt) : 0;
+    return tradeDe(ctx).getPositionAmt(ctx);
 }
 
 // Migración una-vez: pasa la config global antigua (auto_trading_config id=1, que usaba las
@@ -2572,6 +2651,7 @@ async function migrarConfigGlobal() {
     console.log(`[AutoTrading] Config global migrada a la cuenta del usuario ${cfg.usuario_id}.`);
 }
 
+let avisoCuentasOmitidas = new Set();
 let cicloCorriendo = false;
 async function ejecutarAutoTrading() {
     if (!ENCRYPTION_KEY) return;        // sin master key no podemos descifrar las claves de las cuentas
@@ -2588,6 +2668,23 @@ async function ejecutarAutoTrading() {
             if (posDe(uid).length && !rowsByUid.has(uid)) {
                 const r = await pool.query('SELECT * FROM cuentas_trading WHERE usuario_id=$1', [uid]);
                 if (r.rows.length && r.rows[0].api_key) rowsByUid.set(uid, r.rows[0]);
+            }
+        }
+
+        // GUARD DE SEGURIDAD: una cuenta solo se procesa si su exchange coincide con el
+        // exchange activo de DATOS (exch.name). Si no coincidieran, las señales se calcularían
+        // sobre precios de un exchange y las órdenes/TP/SL se ejecutarían en otro — exactamente
+        // la divergencia de precio (~$100 observados) que motivó esta migración. Las cuentas que
+        // no calzan simplemente no se gestionan este ciclo (ni entradas ni salidas), con un aviso
+        // único para no inundar el log.
+        for (const [uid, row] of rowsByUid) {
+            const cuentaExchange = row.exchange || 'binance';
+            if (cuentaExchange !== exch.name) {
+                rowsByUid.delete(uid);
+                if (!avisoCuentasOmitidas.has(uid)) {
+                    console.warn(`⚠️ [AutoTrading u${uid}] Cuenta configurada en "${cuentaExchange}" pero el exchange activo de datos es "${exch.name}" — se omite (no se abren ni gestionan posiciones) hasta que coincidan.`);
+                    avisoCuentasOmitidas.add(uid);
+                }
             }
         }
         if (rowsByUid.size === 0) return;
@@ -2639,14 +2736,14 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
 
     const whaleRes = await pool.query(
         `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
-         FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 ORDER BY fecha ASC`,
-        [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5]
+         FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
+        [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5, exch.name]
     );
 
     const oiRows = p.useOIFilter
         ? (await pool.query(
-            'SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC',
-            [((parseInt(p.oiLookbackMin) || 30) + 10) * 60]
+            'SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 AND exchange = $2 ORDER BY tiempo ASC',
+            [((parseInt(p.oiLookbackMin) || 30) + 10) * 60, exch.name]
           )).rows
         : [];
 
@@ -2695,22 +2792,24 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m) {
         return;
     }
 
+    const trade = tradeDe(ctx);
     const sizing = await calcularNocionalEntrada(ctx, p, row);
     if (!sizing.ok) { console.log(`[AutoTrading u${row.usuario_id}] Entrada omitida — ${sizing.motivo}`); return; }
-    const qty = Math.floor((sizing.nocional / resultado.entry) * 1000) / 1000;
-    if (qty < 0.001) { console.log(`[AutoTrading u${row.usuario_id}] qty ${qty} < 0.001 BTC — omitida`); return; }
+    const qtyDecimales = (String(trade.qtyStep).split('.')[1] || '').length;
+    const qty = Number((Math.floor((sizing.nocional / resultado.entry) / trade.qtyStep) * trade.qtyStep).toFixed(qtyDecimales));
+    if (qty < trade.qtyStep) { console.log(`[AutoTrading u${row.usuario_id}] qty ${qty} < ${trade.qtyStep} BTC — omitida`); return; }
     const notionalUsdt = qty * resultado.entry;
-    if (notionalUsdt < 100) { console.log(`[AutoTrading u${row.usuario_id}] nocional $${notionalUsdt.toFixed(0)} < $100 mínimo Binance (-4164) — omitida`); return; }
+    if (notionalUsdt < trade.minNotionalUsdt) { console.log(`[AutoTrading u${row.usuario_id}] nocional $${notionalUsdt.toFixed(2)} < $${trade.minNotionalUsdt} mínimo ${ctx.exchange} — omitida`); return; }
 
     console.log(`[AutoTrading u${row.usuario_id}] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${qty} BTC`);
 
     if (p.palancaActivo && p.palancaValor > 1) await setBinanceLeverage(ctx, p.palancaValor);
 
-    const ordenEntrada = await ejecutarOrdenBinance(ctx, buildEntryUrl(ctx, nuevaSenal, qty), 'ENTRADA');
+    const ordenEntrada = await colocarOrdenEntrada(ctx, nuevaSenal, qty);
     if (ordenEntrada.ok) {
         const stopType = p.stopType ?? 'Porcentaje';
         // Usar el precio de fill real (avgPrice) en vez del cierre de vela estimado.
-        const fillEntry = parseFloat(ordenEntrada.body?.avgPrice) || resultado.entry;
+        const fillEntry = ordenEntrada.avgPrice || resultado.entry;
         const ins = await pool.query(
             `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8, $8) RETURNING id`,
@@ -2796,8 +2895,9 @@ setTimeout(async () => {
         console.error('[AutoTrading] Error cargando posiciones desde BD:', e.message);
     }
 
-    iniciarMonitorPrecio(WS_PRECIO_POR_ENTORNO.testnet, 'testnet');
-    iniciarMonitorPrecio(WS_PRECIO_POR_ENTORNO.real,    'real');
+    iniciarMonitorPrecio(WS_PRECIO_BINANCE_POR_ENTORNO.testnet, 'binance:testnet');
+    iniciarMonitorPrecio(WS_PRECIO_BINANCE_POR_ENTORNO.real,    'binance:real');
+    if (exch.name === 'bingx') iniciarMonitorPrecioBingX();
 
     // Reconciliación periódica: detecta posiciones cerradas por el exchange (Algo TP/SL) y
     // posiciones huérfanas (exchange con posición, libro vacío) sin depender del reinicio.
@@ -3052,15 +3152,18 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
             sl = signal === 'long' ? ref * (1 - pct) : ref * (1 + pct);
         }
 
-        let qty = Math.floor((positionUsdt / entry) * 1000) / 1000;
-        // BTCUSDT perp exige ~100 USDT de notional mínimo; redondeamos hacia arriba al
-        // step de 0.001 BTC para no caer en -4164 (min notional) en la prueba.
+        const trade = tradeDe(ctx);
+        const qtyDecimales = (String(trade.qtyStep).split('.')[1] || '').length;
+        let qty = Number((Math.floor((positionUsdt / entry) / trade.qtyStep) * trade.qtyStep).toFixed(qtyDecimales));
+        // El exchange exige un notional mínimo; redondeamos hacia arriba al step para no
+        // caer en un rechazo por mínimo en la prueba (~20% de margen sobre el mínimo real).
         if (req.body.prueba) {
-            const minQty = Math.ceil((120 / entry) * 1000) / 1000;
+            const minNotionalPrueba = trade.minNotionalUsdt * 1.2;
+            const minQty = Number((Math.ceil((minNotionalPrueba / entry) / trade.qtyStep) * trade.qtyStep).toFixed(qtyDecimales));
             if (qty < minQty) qty = minQty;
         }
 
-        const resEntrada = await ejecutarOrdenBinance(ctx, buildEntryUrl(ctx, signal, qty), 'ENTRADA-TEST');
+        const resEntrada = await colocarOrdenEntrada(ctx, signal, qty);
         let proteccion = null;
         if (resEntrada.ok) {
             const ins = await pool.query(
@@ -3075,7 +3178,7 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
         }
 
         res.json({
-            entrada: { ok: resEntrada.ok, orderId: resEntrada.body?.orderId, msg: resEntrada.body?.msg, code: resEntrada.body?.code },
+            entrada: { ok: resEntrada.ok, orderId: resEntrada.orderId, msg: resEntrada.body?.msg, code: resEntrada.body?.code },
             proteccion,
             qty, signal, entry, tp, sl,
         });
@@ -3473,11 +3576,11 @@ async function tickWsppNotificaciones() {
                 const [whaleRes, oiRes, lsRes] = await Promise.all([
                     pool.query(
                         `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
-                         FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 ORDER BY fecha ASC`,
-                        [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5]
+                         FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
+                        [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5, exch.name]
                     ),
                     p.useOIFilter
-                        ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC', [((parseInt(p.oiLookbackMin) || 30) + 10) * 60])
+                        ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 AND exchange = $2 ORDER BY tiempo ASC', [((parseInt(p.oiLookbackMin) || 30) + 10) * 60, exch.name])
                         : Promise.resolve({ rows: [] }),
                     (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
                         ? pool.query('SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC', [Math.max(1800, ((parseInt(p.topSlopeLookbackMin) || 15) + 10) * 60)])
@@ -3507,7 +3610,7 @@ async function tickWsppNotificaciones() {
                     canal:      cfg.canal || 'whatsapp',
                     telefono:   cfg.telefono,
                     discord_webhook_url: cfg.discord_webhook_url,
-                    simbolo:    'BTCUSDT',
+                    simbolo:    `${exch.symbol} (${exch.name})`,
                     precio:     resultado.entry,
                     timestamp:  Date.now(),
                 };
@@ -3563,13 +3666,13 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
             fetchKlinesBatch('15m', 800),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
-                 FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 ORDER BY fecha ASC`,
-                [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5]
+                 FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
+                [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5, exch.name]
             ),
             p.useOIFilter
                 ? pool.query(
-                    'SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC',
-                    [((parseInt(p.oiLookbackMin) || 30) + 10) * 60]
+                    'SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 AND exchange = $2 ORDER BY tiempo ASC',
+                    [((parseInt(p.oiLookbackMin) || 30) + 10) * 60, exch.name]
                   )
                 : Promise.resolve({ rows: [] }),
             (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
@@ -3640,17 +3743,19 @@ app.delete('/api/estrategias/:nombre', autenticar, async (req, res) => {
 app.get('/api/mi-cuenta', autenticar, async (req, res) => {
     try {
         const r = await pool.query(
-            `SELECT api_key, base_url, margin_type, estrategia_nombre, position_usdt, habilitado
+            `SELECT api_key, base_url, margin_type, estrategia_nombre, position_usdt, habilitado, exchange
              FROM cuentas_trading WHERE usuario_id = $1`,
             [req.usuario.id]
         );
         if (!r.rows.length) return res.json({ configurada: false });
         const c = r.rows[0];
+        const ex = getExchange(c.exchange || 'binance');
         res.json({
             configurada:       !!c.api_key,
             api_key_mascara:   enmascararClave(c.api_key),
+            exchange:          ex.name,
             base_url:          c.base_url,
-            entorno:           String(c.base_url).includes('testnet') ? 'testnet' : 'real',
+            entorno:           String(c.base_url) === ex.trade.baseDemo ? 'demo' : 'real',
             margin_type:       c.margin_type,
             estrategia_nombre: c.estrategia_nombre,
             position_usdt:     c.position_usdt,
@@ -3659,35 +3764,45 @@ app.get('/api/mi-cuenta', autenticar, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Guarda/actualiza las claves Binance. El secret se cifra. Valida contra Binance antes de guardar.
+// Guarda/actualiza las claves del broker elegido. El secret se cifra. Valida contra el
+// exchange correspondiente antes de guardar.
 app.put('/api/mi-cuenta', autenticar, async (req, res) => {
     const apiKey    = (req.body.api_key    || '').trim();
     const apiSecret = (req.body.api_secret || '').trim();
     if (!apiKey || !apiSecret) return res.status(400).json({ error: 'api_key y api_secret requeridos' });
     if (!ENCRYPTION_KEY) return res.status(503).json({ error: 'El servidor no tiene ENCRYPTION_KEY configurada; no se pueden guardar claves de forma segura' });
 
+    // Exchange elegido por el usuario — default al que tenga activo el server, para que no
+    // tenga que saber cuál es si sólo usa uno. 'binance' si el valor no es reconocido.
+    let ex;
+    try { ex = getExchange(req.body.exchange || exch.name); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+
     // Entorno elegido por el usuario. 'real' opera con plata de verdad; cualquier valor no
-    // reconocido cae en testnet por seguridad (nunca asumir real sin que lo pidan explícito).
-    const entorno = String(req.body.entorno || 'testnet').toLowerCase() === 'real' ? 'real' : 'testnet';
-    const base = entorno === 'real' ? 'https://fapi.binance.com' : 'https://testnet.binancefuture.com';
+    // reconocido cae en demo por seguridad (nunca asumir real sin que lo pidan explícito).
+    // BingX: demo (VST) opera sobre el MISMO precio de mercado que real, solo cambia el saldo
+    // — a diferencia del testnet de Binance, que es un libro aparte con precio propio.
+    const entorno = String(req.body.entorno || 'demo').toLowerCase() === 'real' ? 'real' : 'demo';
+    const base = entorno === 'real' ? ex.trade.baseReal : ex.trade.baseDemo;
     try {
-        // Verificar las claves contra Binance antes de persistir (evita guardar claves rotas).
-        // Se valida contra la base del entorno elegido: una clave de testnet no sirve en real.
+        // Verificar las claves contra el exchange antes de persistir (evita guardar claves rotas).
+        // Se valida contra la base del entorno elegido: una clave de demo no sirve en real.
         let balance;
-        try { balance = await balanceDeCuenta({ apiKey, secret: apiSecret, base }); }
-        catch (e) { return res.status(400).json({ error: 'Las claves no pasaron la verificación con Binance: ' + e.message }); }
+        try { balance = await ex.trade.getBalance({ apiKey, secret: apiSecret, base, exchange: ex.name }); }
+        catch (e) { return res.status(400).json({ error: `Las claves no pasaron la verificación con ${ex.name}: ` + e.message }); }
 
         const secretCifrado = cifrarSecreto(apiSecret);
         await pool.query(
-            `INSERT INTO cuentas_trading (usuario_id, api_key, api_secret_cifrado, base_url)
-             VALUES ($1, $2, $3, $4)
+            `INSERT INTO cuentas_trading (usuario_id, api_key, api_secret_cifrado, base_url, exchange)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (usuario_id) DO UPDATE
                 SET api_key = EXCLUDED.api_key,
                     api_secret_cifrado = EXCLUDED.api_secret_cifrado,
-                    base_url = EXCLUDED.base_url`,
-            [req.usuario.id, apiKey, secretCifrado, base]
+                    base_url = EXCLUDED.base_url,
+                    exchange = EXCLUDED.exchange`,
+            [req.usuario.id, apiKey, secretCifrado, base, ex.name]
         );
-        res.json({ ok: true, entorno, balance_usdt: balance.wallet });
+        res.json({ ok: true, exchange: ex.name, entorno, balance_usdt: balance.wallet });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -3891,10 +4006,10 @@ app.post('/api/backtest', autenticar, async (req, res) => {
         }
         const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 365);
         const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-        // Fuente de velas: 'bd' (cache local, default) o 'binance' (descarga en vivo).
+        // Fuente de velas: 'bd' (cache local, default) o el exchange activo (descarga en vivo).
         // El toggle en /estrategias permite comparar ambas para validar que coinciden.
-        const fuente = req.body.fuenteDatos === 'binance' ? 'binance' : 'bd';
-        const cargarKlines = fuente === 'binance'
+        const fuente = req.body.fuenteDatos === exch.name ? exch.name : 'bd';
+        const cargarKlines = fuente === exch.name
             ? (tf, n) => fetchKlinesBatch(tf, n)
             : (tf)    => fetchKlinesDesdeBD(tf, days);
         // Serie de OI del período (solo si el filtro está activo). Traemos un poco antes del inicio
@@ -3906,11 +4021,11 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             cargarKlines('15m', days * 96),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
-                 FROM ballenas WHERE fecha >= $1 AND cantidad >= $2 ORDER BY fecha ASC`,
-                [periodStart.toISOString(), p.whaleMinBTC]
+                 FROM ballenas WHERE fecha >= $1 AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
+                [periodStart.toISOString(), p.whaleMinBTC, exch.name]
             ),
             p.useOIFilter
-                ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= $1 ORDER BY tiempo ASC', [oiDesdeSeg])
+                ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= $1 AND exchange = $2 ORDER BY tiempo ASC', [oiDesdeSeg, exch.name])
                 : Promise.resolve({ rows: [] }),
             (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
                 // Margen extra hacia atrás para que el lookback de la pendiente tenga muestra previa
@@ -3929,8 +4044,8 @@ app.post('/api/backtest', autenticar, async (req, res) => {
         const warnings = [];
         if (p.useWhaleFilter) {
             const covRes = await pool.query(
-                'SELECT MIN(fecha) AS primera FROM ballenas WHERE cantidad >= $1',
-                [p.whaleMinBTC]
+                'SELECT MIN(fecha) AS primera FROM ballenas WHERE cantidad >= $1 AND exchange = $2',
+                [p.whaleMinBTC, exch.name]
             );
             const primera = covRes.rows[0] && covRes.rows[0].primera ? new Date(covRes.rows[0].primera) : null;
             if (!primera) {
@@ -3944,16 +4059,19 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             }
         }
         if (p.useOIFilter) {
-            const oiCov = await pool.query('SELECT MIN(tiempo) AS primera, COUNT(*)::int AS n FROM open_interest');
+            const oiCov = await pool.query('SELECT MIN(tiempo) AS primera, COUNT(*)::int AS n FROM open_interest WHERE exchange = $1', [exch.name]);
             const primeraOI = oiCov.rows[0] && oiCov.rows[0].primera ? Number(oiCov.rows[0].primera) * 1000 : null;
             if (!primeraOI || oiCov.rows[0].n === 0) {
                 warnings.push('Filtro de Open Interest activo pero no hay datos de OI guardados: ningún trade pasará el filtro.');
             } else if (primeraOI > periodStart.getTime()) {
                 const diasCubiertos = Math.max(0, (Date.now() - primeraOI) / 86400000);
-                warnings.push(`Filtro de Open Interest activo: solo hay datos de OI desde ${new Date(primeraOI).toISOString().slice(0, 16).replace('T', ' ')} UTC (~${diasCubiertos.toFixed(1)} días). Binance solo expone OI de los últimos ~30 días, así que el tramo anterior del período NO genera trades; las métricas reflejan solo el subperíodo con cobertura de OI.`);
+                const motivo = exch.name === 'binance'
+                    ? 'Binance solo expone OI de los últimos ~30 días'
+                    : `${exch.name} no expone histórico de OI, solo se acumula desde que el collector arrancó`;
+                warnings.push(`Filtro de Open Interest activo: solo hay datos de OI desde ${new Date(primeraOI).toISOString().slice(0, 16).replace('T', ' ')} UTC (~${diasCubiertos.toFixed(1)} días). ${motivo}, así que el tramo anterior del período NO genera trades; las métricas reflejan solo el subperíodo con cobertura de OI.`);
             }
         }
-        if (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter) {
+        if (exch.name === 'binance' && (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)) {
             const lsCov = await pool.query('SELECT MIN(tiempo) AS primera, COUNT(*)::int AS n FROM long_short_ratio');
             const primeraLS = lsCov.rows[0] && lsCov.rows[0].primera ? Number(lsCov.rows[0].primera) * 1000 : null;
             if (!primeraLS || lsCov.rows[0].n === 0) {
@@ -3962,6 +4080,8 @@ app.post('/api/backtest', autenticar, async (req, res) => {
                 const diasCubiertos = Math.max(0, (Date.now() - primeraLS) / 86400000);
                 warnings.push(`Filtro de Posicionamiento activo: solo hay datos de ratios desde ${new Date(primeraLS).toISOString().slice(0, 16).replace('T', ' ')} UTC (~${diasCubiertos.toFixed(1)} días). Binance solo expone los últimos ~30 días, así que el tramo anterior NO genera trades; las métricas reflejan solo el subperíodo con cobertura.`);
             }
+        } else if (exch.name !== 'binance' && (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)) {
+            warnings.push(`Filtro de Posicionamiento activo pero ${exch.name} no expone un endpoint público de long/short ratio: ningún trade pasará este filtro. Desactivalo para operar en ${exch.name}.`);
         }
         resultado.warnings = warnings;
 
@@ -3975,10 +4095,36 @@ app.post('/api/backtest', autenticar, async (req, res) => {
 });
 
 // Estado de la cache de velas: cobertura y si el backfill sigue corriendo.
+// Velas cacheadas del exchange elegido (?exchange=binance|bingx), en el mismo array shape
+// que la API REST de Binance ([t,o,h,l,c,v,closeTime,...]). Reemplaza al fetch directo del
+// navegador contra api.binance.com: así el gráfico puede mostrar cualquier exchange soportado
+// sin que el browser necesite hablarle a cada API pública por separado. 5m/15m se derivan por
+// SQL (fetchKlinesDesdeBD); temporalidades más altas (1h/4h/1d) se agregan en JS desde 1m.
+const INTERVALOS_CHART = { '1m': 60000, '5m': 300000, '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 };
+app.get('/api/klines', autenticar, async (req, res) => {
+    const interval = INTERVALOS_CHART[req.query.interval] ? req.query.interval : '1m';
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 1000, 1), 10000);
+    const exVista = exchangeConsultado(req);
+    try {
+        const bucketMs = INTERVALOS_CHART[interval];
+        const diasNecesarios = Math.min(Math.ceil((limit * bucketMs) / 86400000) + 1, DIAS_CACHE_KLINES);
+        if (interval === '1m' || interval === '5m' || interval === '15m') {
+            const velas = await fetchKlinesDesdeBD(interval, diasNecesarios, exVista);
+            return res.json(velas.slice(-limit));
+        }
+        const bars1m = await fetchKlinesDesdeBD('1m', diasNecesarios, exVista);
+        const velas = agregarVelas1m(bars1m, bucketMs);
+        res.json(velas.slice(-limit));
+    } catch (e) {
+        res.status(500).json({ error: `No se pudieron leer velas de ${exVista.name}: ${e.message}` });
+    }
+});
+
 app.get('/api/klines/estado', autenticar, async (req, res) => {
     try {
         const r = await pool.query(
-            'SELECT COUNT(*)::int AS filas, MIN(open_time) AS primera, MAX(open_time) AS ultima FROM klines_1m'
+            'SELECT COUNT(*)::int AS filas, MIN(open_time) AS primera, MAX(open_time) AS ultima FROM klines_1m WHERE exchange = $1',
+            [exch.name]
         );
         const row = r.rows[0];
         const diasCobertura = row.primera
@@ -3989,7 +4135,7 @@ app.get('/api/klines/estado', autenticar, async (req, res) => {
             primera: row.primera ? Number(row.primera) : null,
             ultima:  row.ultima  ? Number(row.ultima)  : null,
             diasCobertura: Math.round(diasCobertura * 10) / 10,
-            sincronizando: sincronizandoKlines,
+            sincronizando: sincronizandoKlines.get(exch.name) || false,
             diasObjetivo: DIAS_CACHE_KLINES,
         });
     } catch (err) {
@@ -4022,17 +4168,17 @@ app.get('/api/snapshot', autenticar, async (req, res) => {
         const [klRes, whaleRes, oiRes, lsRes] = await Promise.all([
             pool.query(
                 `SELECT open_time, open, high, low, close, volume, close_time, taker_buy_base
-                 FROM klines_1m WHERE open_time >= $1::bigint AND open_time <= $2::bigint ORDER BY open_time ASC`,
-                [desde - WARMUP_MS, hasta]
+                 FROM klines_1m WHERE open_time >= $1::bigint AND open_time <= $2::bigint AND exchange = $3 ORDER BY open_time ASC`,
+                [desde - WARMUP_MS, hasta, exch.name]
             ),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) AS ts_sec, precio, cantidad, es_venta
-                 FROM ballenas WHERE fecha >= $1 AND fecha <= $2 ORDER BY fecha ASC`,
-                [new Date(desde).toISOString(), new Date(hasta).toISOString()]
+                 FROM ballenas WHERE fecha >= $1 AND fecha <= $2 AND exchange = $3 ORDER BY fecha ASC`,
+                [new Date(desde).toISOString(), new Date(hasta).toISOString(), exch.name]
             ),
             pool.query(
-                'SELECT tiempo, valor FROM open_interest WHERE tiempo >= $1 AND tiempo <= $2 ORDER BY tiempo ASC',
-                [Math.floor(desde / 1000), Math.floor(hasta / 1000)]
+                'SELECT tiempo, valor FROM open_interest WHERE tiempo >= $1 AND tiempo <= $2 AND exchange = $3 ORDER BY tiempo ASC',
+                [Math.floor(desde / 1000), Math.floor(hasta / 1000), exch.name]
             ),
             pool.query(
                 'SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= $1 AND tiempo <= $2 ORDER BY tiempo ASC',
@@ -4181,7 +4327,7 @@ app.get('/api/snapshot', autenticar, async (req, res) => {
 
         res.json({
             meta: {
-                simbolo: 'BTCUSDT', exchange: 'Binance',
+                simbolo: exch.symbol, exchange: exch.name,
                 desde: iso(desde), hasta: iso(hasta),
                 duracionMin: Math.round((hasta - desde) / 60000),
                 tfSeries, velasEnSerie: velasOut.length,
