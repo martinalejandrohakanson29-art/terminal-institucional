@@ -245,8 +245,8 @@
         <div class="form-section">
             <h3>Estrategias Guardadas</h3>
             <div style="display:flex;gap:5px;margin-bottom:6px;">
-                <select id="strat-select" class="strat-select">
-                    <option value="">— Sin estrategias guardadas —</option>
+                <select id="strat-select" class="strat-select" onchange="onStratSelectChange()">
+                    <option value="__nueva__">➕ Crear nueva estrategia</option>
                 </select>
                 <button class="btn-sm" onclick="cargarEstrategia()">Cargar</button>
             </div>
@@ -1392,7 +1392,7 @@
         filtroRazon = 'Todos';
 
         const stratName = document.getElementById('strat-name').value.trim()
-                       || document.getElementById('strat-select').value || '';
+                       || nombreSeleccionado() || '';
         const verEnGraficoHTML = `
         <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
             <a href="/" target="_blank" rel="noopener" onclick="prepararGrafico(event)" style="padding:5px 14px; border:1px solid #2962FF; border-radius:5px; background:rgba(41,98,255,0.07); color:#2962FF; font-size:12px; font-weight:bold; cursor:pointer; display:flex; align-items:center; gap:5px; text-decoration:none;">
@@ -1422,18 +1422,45 @@
 
     function actualizarSelectEstrategias() {
         const sel = document.getElementById('strat-select');
-        sel.innerHTML = estrategiasCache.length === 0
-            ? '<option value="">— Sin estrategias guardadas —</option>'
-            : '<option value="">Seleccionar estrategia...</option>' +
-              estrategiasCache.map(e =>
-                  `<option value="${escHtml(e.nombre)}">${escHtml(e.nombre)}</option>`
-              ).join('');
+        const previa = sel.value;
+        sel.innerHTML = '<option value="__nueva__">➕ Crear nueva estrategia</option>' +
+            (estrategiasCache.length === 0 ? '' :
+                '<option value="" disabled>— Guardadas —</option>' +
+                estrategiasCache.map(e =>
+                    `<option value="${escHtml(e.nombre)}">${escHtml(e.nombre)}</option>`
+                ).join(''));
+        // Conservar la selección si la estrategia sigue existiendo (p.ej. tras guardar).
+        if (previa && estrategiasCache.some(e => e.nombre === previa)) sel.value = previa;
+    }
+
+    // Nombre "real" seleccionado en el combo ('' si está en Crear nueva / separador).
+    function nombreSeleccionado() {
+        const v = document.getElementById('strat-select').value;
+        return v === '__nueva__' ? '' : v;
+    }
+
+    function onStratSelectChange() {
+        if (document.getElementById('strat-select').value === '__nueva__') nuevaEstrategia();
+    }
+
+    // Deja el formulario en su estado base (defaults de capital, costos, TP/SL, horario…)
+    // y el panel de condicionales VACÍO, listo para ir agregando desde el buscador.
+    function nuevaEstrategia() {
+        aplicarParams({});
+        CONDICIONALES.forEach(c => {
+            const ctrl = document.getElementById(c.ctrl);
+            if (ctrl.checked) { ctrl.checked = false; ctrl.dispatchEvent(new Event('change')); }
+        });
+        sincronizarPanelCondicionales();
+        document.getElementById('strat-name').value = '';
+        document.getElementById('strat-select').value = '__nueva__';
+        mostrarMsg('Panel limpio: agregá condicionales desde el buscador', 'ok');
     }
 
     function prepararGrafico(e) {
         if (!tradesActuales || tradesActuales.length === 0) { e.preventDefault(); return; }
         const stratName = document.getElementById('strat-name').value.trim()
-                       || document.getElementById('strat-select').value || '';
+                       || nombreSeleccionado() || '';
         localStorage.setItem('backtestTrades', JSON.stringify({ trades: tradesActuales, stratName }));
     }
 
@@ -1550,7 +1577,8 @@
     }
 
     function cargarEstrategia() {
-        const nombre = document.getElementById('strat-select').value;
+        if (document.getElementById('strat-select').value === '__nueva__') return nuevaEstrategia();
+        const nombre = nombreSeleccionado();
         if (!nombre) return mostrarMsg('Seleccioná una estrategia primero', 'err');
         const estrategia = estrategiasCache.find(e => e.nombre === nombre);
         if (!estrategia) return mostrarMsg('Estrategia no encontrada', 'err');
@@ -1580,7 +1608,7 @@
     }
 
     async function eliminarEstrategia() {
-        const nombre = document.getElementById('strat-select').value || document.getElementById('strat-name').value.trim();
+        const nombre = nombreSeleccionado() || document.getElementById('strat-name').value.trim();
         if (!nombre) return mostrarMsg('Seleccioná o escribí el nombre a eliminar', 'err');
         if (!confirm(`¿Eliminar la estrategia "${nombre}"?`)) return;
         try {
