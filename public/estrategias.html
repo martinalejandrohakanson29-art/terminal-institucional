@@ -202,10 +202,15 @@
            solo los agregados (.en-panel) se ven y afectan la estrategia. */
         .form-section.cond { display: none; }
         .form-section.cond.en-panel { display: block; }
+        /* Desplegable: oculto hasta hacer foco/clic en el buscador, flota sobre el
+           contenido (no empuja el panel) y se cierra al clickear afuera o con Escape. */
         .cond-lista {
-            margin-top: 6px; max-height: 240px; overflow-y: auto;
-            border: 1px solid #e2e8f0; border-radius: 6px; background: #fff;
+            display: none; position: absolute; left: 0; right: 0; top: 100%; z-index: 60;
+            margin-top: 4px; max-height: 240px; overflow-y: auto;
+            border: 1px solid #cbd5e1; border-radius: 6px; background: #fff;
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.14);
         }
+        .cond-lista.abierta { display: block; }
         .cond-item {
             display: flex; align-items: center; gap: 8px; width: 100%;
             padding: 7px 10px; border: none; border-bottom: 1px solid #f0f2f5;
@@ -456,10 +461,13 @@
         <!-- ═══ Buscador de condicionales ═══ -->
         <div class="form-section" id="cond-buscador">
             <h3>Condicionales</h3>
-            <input type="text" id="cond-search" class="strat-name-input" style="width:100%;"
-                   placeholder="🔍 Buscar condicional (RSI, ballenas, OI…)"
-                   oninput="renderCondLista()" autocomplete="off">
-            <div id="cond-lista" class="cond-lista"></div>
+            <div style="position:relative;">
+                <input type="text" id="cond-search" class="strat-name-input" style="width:100%;"
+                       placeholder="🔍 Agregar condicional (RSI, ballenas, OI…)"
+                       oninput="abrirCondLista(); renderCondLista();" onfocus="abrirCondLista()"
+                       autocomplete="off">
+                <div id="cond-lista" class="cond-lista"></div>
+            </div>
             <div style="font-size:10px;color:#94a3b8;margin-top:6px;line-height:1.4;">
                 Solo los condicionales agregados al panel afectan la estrategia.
                 Se quitan con la ✕ de cada sección.
@@ -1757,6 +1765,22 @@
         });
         renderCondLista();
     }
+
+    // El desplegable de disponibles solo se ve mientras el buscador está en uso: se abre
+    // al hacer foco, queda abierto para agregar varios seguidos, y se cierra al clickear
+    // fuera del bloque o con Escape.
+    function abrirCondLista() {
+        document.getElementById('cond-lista').classList.add('abierta');
+    }
+    function cerrarCondLista() {
+        document.getElementById('cond-lista').classList.remove('abierta');
+    }
+    document.addEventListener('click', (ev) => {
+        if (!ev.target.closest('#cond-buscador')) cerrarCondLista();
+    });
+    document.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') cerrarCondLista();
+    });
 
     // Búsqueda insensible a mayúsculas y acentos ("angulacion" encuentra "Angulación").
     function normalizarTexto(s) {
