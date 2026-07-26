@@ -2863,7 +2863,7 @@
             const nombre = document.getElementById('strat-live-sel').value;
             if (!nombre || !estrategiaLiveActiva) return;
             try {
-                const res = await fetch(`/api/estrategia/signal?nombre=${encodeURIComponent(nombre)}`, { credentials: 'same-origin' });
+                const res = await fetch(`/api/estrategia/signal?nombre=${encodeURIComponent(nombre)}&exchange=${selectExchange.value}`, { credentials: 'same-origin' });
                 const data = await res.json();
 
                 // Tooltip con el estado actual de los indicadores (incluye OI y ratios de

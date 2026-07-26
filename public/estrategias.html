@@ -845,10 +845,18 @@
         </div>
 
         <div class="fuente-box">
+            <label class="fuente-label">Exchange</label>
+            <select id="p-exchange" class="strat-select" onchange="cambiarExchangeEstrategia()" style="width:100%;">
+                <option value="binance">Binance</option>
+                <option value="bingx">BingX</option>
+            </select>
+        </div>
+
+        <div class="fuente-box">
             <label class="fuente-label">Fuente de velas</label>
             <div class="fuente-toggle">
                 <button type="button" id="fuente-bd" class="fuente-opt activa" onclick="setFuente('bd')">⚡ BD (cache)</button>
-                <button type="button" id="fuente-binance" class="fuente-opt" onclick="setFuente('binance')">🌐 Binance</button>
+                <button type="button" id="fuente-binance" class="fuente-opt" onclick="setFuenteVivo()">🌐 Binance</button>
             </div>
             <div class="fuente-info" id="fuente-info">Cargando estado de la cache…</div>
         </div>
@@ -863,7 +871,7 @@
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
             </svg>
             <p>Configurá los parámetros y ejecutá el backtest</p>
-            <p style="font-size:12px;color:#b0b8c4;">Descarga velas 1m + 5m + 15m de Binance y simula la estrategia</p>
+            <p style="font-size:12px;color:#b0b8c4;">Lee velas 1m + 5m + 15m del exchange elegido (BD o en vivo) y simula la estrategia</p>
         </div>
         <div id="results" style="display:none;"></div>
     </div>
@@ -872,6 +880,29 @@
 
 <script>
     fetch('/api/auth/me', { credentials: 'same-origin' }).then(r => { if (!r.ok) window.location.replace('/'); });
+
+    // Config por usuario (persistencia server-side, independiente del selector global del dashboard).
+    let configGuardadaServidor = {};
+    async function cargarConfigServidor() {
+        try {
+            const res = await fetch('/api/config', { credentials: 'same-origin' });
+            if (!res.ok) return;
+            configGuardadaServidor = await res.json();
+        } catch { }
+    }
+    async function guardarConfigServidor(clave, valor) {
+        const res = await fetch('/api/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ clave, valor })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    }
+    function cfgGet(clave, defecto) {
+        if (configGuardadaServidor[clave] !== undefined) return configGuardadaServidor[clave];
+        return defecto;
+    }
 
     // Entrada de prueba: abre una posición real en tu cuenta (testnet) con TP/SL muy cortos,
     // para verificar de punta a punta la operativa y las órdenes de protección Algo.
@@ -980,22 +1011,40 @@
         return Number.isFinite(v) ? v : def;
     }
 
-    // Fuente de velas seleccionada: 'bd' (cache local, default) o 'binance' (en vivo).
+    // Exchange elegido para el backtest (independiente del selector del dashboard /terminal).
+    let exchangeSeleccionado = 'binance';
+    function nombreExchange(ex) { return ex === 'bingx' ? 'BingX' : 'Binance'; }
+    function actualizarBotonFuenteExchange() {
+        document.getElementById('fuente-binance').textContent = '🌐 ' + nombreExchange(exchangeSeleccionado);
+    }
+    function cambiarExchangeEstrategia() {
+        exchangeSeleccionado = document.getElementById('p-exchange').value;
+        guardarConfigServidor('exchangeEstrategias', exchangeSeleccionado).catch(() => {});
+        // Si la fuente en vivo estaba activa, la mantenemos apuntando al exchange recién elegido.
+        if (fuenteSeleccionada !== 'bd') fuenteSeleccionada = exchangeSeleccionado;
+        actualizarBotonFuenteExchange();
+        actualizarEstadoCache();
+    }
+
+    // Fuente de velas seleccionada: 'bd' (cache local, default) o el nombre del exchange (en vivo).
     let fuenteSeleccionada = 'bd';
     function setFuente(f) {
         fuenteSeleccionada = f;
         document.getElementById('fuente-bd').classList.toggle('activa', f === 'bd');
-        document.getElementById('fuente-binance').classList.toggle('activa', f === 'binance');
+        document.getElementById('fuente-binance').classList.toggle('activa', f !== 'bd');
+    }
+    function setFuenteVivo() {
+        setFuente(exchangeSeleccionado);
     }
 
     async function actualizarEstadoCache() {
         const info = document.getElementById('fuente-info');
         try {
-            const res = await fetch('/api/klines/estado', { credentials: 'same-origin' });
+            const res = await fetch(`/api/klines/estado?exchange=${exchangeSeleccionado}`, { credentials: 'same-origin' });
             if (!res.ok) throw new Error();
             const d = await res.json();
             if (!d.filas) {
-                info.innerHTML = '⏳ Cache vacía: backfill inicial en progreso. Usá Binance por ahora.';
+                info.innerHTML = `⏳ Cache vacía: backfill inicial en progreso. Usá ${nombreExchange(exchangeSeleccionado)} por ahora.`;
                 return;
             }
             const ult = d.ultima ? new Date(d.ultima).toISOString().slice(0, 16).replace('T', ' ') : '—';
@@ -1005,11 +1054,19 @@
             info.innerHTML = 'No se pudo leer el estado de la cache.';
         }
     }
-    actualizarEstadoCache();
+
+    (async function initExchangeEstrategias() {
+        await cargarConfigServidor();
+        exchangeSeleccionado = cfgGet('exchangeEstrategias', 'binance');
+        document.getElementById('p-exchange').value = exchangeSeleccionado;
+        actualizarBotonFuenteExchange();
+        actualizarEstadoCache();
+    })();
     setInterval(actualizarEstadoCache, 30000);
 
     function getParams() {
         const p = {
+            exchange:          exchangeSeleccionado,
             fuenteDatos:       fuenteSeleccionada,
             initialCapital:    parseFloat(document.getElementById('p-capital').value) || 1000,
             lookbackDays:      parseInt(document.getElementById('p-days').value) || 7,
@@ -1112,7 +1169,7 @@
         document.getElementById('results').style.display = 'block';
         const dias = parseInt(document.getElementById('p-days').value) || 7;
         const aviso = (!esBD && dias > 20) ? ` (${dias} días — puede tardar ~${dias <= 90 ? '30s' : dias <= 180 ? '1 min' : dias <= 270 ? '2 min' : '3 min'})` : '';
-        const origen = esBD ? 'leyendo velas desde la BD (cache)' : 'descargando 3 temporalidades de Binance';
+        const origen = esBD ? 'leyendo velas desde la BD (cache)' : `descargando 3 temporalidades de ${nombreExchange(exchangeSeleccionado)}`;
         document.getElementById('results').innerHTML = `<div class="loading-msg"><span>Ejecutando backtest — ${origen}...${aviso}</span></div>`;
 
         try {

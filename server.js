@@ -10,19 +10,20 @@ const cookieParser = require('cookie-parser');
 const { getExchange } = require('./lib/exchanges');
 
 // ── Selector de exchange activo (lecturas + ejecución) ──────────────────
-// Controla qué exchange alimenta señales/backtests Y qué broker ejecuta las órdenes
-// (nunca mezclados, ver guard en ejecutarAutoTrading). Todas las QUERIES de lectura
-// (backtest, señal en vivo, paneles) siguen filtrando por este único exchange.
+// Controla qué exchange alimenta el auto-trading real (ejecución de órdenes, nunca mezclado
+// con otro exchange, ver guard en ejecutarAutoTrading) y es el default cuando una vista no
+// elige explícitamente un exchange.
 const EXCHANGE_ACTIVO = (process.env.EXCHANGE_ACTIVO || 'binance').toLowerCase();
 const exch = getExchange(EXCHANGE_ACTIVO);
 console.log(`🔀 Exchange activo (lecturas/ejecución): ${exch.name}`);
 
-// Resuelve qué exchange mostrar en paneles de solo-lectura (ballenas, OI en vivo, histograma)
-// a partir de ?exchange=... en la query. Es un selector de VISTA, independiente del exchange
-// activo para señales/ejecución — nunca toca backtests ni auto-trading. Si el valor no es
-// válido o no viene, cae al exchange activo (comportamiento previo, sin romper nada).
+// Resuelve qué exchange mostrar/backtestear en endpoints de solo-lectura (ballenas, OI en
+// vivo, histograma, klines, backtest, señal en vivo) a partir de ?exchange=... (query) o
+// exchange (body, para POST /api/backtest). Es un selector de VISTA, independiente del
+// exchange activo para ejecución — nunca toca auto-trading. Si el valor no es válido o no
+// viene, cae al exchange activo (comportamiento previo, sin romper nada).
 function exchangeConsultado(req) {
-    const nombre = String(req.query.exchange || '').toLowerCase();
+    const nombre = String((req.body && req.body.exchange) || req.query.exchange || '').toLowerCase();
     if (!nombre) return exch;
     try { return getExchange(nombre); } catch (_) { return exch; }
 }
@@ -3897,6 +3898,7 @@ async function tickWsppNotificaciones() {
 app.get('/api/estrategia/signal', autenticar, async (req, res) => {
     const { nombre } = req.query;
     if (!nombre) return res.status(400).json({ error: 'nombre requerido' });
+    const exVista = exchangeConsultado(req);
     try {
         const stratRes = await pool.query(
             'SELECT params FROM estrategias_guardadas WHERE usuario_id = $1 AND nombre = $2',
@@ -3909,18 +3911,18 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
             // Suficientes velas para que EMA/MACD/RSI/ADX (incluso de período alto en HTF)
             // converjan igual que en el backtest y no diverja la señal en vivo
             // (6000 de 1m = ~100 velas 1h derivadas para el ADX 1h).
-            fetchKlinesBatch('1m',  6000),
-            fetchKlinesBatch('5m',  800),
-            fetchKlinesBatch('15m', 800),
+            fetchKlinesBatch('1m',  6000, exVista),
+            fetchKlinesBatch('5m',  800, exVista),
+            fetchKlinesBatch('15m', 800, exVista),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
                  FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
-                [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5, exch.name]
+                [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5, exVista.name]
             ),
             p.useOIFilter
                 ? pool.query(
                     'SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 AND exchange = $2 ORDER BY tiempo ASC',
-                    [((parseInt(p.oiLookbackMin) || 30) + 10) * 60, exch.name]
+                    [((parseInt(p.oiLookbackMin) || 30) + 10) * 60, exVista.name]
                   )
                 : Promise.resolve({ rows: [] }),
             (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
@@ -4211,26 +4213,28 @@ app.post('/api/backtest', autenticar, async (req, res) => {
         }
         const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 365);
         const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-        // Fuente de velas: 'bd' (cache local, default) o el exchange activo (descarga en vivo).
+        // Exchange elegido en /estrategias (default: exchange activo si no viene o es inválido).
+        const exVista = exchangeConsultado(req);
+        // Fuente de velas: 'bd' (cache local, default) o el exchange elegido (descarga en vivo).
         // El toggle en /estrategias permite comparar ambas para validar que coinciden.
-        const fuente = req.body.fuenteDatos === exch.name ? exch.name : 'bd';
-        const cargarKlines = fuente === exch.name
-            ? (tf, n) => fetchKlinesBatch(tf, n)
-            : (tf)    => fetchKlinesDesdeBD(tf, days);
+        const fuente = req.body.fuenteDatos === exVista.name ? exVista.name : 'bd';
+        const cargarKlines = fuente === exVista.name
+            ? (tf, n) => fetchKlinesBatch(tf, n, exVista)
+            : (tf)    => fetchKlinesDesdeBD(tf, days, exVista);
         // Serie de OI del período (solo si el filtro está activo). Traemos un poco antes del inicio
         // para que el lookback de las primeras velas tenga muestra previa.
         const oiDesdeSeg = Math.floor((periodStart.getTime() - (p.oiLookbackMin || 30) * 60000) / 1000);
         const [bars1m, bars5m, bars15m, whaleRes, oiRes, lsRes] = await Promise.all([
-            cargarKlines('1m',  days * 1440).then(b => fuente === 'bd' ? b : completarDeltaFaltante(b, exch)),
+            cargarKlines('1m',  days * 1440).then(b => fuente === 'bd' ? b : completarDeltaFaltante(b, exVista)),
             cargarKlines('5m',  days * 288),
             cargarKlines('15m', days * 96),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
                  FROM ballenas WHERE fecha >= $1 AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
-                [periodStart.toISOString(), p.whaleMinBTC, exch.name]
+                [periodStart.toISOString(), p.whaleMinBTC, exVista.name]
             ),
             p.useOIFilter
-                ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= $1 AND exchange = $2 ORDER BY tiempo ASC', [oiDesdeSeg, exch.name])
+                ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= $1 AND exchange = $2 ORDER BY tiempo ASC', [oiDesdeSeg, exVista.name])
                 : Promise.resolve({ rows: [] }),
             (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
                 // Margen extra hacia atrás para que el lookback de la pendiente tenga muestra previa
@@ -4239,10 +4243,11 @@ app.post('/api/backtest', autenticar, async (req, res) => {
                 : Promise.resolve({ rows: [] }),
         ]);
         if (fuente === 'bd' && bars1m.length === 0) {
-            throw new Error('La BD todavía no tiene velas cacheadas (el backfill inicial puede tardar unos minutos). Probá de nuevo en un rato o cambiá la fuente a Binance.');
+            throw new Error(`La BD todavía no tiene velas cacheadas (el backfill inicial puede tardar unos minutos). Probá de nuevo en un rato o cambiá la fuente a ${exVista.name}.`);
         }
         const resultado = runBacktest(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows, lsRes.rows);
         resultado.fuenteDatos = fuente;
+        resultado.exchange = exVista.name;
         resultado.barsUsadas = { m1: bars1m.length, m5: bars5m.length, m15: bars15m.length };
 
         // ── Advertencias de calidad de datos que afectan la validez del backtest ──
@@ -4250,7 +4255,7 @@ app.post('/api/backtest', autenticar, async (req, res) => {
         if (p.useWhaleFilter) {
             const covRes = await pool.query(
                 'SELECT MIN(fecha) AS primera FROM ballenas WHERE cantidad >= $1 AND exchange = $2',
-                [p.whaleMinBTC, exch.name]
+                [p.whaleMinBTC, exVista.name]
             );
             const primera = covRes.rows[0] && covRes.rows[0].primera ? new Date(covRes.rows[0].primera) : null;
             if (!primera) {
@@ -4264,19 +4269,19 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             }
         }
         if (p.useOIFilter) {
-            const oiCov = await pool.query('SELECT MIN(tiempo) AS primera, COUNT(*)::int AS n FROM open_interest WHERE exchange = $1', [exch.name]);
+            const oiCov = await pool.query('SELECT MIN(tiempo) AS primera, COUNT(*)::int AS n FROM open_interest WHERE exchange = $1', [exVista.name]);
             const primeraOI = oiCov.rows[0] && oiCov.rows[0].primera ? Number(oiCov.rows[0].primera) * 1000 : null;
             if (!primeraOI || oiCov.rows[0].n === 0) {
                 warnings.push('Filtro de Open Interest activo pero no hay datos de OI guardados: ningún trade pasará el filtro.');
             } else if (primeraOI > periodStart.getTime()) {
                 const diasCubiertos = Math.max(0, (Date.now() - primeraOI) / 86400000);
-                const motivo = exch.name === 'binance'
+                const motivo = exVista.name === 'binance'
                     ? 'Binance solo expone OI de los últimos ~30 días'
-                    : `${exch.name} no expone histórico de OI, solo se acumula desde que el collector arrancó`;
+                    : `${exVista.name} no expone histórico de OI, solo se acumula desde que el collector arrancó`;
                 warnings.push(`Filtro de Open Interest activo: solo hay datos de OI desde ${new Date(primeraOI).toISOString().slice(0, 16).replace('T', ' ')} UTC (~${diasCubiertos.toFixed(1)} días). ${motivo}, así que el tramo anterior del período NO genera trades; las métricas reflejan solo el subperíodo con cobertura de OI.`);
             }
         }
-        if (exch.name === 'binance' && (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)) {
+        if (exVista.name === 'binance' && (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)) {
             const lsCov = await pool.query('SELECT MIN(tiempo) AS primera, COUNT(*)::int AS n FROM long_short_ratio');
             const primeraLS = lsCov.rows[0] && lsCov.rows[0].primera ? Number(lsCov.rows[0].primera) * 1000 : null;
             if (!primeraLS || lsCov.rows[0].n === 0) {
@@ -4285,8 +4290,8 @@ app.post('/api/backtest', autenticar, async (req, res) => {
                 const diasCubiertos = Math.max(0, (Date.now() - primeraLS) / 86400000);
                 warnings.push(`Filtro de Posicionamiento activo: solo hay datos de ratios desde ${new Date(primeraLS).toISOString().slice(0, 16).replace('T', ' ')} UTC (~${diasCubiertos.toFixed(1)} días). Binance solo expone los últimos ~30 días, así que el tramo anterior NO genera trades; las métricas reflejan solo el subperíodo con cobertura.`);
             }
-        } else if (exch.name !== 'binance' && (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)) {
-            warnings.push(`Filtro de Posicionamiento activo pero ${exch.name} no expone un endpoint público de long/short ratio: ningún trade pasará este filtro. Desactivalo para operar en ${exch.name}.`);
+        } else if (exVista.name !== 'binance' && (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)) {
+            warnings.push(`Filtro de Posicionamiento activo pero ${exVista.name} no expone un endpoint público de long/short ratio: ningún trade pasará este filtro. Desactivalo para operar en ${exVista.name}.`);
         }
         resultado.warnings = warnings;
 
