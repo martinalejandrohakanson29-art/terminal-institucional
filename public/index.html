@@ -3125,10 +3125,12 @@
                     document.getElementById('at-api-secret').value = '';
                     document.getElementById('at-api-key').placeholder = 'API Key (reemplazar)';
                     document.getElementById('at-api-secret').placeholder = 'API Secret (reemplazar)';
+                    document.getElementById('at-btn-prueba').disabled = false;
                     return true;
                 } else {
                     estadoEl.textContent = '— sin vincular —';
                     estadoEl.style.color = '#94a3b8';
+                    document.getElementById('at-btn-prueba').disabled = true;
                     return false;
                 }
             } catch (_) { return false; }
@@ -3159,6 +3161,37 @@
                 mostrarMsgAT('Error: ' + e.message, true);
             } finally {
                 btn.disabled = false; btn.textContent = '🔒 Guardar y verificar claves';
+            }
+        }
+
+        // Abre una entrada de verificación (long, qty mínima, TP/SL ±0.15%) en la cuenta ya
+        // vinculada. Si la cuenta es real, pide confirmación explícita antes de mandar la orden.
+        async function probarEntradaAutoTrading() {
+            const entorno       = document.getElementById('at-entorno').value;
+            const exchange      = document.getElementById('at-exchange').value;
+            const positionUsdt  = parseFloat(document.getElementById('at-pos-usdt').value) || 100;
+            const btn = document.getElementById('at-btn-prueba');
+            const nombreExchange = exchange === 'bingx' ? 'BingX' : 'Binance';
+
+            if (entorno === 'real') {
+                const ok = confirm(`⚠️ Vas a abrir una orden REAL en ${nombreExchange} con plata de verdad (cantidad mínima operable del exchange). Tendrás que cerrarla vos manualmente. ¿Continuar?`);
+                if (!ok) return;
+            }
+
+            btn.disabled = true; btn.textContent = 'Abriendo…';
+            try {
+                const res = await fetch('/api/autotrading/test', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+                    body: JSON.stringify({ signal: 'long', positionUsdt, prueba: true })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'no se pudo abrir la prueba');
+                if (!data.entrada.ok) throw new Error(data.entrada.msg || 'la orden fue rechazada por el exchange');
+                mostrarMsgAT(`✅ Prueba abierta: ${data.signal.toUpperCase()} ${data.qty} BTC @ $${Number(data.entry).toFixed(0)} · TP $${Number(data.tp).toFixed(0)} · SL $${Number(data.sl).toFixed(0)}. Cerrala manualmente si no se gatilla sola.`, false);
+            } catch (e) {
+                mostrarMsgAT('Error: ' + e.message, true);
+            } finally {
+                btn.disabled = false; btn.textContent = '🧪 Realizar prueba';
             }
         }
 
@@ -3450,7 +3483,15 @@
 
             <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Capital por operación (USDT)</label>
             <input type="number" id="at-pos-usdt" min="10" step="10" value="100"
-                style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:18px;">
+                style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;">
+
+            <button onclick="probarEntradaAutoTrading()" id="at-btn-prueba" disabled
+                style="width:100%;padding:9px;border:1px dashed #f59e0b;border-radius:6px;font-size:12px;background:#fffbeb;color:#b45309;cursor:pointer;font-weight:bold;margin-bottom:4px;">
+                🧪 Realizar prueba
+            </button>
+            <div style="margin-bottom:14px;font-size:10px;color:#94a3b8;line-height:1.4;">
+                Abre una entrada mínima (long) con TP/SL a ±0.15% para validar la ejecución de punta a punta en tu cuenta actual. Si no se gatillan solos, cerrala manualmente desde el exchange.
+            </div>
 
             <div style="display:flex;gap:10px;">
                 <button onclick="guardarConfigAutoTrading(false)" style="flex:1;padding:10px;border:1px solid #ef5350;border-radius:6px;font-size:13px;background:#fff;color:#ef5350;cursor:pointer;font-weight:bold;">
