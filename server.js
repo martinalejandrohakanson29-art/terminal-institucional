@@ -287,6 +287,15 @@ async function inicializarBaseDeDatos() {
                 ADD COLUMN IF NOT EXISTS tp_order_id VARCHAR(32),
                 ADD COLUMN IF NOT EXISTS sl_order_id VARCHAR(32)
         `);
+        // Migración: breakeven en vivo. trigger/offset se congelan al abrir la entrada (desde
+        // los params de la estrategia) y be_aplicado persiste si el stop ya fue movido, para
+        // que un reinicio del server no "des-aplique" un breakeven ya disparado.
+        await pool.query(`
+            ALTER TABLE auto_trading_entradas
+                ADD COLUMN IF NOT EXISTS be_trigger  NUMERIC,
+                ADD COLUMN IF NOT EXISTS be_offset   NUMERIC,
+                ADD COLUMN IF NOT EXISTS be_aplicado BOOLEAN DEFAULT false
+        `);
         // Migración: referencia de capital inicial para sizing "% capital inicial" en vivo
         await pool.query(`ALTER TABLE auto_trading_config ADD COLUMN IF NOT EXISTS capital_inicial_ref NUMERIC`);
 
@@ -2446,8 +2455,10 @@ async function cerrarSubPosicion(ctx, pos, razon, precio) {
     if (arr.length === 0) await cancelarTodasLasOrdenes(ctx);
 }
 
-// TP/SL por tick para TODAS las cuentas con posiciones. El SL fijo por tick solo aplica a
-// stop por Porcentaje; el stop por Ruptura EMA es dinámico (lo gestiona el ciclo de 1 min).
+// TP/SL por tick para TODAS las cuentas con posiciones. El SL fijo por tick aplica a stop
+// por Porcentaje y a cualquier sub-posición con breakeven ya disparado (el BE es un nivel
+// duro aunque el stop base sea Ruptura EMA, igual que en el backtest); el stop por Ruptura
+// EMA sin BE sigue siendo dinámico (lo gestiona el ciclo de 1 min).
 async function chequearSalida(precio, mercado) {
     ultimoPrecioPorMercado[mercado] = precio;
     for (const [uid, arr] of posicionesPorCuenta) {
@@ -2456,19 +2467,64 @@ async function chequearSalida(precio, mercado) {
         if (!ctx) continue; // sin claves en memoria no podemos cerrar; el exchange igual tiene el TP/SL
         if (mercadoDeCtx(ctx) !== mercado) continue; // este feed es de otro mercado: no aplica
 
-        const aCerrar = [];
+        const aCerrar = [], aMoverBE = [];
         for (let i = arr.length - 1; i >= 0; i--) {
             const pos = arr[i];
             const golpeTP   = pos.lado === 'long' ? precio >= pos.tp : precio <= pos.tp;
-            const slPorTick = (pos.stopType ?? 'Porcentaje') === 'Porcentaje';
-            const golpeSL   = slPorTick && (pos.lado === 'long' ? precio <= pos.sl : precio >= pos.sl);
+            const slPorTick = (pos.stopType ?? 'Porcentaje') === 'Porcentaje' || pos.beAplicado;
+            const golpeSL   = slPorTick && pos.sl != null && (pos.lado === 'long' ? precio <= pos.sl : precio >= pos.sl);
             if (golpeTP || golpeSL) {
                 arr.splice(i, 1); // remover síncronamente antes de awaits
-                aCerrar.push({ pos, razon: golpeTP ? 'TP' : 'SL' });
+                aCerrar.push({ pos, razon: golpeTP ? 'TP' : (pos.beAplicado ? 'BE' : 'SL') });
+                continue;
+            }
+            // Disparo del breakeven: si el precio avanzó el trigger a favor, mover el stop a
+            // entrada ± offset. Igual que en el backtest ("rige desde la próxima vela"), el
+            // nuevo nivel se evalúa recién en los PRÓXIMOS ticks, nunca en el que lo disparó.
+            // beAplicado se marca síncrono antes de cualquier await para no re-disparar.
+            if (pos.beTrigger != null && !pos.beAplicado) {
+                const disparo = pos.lado === 'long'
+                    ? precio >= pos.entry * (1 + pos.beTrigger / 100)
+                    : precio <= pos.entry * (1 - pos.beTrigger / 100);
+                if (disparo) {
+                    pos.beAplicado = true;
+                    pos.sl = pos.lado === 'long'
+                        ? pos.entry * (1 + pos.beOffset / 100)
+                        : pos.entry * (1 - pos.beOffset / 100);
+                    aMoverBE.push(pos);
+                }
             }
         }
         for (const { pos, razon } of aCerrar) await cerrarSubPosicion(ctx, pos, razon, precio);
+        for (const pos of aMoverBE) await aplicarBreakevenExchange(ctx, pos);
     }
+}
+
+// Persiste el breakeven recién disparado y reubica la orden de protección en el exchange:
+// primero coloca el stop NUEVO en entrada ± offset y recién si fue aceptado cancela el viejo
+// (si el orden fuera al revés y el server se cayera en el medio, la posición quedaría sin
+// red). Si el nuevo falla, se conserva el stop original: el nivel BE lo sigue aplicando el
+// tick del server igual que en el backtest.
+async function aplicarBreakevenExchange(ctx, pos) {
+    console.log(`[AutoTrading u${ctx.uid}] 🟦 Breakeven sub-pos #${pos.id} ${pos.lado.toUpperCase()} — stop movido a $${pos.sl.toFixed(1)} (entrada $${pos.entry.toFixed(1)})`);
+    try {
+        await pool.query(
+            `UPDATE auto_trading_entradas SET precio_sl=$1, be_aplicado=true WHERE id=$2`,
+            [pos.sl, pos.id]
+        );
+        await sincronizarPosicionBD(ctx.uid);
+    } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error persistiendo breakeven #${pos.id}:`, e.message); }
+    try {
+        const r = await colocarOrdenStop(ctx, pos.lado, pos.qty, pos.sl, 'STOP_MARKET');
+        if (r.ok && r.orderId) {
+            const viejo = pos.slOrderId;
+            pos.slOrderId = r.orderId;
+            await pool.query(`UPDATE auto_trading_entradas SET sl_order_id=$1 WHERE id=$2`, [r.orderId, pos.id]);
+            if (viejo) await cancelarOrden(ctx, viejo);
+        } else {
+            console.warn(`[AutoTrading u${ctx.uid}] ⚠️ No se pudo colocar el stop de breakeven #${pos.id} en el exchange — se conserva el stop original como red y el BE lo aplica el server por tick.`);
+        }
+    } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error moviendo stop de breakeven #${pos.id}:`, e.message); }
 }
 
 // Cada ciclo (1 min): salida por tiempo máximo y stop EMA dinámico, por sub-posición de la
@@ -2917,16 +2973,21 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false)
     const ordenEntrada = await colocarOrdenEntrada(ctx, nuevaSenal, qty);
     if (ordenEntrada.ok) {
         const stopType = p.stopType ?? 'Porcentaje';
+        // Breakeven: los umbrales de la estrategia se congelan en la entrada (si después se
+        // edita la estrategia, las posiciones ya abiertas conservan su configuración).
+        const beTrigger = p.useBreakeven === true ? (p.breakevenTrigger ?? 0.3)  : null;
+        const beOffset  = p.useBreakeven === true ? (p.breakevenOffset  ?? 0.12) : null;
         // Usar el precio de fill real (avgPrice) en vez del cierre de vela estimado.
         const fillEntry = ordenEntrada.avgPrice || resultado.entry;
         const ins = await pool.query(
-            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8, $8, $9) RETURNING id`,
-            [Date.now(), nuevaSenal, fillEntry, resultado.tp, resultado.sl, qty, stopType, row.usuario_id, ctx.exchange]
+            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange, be_trigger, be_offset)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8, $8, $9, $10, $11) RETURNING id`,
+            [Date.now(), nuevaSenal, fillEntry, resultado.tp, resultado.sl, qty, stopType, row.usuario_id, ctx.exchange, beTrigger, beOffset]
         );
         const sub = {
             id: ins.rows[0].id, lado: nuevaSenal, qty, entry: fillEntry,
             tp: resultado.tp, sl: resultado.sl, entryTs: Date.now(), stopType,
+            beTrigger, beOffset, beAplicado: false,
         };
         arr.push(sub);
         await sincronizarPosicionBD(row.usuario_id);
@@ -2957,7 +3018,8 @@ setTimeout(async () => {
     // 1. Recuperar sub-posiciones abiertas agrupadas por cuenta (usuario_id).
     try {
         const openRows = await pool.query(
-            `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, tp_order_id, sl_order_id, usuario_id
+            `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, tp_order_id, sl_order_id, usuario_id,
+                    be_trigger, be_offset, be_aplicado
              FROM auto_trading_entradas WHERE estado = 'abierta' ORDER BY ts ASC`
         );
         for (const row of openRows.rows) {
@@ -2970,6 +3032,11 @@ setTimeout(async () => {
                 entry: parseFloat(row.precio_entrada), tp: parseFloat(row.precio_tp), sl: parseFloat(row.precio_sl),
                 entryTs: parseInt(row.ts), stopType: row.stop_type || 'Porcentaje',
                 tpOrderId: row.tp_order_id || null, slOrderId: row.sl_order_id || null,
+                // Breakeven: si ya estaba aplicado, precio_sl YA es el nivel BE persistido —
+                // el reinicio no lo des-aplica ni vuelve a mover el stop.
+                beTrigger: row.be_trigger != null ? parseFloat(row.be_trigger) : null,
+                beOffset:  row.be_offset  != null ? parseFloat(row.be_offset)  : null,
+                beAplicado: row.be_aplicado === true,
             });
         }
 
