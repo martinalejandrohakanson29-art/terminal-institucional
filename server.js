@@ -3382,6 +3382,11 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
             if (qty < minQty) qty = minQty;
         }
 
+        // Balance leído justo antes de la orden — para diagnosticar rechazos de margen sin
+        // adivinar (best-effort: si falla la lectura, no bloquea la prueba en sí).
+        let balance = null;
+        try { balance = await trade.getBalance(ctx); } catch (_) {}
+
         const resEntrada = await colocarOrdenEntrada(ctx, signal, qty);
         let proteccion = null;
         if (resEntrada.ok) {
@@ -3399,7 +3404,7 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
         res.json({
             entrada: { ok: resEntrada.ok, orderId: resEntrada.orderId, msg: resEntrada.body?.msg, code: resEntrada.body?.code },
             proteccion,
-            qty, signal, entry, tp, sl,
+            qty, signal, entry, tp, sl, balance,
         });
     } catch (e) {
         res.status(500).json({ error: e.message });

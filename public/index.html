@@ -3214,8 +3214,9 @@
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.error || 'no se pudo abrir la prueba');
                 const nocional = (data.qty * data.entry).toFixed(2);
+                const balTxt = data.balance ? ` · balance: wallet $${Number(data.balance.wallet).toFixed(2)} / disponible $${Number(data.balance.disponible).toFixed(2)}` : '';
                 if (!data.entrada.ok) {
-                    throw new Error(`${data.entrada.msg || 'la orden fue rechazada por el exchange'} (intentó ${data.qty} BTC ≈ $${nocional} nocional)`);
+                    throw new Error(`${data.entrada.msg || 'la orden fue rechazada por el exchange'} (intentó ${data.qty} BTC ≈ $${nocional} nocional${balTxt})`);
                 }
                 mostrarMsgAT(`✅ Prueba abierta: ${data.signal.toUpperCase()} ${data.qty} BTC (≈$${nocional}) @ $${Number(data.entry).toFixed(0)} · TP $${Number(data.tp).toFixed(0)} · SL $${Number(data.sl).toFixed(0)}. Cerrala manualmente si no se gatilla sola.`, false);
             } catch (e) {
