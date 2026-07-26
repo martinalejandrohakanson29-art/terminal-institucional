@@ -2969,6 +2969,9 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false)
     console.log(`[AutoTrading u${row.usuario_id}] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${qty} BTC`);
 
     if (p.palancaActivo && p.palancaValor > 1) await setBinanceLeverage(ctx, p.palancaValor);
+    // BingX exige positionSide en cada orden — asegura modo One-way antes de la primera
+    // entrada real de la cuenta (idempotente; ver hallazgo del 2026-07-26: error 109400).
+    if (ctx.exchange === 'bingx' && arr.length === 0) { try { await asegurarConfiguracionCuenta(ctx); } catch (_) {} }
 
     const ordenEntrada = await colocarOrdenEntrada(ctx, nuevaSenal, qty);
     if (ordenEntrada.ok) {
@@ -3351,8 +3354,12 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
         catch (e) { return res.status(500).json({ error: 'No se pudo descifrar la clave: ' + e.message }); }
         ctxActivos.set(req.usuario.id, ctx);
         // Cuenta BingX: asegurar su feed de precio (idempotente) — sin él, precioDeCtx
-        // nunca tendría dato y la prueba respondería 503 indefinidamente.
-        if (ctx.exchange === 'bingx') iniciarMonitorPrecioBingX();
+        // nunca tendría dato y la prueba respondería 503 indefinidamente. También asegura
+        // modo One-way (positionSide 'BOTH'), por si la cuenta se vinculó antes de este fix.
+        if (ctx.exchange === 'bingx') {
+            iniciarMonitorPrecioBingX();
+            try { await asegurarConfiguracionCuenta(ctx); } catch (_) {}
+        }
 
         if (req.body.prueba) {
             // Precio de referencia del mercado de ESTA cuenta (testnet o real), no de un feed global.
@@ -4019,6 +4026,11 @@ app.put('/api/mi-cuenta', autenticar, async (req, res) => {
                     exchange = EXCLUDED.exchange`,
             [req.usuario.id, apiKey, secretCifrado, base, ex.name]
         );
+        // Deja la cuenta en modo One-way (positionSide 'BOTH' en las órdenes) desde que se
+        // vincula, para no depender de que el server la reconfigure recién al reiniciar.
+        try {
+            await asegurarConfiguracionCuenta({ uid: req.usuario.id, apiKey, secret: apiSecret, base, marginType: 'ISOLATED', exchange: ex.name });
+        } catch (_) {}
         res.json({ ok: true, exchange: ex.name, entorno, balance_usdt: balance.wallet });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
