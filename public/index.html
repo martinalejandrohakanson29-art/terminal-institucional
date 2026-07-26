@@ -3213,8 +3213,11 @@
                 });
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.error || 'no se pudo abrir la prueba');
-                if (!data.entrada.ok) throw new Error(data.entrada.msg || 'la orden fue rechazada por el exchange');
-                mostrarMsgAT(`✅ Prueba abierta: ${data.signal.toUpperCase()} ${data.qty} BTC @ $${Number(data.entry).toFixed(0)} · TP $${Number(data.tp).toFixed(0)} · SL $${Number(data.sl).toFixed(0)}. Cerrala manualmente si no se gatilla sola.`, false);
+                const nocional = (data.qty * data.entry).toFixed(2);
+                if (!data.entrada.ok) {
+                    throw new Error(`${data.entrada.msg || 'la orden fue rechazada por el exchange'} (intentó ${data.qty} BTC ≈ $${nocional} nocional)`);
+                }
+                mostrarMsgAT(`✅ Prueba abierta: ${data.signal.toUpperCase()} ${data.qty} BTC (≈$${nocional}) @ $${Number(data.entry).toFixed(0)} · TP $${Number(data.tp).toFixed(0)} · SL $${Number(data.sl).toFixed(0)}. Cerrala manualmente si no se gatilla sola.`, false);
             } catch (e) {
                 mostrarMsgAT('Error: ' + e.message, true);
             } finally {
