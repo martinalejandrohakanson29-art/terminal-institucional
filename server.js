@@ -3406,6 +3406,25 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
     }
 });
 
+// Ajusta el leverage del símbolo en el exchange de la cuenta del usuario (algunos exchanges,
+// como BingX, no exponen esto claramente en su app — se necesita vía API).
+app.post('/api/mi-cuenta/leverage', autenticar, async (req, res) => {
+    const leverage = parseFloat(req.body.leverage);
+    if (!(leverage > 0)) return res.status(400).json({ error: 'leverage inválido' });
+    try {
+        const cr = await pool.query('SELECT * FROM cuentas_trading WHERE usuario_id = $1', [req.usuario.id]);
+        if (!cr.rows.length || !cr.rows[0].api_key) return res.status(400).json({ error: 'Cargá las claves API de tu exchange primero' });
+        let ctx;
+        try { ctx = ctxDeCuenta(cr.rows[0]); }
+        catch (e) { return res.status(500).json({ error: 'No se pudo descifrar la clave: ' + e.message }); }
+        const ok = await setBinanceLeverage(ctx, leverage);
+        if (!ok) return res.status(400).json({ error: 'El exchange rechazó el cambio de leverage (revisá los logs del server para el código exacto)' });
+        res.json({ ok: true, leverage: Math.round(leverage) });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ── Evaluación de señal en tiempo real ────────────────────────
 function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     if (bars1m.length < 510) return { signal: null, reason: 'datos_insuficientes' };

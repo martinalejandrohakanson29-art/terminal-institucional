@@ -3126,11 +3126,13 @@
                     document.getElementById('at-api-key').placeholder = 'API Key (reemplazar)';
                     document.getElementById('at-api-secret').placeholder = 'API Secret (reemplazar)';
                     document.getElementById('at-btn-prueba').disabled = false;
+                    document.getElementById('at-btn-leverage').disabled = false;
                     return true;
                 } else {
                     estadoEl.textContent = '— sin vincular —';
                     estadoEl.style.color = '#94a3b8';
                     document.getElementById('at-btn-prueba').disabled = true;
+                    document.getElementById('at-btn-leverage').disabled = true;
                     return false;
                 }
             } catch (_) { return false; }
@@ -3161,6 +3163,31 @@
                 mostrarMsgAT('Error: ' + e.message, true);
             } finally {
                 btn.disabled = false; btn.textContent = '🔒 Guardar y verificar claves';
+            }
+        }
+
+        // Ajusta el leverage del símbolo en el exchange de la cuenta vinculada — algunos
+        // exchanges (BingX) no lo exponen claramente en su app, hay que setearlo vía API.
+        async function ajustarLeverage() {
+            const leverage = parseFloat(document.getElementById('at-leverage').value);
+            const entorno  = document.getElementById('at-entorno').value;
+            const btn = document.getElementById('at-btn-leverage');
+            if (!(leverage > 0)) { mostrarMsgAT('Leverage inválido', true); return; }
+            if (entorno === 'real' && !confirm(`Vas a cambiar el leverage a ${leverage}x en tu cuenta REAL. ¿Continuar?`)) return;
+
+            btn.disabled = true; btn.textContent = '…';
+            try {
+                const res = await fetch('/api/mi-cuenta/leverage', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+                    body: JSON.stringify({ leverage })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'no se pudo ajustar el leverage');
+                mostrarMsgAT(`✅ Leverage ajustado a ${data.leverage}x`, false);
+            } catch (e) {
+                mostrarMsgAT('Error: ' + e.message, true);
+            } finally {
+                btn.disabled = false; btn.textContent = 'Ajustar';
             }
         }
 
@@ -3484,6 +3511,16 @@
             <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Capital por operación (USDT)</label>
             <input type="number" id="at-pos-usdt" min="10" step="10" value="100"
                 style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;">
+
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Leverage (símbolo, cuenta actual)</label>
+            <div style="display:flex;gap:6px;margin-bottom:14px;">
+                <input type="number" id="at-leverage" min="1" step="1" value="5"
+                    style="flex:1;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;">
+                <button onclick="ajustarLeverage()" id="at-btn-leverage" disabled
+                    style="padding:8px 12px;border:1px solid #2962FF;border-radius:5px;font-size:12px;background:#fff;color:#2962FF;cursor:pointer;font-weight:bold;">
+                    Ajustar
+                </button>
+            </div>
 
             <button onclick="probarEntradaAutoTrading()" id="at-btn-prueba" disabled
                 style="width:100%;padding:9px;border:1px dashed #f59e0b;border-radius:6px;font-size:12px;background:#fffbeb;color:#b45309;cursor:pointer;font-weight:bold;margin-bottom:4px;">
