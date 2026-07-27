@@ -5,8 +5,29 @@ la estrategia, busca combinaciones con búsqueda bayesiana y valida fuera de mue
 
 ```bash
 node scripts/optimizar.js --dias 150 --trials 300
-node scripts/optimizar.js --ayuda
+node scripts/optimizar.js --ayuda        # o: npm run optimizar -- --ayuda
 ```
+
+Necesita Node 18+ y el `DATABASE_URL` del `.env`. **No hace falta que el server esté
+levantado**: se conecta a Postgres por su cuenta.
+
+## Reproducibilidad
+
+Dos corridas con los mismos argumentos dan el mismo CSV, byte a byte. Para que eso valga hay
+que fijar **las dos** cosas que definen un estudio:
+
+- `--semilla N` — la secuencia de muestreo.
+- `--hasta YYYY-MM-DD` — el fin del período. Sin esto, el período se ancla a "ahora": la misma
+  orden corrida mañana cubre otras velas. Y la BD además sigue sincronizando velas y
+  acumulando ballenas/OI, así que el histórico de un mismo rango tampoco es fijo hacia atrás.
+
+Los trials se despachan **en lotes** del tamaño del pool de workers, y los resultados se
+registran en orden de índice antes de proponer el lote siguiente. Despachando de forma
+continua se aprovecha algo mejor la CPU, pero el modelo del TPE recibiría los resultados en el
+orden en que terminan —que depende de cuánto tardó cada backtest— y dos corridas con la misma
+semilla divergirían desde el primer desempate. El precio del lote es que el modelo se
+actualiza cada N trials en vez de cada uno (N = 3 en una máquina de 4 núcleos) y que se pierde
+algo de CPU esperando al rezagado de cada lote.
 
 ## Cómo está armado
 

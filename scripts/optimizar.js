@@ -67,6 +67,10 @@ Optimizador de estrategias — búsqueda bayesiana + validación walk-forward
   --posicion N      % del capital (o monto) por entrada    (default 100)
   --capital N       Capital inicial                       (default 1000)
   --exchange E      binance | bingx                       (default binance)
+  --hasta F         Fecha de fin del período, YYYY-MM-DD   (default: ahora).
+                    Fijala para que un estudio sea reproducible: sin esto el
+                    período se ancla a "hoy" y la misma orden corrida otro día
+                    —o en otra máquina— cubre otras velas y da otro resultado.
   --semilla N       Semilla del muestreo (reproducible)   (default 12345)
   --workers N       Hilos de evaluación                   (default núcleos-1)
   --sin-pruning     No abandonar trials a mitad de camino
@@ -138,12 +142,17 @@ function describir(cfg) {
         posicion: parseFloat(args.posicion) || 100,
         capital:  parseFloat(args.capital) || 1000,
         exchange: args.exchange === 'bingx' ? 'bingx' : 'binance',
+        hasta:    typeof args.hasta === 'string' ? Date.parse(args.hasta + 'T00:00:00Z') : Date.now(),
         semilla:  parseInt(args.semilla) || 12345,
         workers:  args.workers ? parseInt(args.workers) : undefined,
         pruning:  !args['sin-pruning'],
         salida:   args.salida || path.join(__dirname, '..', 'resultados'),
     };
 
+    if (!Number.isFinite(cfg.hasta)) {
+        console.error(`Fecha inválida en --hasta: "${args.hasta}". Se espera YYYY-MM-DD.`);
+        process.exit(1);
+    }
     if (!OBJETIVOS[cfg.objetivo]) {
         console.error(`Objetivo desconocido: ${cfg.objetivo}. Disponibles: ${Object.keys(OBJETIVOS).join(', ')}`);
         process.exit(1);
@@ -160,7 +169,8 @@ function describir(cfg) {
     });
 
     console.log('\n═══ OPTIMIZADOR DE ESTRATEGIAS ═══\n');
-    console.log(`  Período      ${cfg.dias} días de ${cfg.exchange}`);
+    console.log(`  Período      ${cfg.dias} días de ${cfg.exchange}, hasta ${new Date(cfg.hasta).toISOString().slice(0, 10)}` +
+        (typeof args.hasta === 'string' ? '' : '  (sin --hasta: el período se mueve con el reloj)'));
     console.log(`  Walk-forward ${cfg.diasIS}d optimizar → ${cfg.diasOOS}d validar, modo ${cfg.modo}`);
     console.log(`  Presupuesto  ${cfg.trials} trials por ventana`);
     console.log(`  Objetivo     ${cfg.objetivo} (mín ${cfg.minTradesPorMes} trades/mes, DD objetivo ${cfg.ddObjetivo}%)`);
@@ -173,7 +183,7 @@ function describir(cfg) {
 
     console.log('\nCargando histórico…');
     const t0 = Date.now();
-    const historico = await cargarHistorico(pool, { exchange: cfg.exchange, dias: cfg.dias });
+    const historico = await cargarHistorico(pool, { exchange: cfg.exchange, dias: cfg.dias, hasta: cfg.hasta });
     await pool.end();
     console.log(`  ${historico.bars1m.length} velas 1m, ${historico.ballenas.length} ballenas, ${historico.oi.length} muestras de OI  (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     console.log(`  Cada ventana usa ${DIAS_CALENTAMIENTO} días previos solo para calentar indicadores.`);
