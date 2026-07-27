@@ -1478,30 +1478,66 @@
 
     async function inicializarEstrategias() {
         try {
-            const res = await fetch('/api/estrategias', { credentials: 'same-origin' });
+            // todas=1: trae también las estrategias de otros usuarios (solo lectura/uso).
+            const res = await fetch('/api/estrategias?todas=1', { credentials: 'same-origin' });
             if (!res.ok) return;
             estrategiasCache = await res.json();
             actualizarSelectEstrategias();
         } catch (_) {}
     }
 
-    function actualizarSelectEstrategias() {
-        const sel = document.getElementById('strat-select');
-        const previa = sel.value;
-        sel.innerHTML = '<option value="__nueva__">➕ Crear nueva estrategia</option>' +
-            (estrategiasCache.length === 0 ? '' :
-                '<option value="" disabled>— Guardadas —</option>' +
-                estrategiasCache.map(e =>
-                    `<option value="${escHtml(e.nombre)}">${escHtml(e.nombre)}</option>`
-                ).join(''));
-        // Conservar la selección si la estrategia sigue existiendo (p.ej. tras guardar).
-        if (previa && estrategiasCache.some(e => e.nombre === previa)) sel.value = previa;
+    // Identifica una estrategia de forma estable entre refrescos (nombre + dueño), ya que
+    // dos usuarios pueden tener una estrategia con el mismo nombre.
+    function claveEstrategia(e) {
+        return `${e.es_propia ? '1' : '0'}::${e.propietario || ''}::${e.nombre}`;
     }
 
-    // Nombre "real" seleccionado en el combo ('' si está en Crear nueva / separador).
-    function nombreSeleccionado() {
+    function actualizarSelectEstrategias() {
+        const sel = document.getElementById('strat-select');
+        const prevObj = estrategiaSeleccionada();
+        const prevClave = prevObj ? claveEstrategia(prevObj) : null;
+
+        const propiasIdx = [];
+        const ajenasPorUsuario = new Map(); // username -> [idx en estrategiasCache]
+        estrategiasCache.forEach((e, i) => {
+            if (e.es_propia) propiasIdx.push(i);
+            else {
+                if (!ajenasPorUsuario.has(e.propietario)) ajenasPorUsuario.set(e.propietario, []);
+                ajenasPorUsuario.get(e.propietario).push(i);
+            }
+        });
+
+        let html = '<option value="__nueva__">➕ Crear nueva estrategia</option>';
+        if (propiasIdx.length) {
+            html += '<optgroup label="Tuyas">' +
+                propiasIdx.map(i => `<option value="${i}">${escHtml(estrategiasCache[i].nombre)}</option>`).join('') +
+                '</optgroup>';
+        }
+        for (const [user, idxs] of ajenasPorUsuario) {
+            html += `<optgroup label="De ${escHtml(user)}">` +
+                idxs.map(i => `<option value="${i}">${escHtml(estrategiasCache[i].nombre)} 🔒</option>`).join('') +
+                '</optgroup>';
+        }
+        sel.innerHTML = html;
+
+        // Conservar la selección si la estrategia sigue existiendo (p.ej. tras guardar).
+        if (prevClave) {
+            const idx = estrategiasCache.findIndex(e => claveEstrategia(e) === prevClave);
+            if (idx >= 0) sel.value = String(idx);
+        }
+    }
+
+    // Estrategia seleccionada en el combo (null si está en Crear nueva).
+    function estrategiaSeleccionada() {
         const v = document.getElementById('strat-select').value;
-        return v === '__nueva__' ? '' : v;
+        if (v === '__nueva__' || v === '') return null;
+        return estrategiasCache[parseInt(v, 10)] || null;
+    }
+
+    // Nombre "real" seleccionado en el combo ('' si está en Crear nueva).
+    function nombreSeleccionado() {
+        const e = estrategiaSeleccionada();
+        return e ? e.nombre : '';
     }
 
     function onStratSelectChange() {
@@ -1643,13 +1679,13 @@
 
     function cargarEstrategia() {
         if (document.getElementById('strat-select').value === '__nueva__') return nuevaEstrategia();
-        const nombre = nombreSeleccionado();
-        if (!nombre) return mostrarMsg('Seleccioná una estrategia primero', 'err');
-        const estrategia = estrategiasCache.find(e => e.nombre === nombre);
-        if (!estrategia) return mostrarMsg('Estrategia no encontrada', 'err');
+        const estrategia = estrategiaSeleccionada();
+        if (!estrategia) return mostrarMsg('Seleccioná una estrategia primero', 'err');
         aplicarParams(estrategia.params);
-        document.getElementById('strat-name').value = nombre;
-        mostrarMsg(`"${nombre}" cargada`, 'ok');
+        document.getElementById('strat-name').value = estrategia.nombre;
+        mostrarMsg(estrategia.es_propia
+            ? `"${estrategia.nombre}" cargada`
+            : `"${estrategia.nombre}" de ${estrategia.propietario} cargada (solo lectura — Guardar crea tu propia copia)`, 'ok');
     }
 
     async function guardarEstrategia() {
@@ -1673,7 +1709,11 @@
     }
 
     async function eliminarEstrategia() {
-        const nombre = nombreSeleccionado() || document.getElementById('strat-name').value.trim();
+        const estrategia = estrategiaSeleccionada();
+        if (estrategia && !estrategia.es_propia) {
+            return mostrarMsg(`No podés eliminar una estrategia de ${estrategia.propietario}`, 'err');
+        }
+        const nombre = (estrategia && estrategia.nombre) || document.getElementById('strat-name').value.trim();
         if (!nombre) return mostrarMsg('Seleccioná o escribí el nombre a eliminar', 'err');
         if (!confirm(`¿Eliminar la estrategia "${nombre}"?`)) return;
         try {

@@ -3943,11 +3943,23 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
 // ── Estrategias guardadas ──────────────────────────────────────
 app.get('/api/estrategias', autenticar, async (req, res) => {
     try {
-        const result = await pool.query(
-            `SELECT nombre, params, actualizado_en FROM estrategias_guardadas
-             WHERE usuario_id = $1 ORDER BY nombre ASC`,
-            [req.usuario.id]
-        );
+        // ?todas=1: incluye también las estrategias guardadas por otros usuarios (solo lectura),
+        // para el buscador de /estrategias. Sin el flag, comportamiento original: solo las propias
+        // (usado por los selectores de señal en vivo / auto-trading, que no soportan compartir).
+        const result = req.query.todas === '1'
+            ? await pool.query(
+                `SELECT e.nombre, e.params, e.actualizado_en, u.username AS propietario,
+                        (e.usuario_id = $1) AS es_propia
+                 FROM estrategias_guardadas e
+                 JOIN usuarios u ON u.id = e.usuario_id
+                 ORDER BY es_propia DESC, u.username ASC, e.nombre ASC`,
+                [req.usuario.id]
+              )
+            : await pool.query(
+                `SELECT nombre, params, actualizado_en FROM estrategias_guardadas
+                 WHERE usuario_id = $1 ORDER BY nombre ASC`,
+                [req.usuario.id]
+              );
         res.json(result.rows);
     } catch (e) {
         res.status(500).json({ error: e.message });
