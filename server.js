@@ -1819,9 +1819,18 @@ async function calcularNocionalEntrada(ctx, p, row) {
     catch (e) { return { ok: false, motivo: 'no se pudo leer balance: ' + e.message }; }
 
     let margin;
-    if (tipo === 'monto_fijo')                margin = valor;
-    else if (tipo === 'porc_capital_inicial') margin = (parseFloat(row.capital_inicial_ref) || bal.wallet) * (valor / 100);
-    else                                      margin = bal.wallet * (valor / 100); // porc_capital_actual
+    if (tipo === 'monto_fijo') {
+        margin = valor;
+    } else if (tipo === 'porc_capital_inicial') {
+        // OJO: capital_inicial_ref=0 es un snapshot válido (cuenta sin fondos en ese momento),
+        // no lo mismo que "todavía no se sacó el snapshot" (null/NaN). Con `|| bal.wallet` un 0
+        // genuino caía silenciosamente al saldo actual, degenerando "% capital inicial" en
+        // "% capital actual" sin aviso (ver caso u1: quedó operando así durante semanas).
+        const ref = parseFloat(row.capital_inicial_ref);
+        margin = (Number.isFinite(ref) ? ref : bal.wallet) * (valor / 100);
+    } else {
+        margin = bal.wallet * (valor / 100); // porc_capital_actual
+    }
 
     if (!(margin > 0)) return { ok: false, motivo: 'monto calculado <= 0' };
     // availableBalance ya descuenta el margen de las sub-posiciones abiertas → cubre el
