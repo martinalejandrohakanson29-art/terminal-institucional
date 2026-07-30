@@ -3191,17 +3191,27 @@
             }
         }
 
-        // Abre una entrada de verificación (long, qty mínima, TP/SL ±0.15%) en la cuenta ya
-        // vinculada. Si la cuenta es real, pide confirmación explícita antes de mandar la orden.
+        // Abre una entrada de verificación en la cuenta ya vinculada, con la palanca, el
+        // capital y el TP/SL (por % o precio absoluto) elegidos en el formulario. Si la
+        // cuenta es real, pide confirmación explícita antes de mandar la orden. Si el
+        // nocional no llega al mínimo del exchange, el server avisa (`bloqueado`) sin
+        // haber mandado nada — se muestra igual que un resultado, no como error.
         async function probarEntradaAutoTrading() {
             const entorno       = document.getElementById('at-entorno').value;
             const exchange      = document.getElementById('at-exchange').value;
             const positionUsdt  = parseFloat(document.getElementById('at-pos-usdt').value) || 100;
+            const leverage      = parseFloat(document.getElementById('at-leverage').value) || null;
+            const tpMode        = document.getElementById('at-tp-mode').value;
+            const slMode        = document.getElementById('at-sl-mode').value;
+            const tpValue       = parseFloat(document.getElementById('at-tp-value').value);
+            const slValue       = parseFloat(document.getElementById('at-sl-value').value);
             const btn = document.getElementById('at-btn-prueba');
             const nombreExchange = exchange === 'bingx' ? 'BingX' : 'Binance';
 
+            const lado = confirm('Abrir entrada de PRUEBA con la configuración de arriba.\n\nAceptar = LONG · Cancelar = SHORT') ? 'long' : 'short';
+
             if (entorno === 'real') {
-                const ok = confirm(`⚠️ Vas a abrir una orden REAL en ${nombreExchange} con plata de verdad (cantidad mínima operable del exchange). Tendrás que cerrarla vos manualmente. ¿Continuar?`);
+                const ok = confirm(`⚠️ Vas a abrir una orden REAL en ${nombreExchange} con plata de verdad (≈$${positionUsdt} nocional, palanca ${leverage || 'actual'}x). Tendrás que cerrarla vos manualmente si no se gatilla sola. ¿Continuar?`);
                 if (!ok) return;
             }
 
@@ -3209,16 +3219,23 @@
             try {
                 const res = await fetch('/api/autotrading/test', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-                    body: JSON.stringify({ signal: 'long', positionUsdt, prueba: true })
+                    body: JSON.stringify({ signal: lado, positionUsdt, leverage, tpMode, tpValue, slMode, slValue, prueba: true })
                 });
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.error || 'no se pudo abrir la prueba');
-                const nocional = (data.qty * data.entry).toFixed(2);
+
+                if (data.bloqueado) {
+                    mostrarMsgAT(`⛔ No se abriría — ${data.motivo}`, true);
+                    return;
+                }
+
+                const nocional = Number(data.notionalUsdt ?? (data.qty * data.entry)).toFixed(2);
                 const balTxt = data.balance ? ` · balance: wallet $${Number(data.balance.wallet).toFixed(2)} / disponible $${Number(data.balance.disponible).toFixed(2)}` : '';
                 if (!data.entrada.ok) {
                     throw new Error(`${data.entrada.msg || 'la orden fue rechazada por el exchange'} (intentó ${data.qty} BTC ≈ $${nocional} nocional${balTxt})`);
                 }
-                mostrarMsgAT(`✅ Prueba abierta: ${data.signal.toUpperCase()} ${data.qty} BTC (≈$${nocional}) @ $${Number(data.entry).toFixed(0)} · TP $${Number(data.tp).toFixed(0)} · SL $${Number(data.sl).toFixed(0)}. Cerrala manualmente si no se gatilla sola.`, false);
+                const levTxt = data.leverageAplicado ? (data.leverageAplicado.ok ? ` · palanca ${data.leverageAplicado.leverage}x ✓` : ` · palanca ${data.leverageAplicado.leverage}x ✗ (${data.leverageAplicado.error || 'rechazada'})`) : '';
+                mostrarMsgAT(`✅ Prueba abierta: ${data.signal.toUpperCase()} ${data.qty} BTC (≈$${nocional})${levTxt} @ $${Number(data.entry).toFixed(0)} · TP $${Number(data.tp).toFixed(0)} · SL $${Number(data.sl).toFixed(0)}. Cerrala manualmente si no se gatilla sola.`, false);
             } catch (e) {
                 mostrarMsgAT('Error: ' + e.message, true);
             } finally {
@@ -3526,12 +3543,33 @@
                 </button>
             </div>
 
+            <!-- TP/SL de la prueba: por % sobre el precio actual o por precio absoluto -->
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Take Profit (prueba)</label>
+            <div style="display:flex;gap:6px;margin-bottom:10px;">
+                <select id="at-tp-mode" style="padding:8px 6px;border:1px solid #d1d4dc;border-radius:5px;font-size:12px;background:#f8fafc;">
+                    <option value="pct">%</option>
+                    <option value="precio">Precio</option>
+                </select>
+                <input type="number" id="at-tp-value" value="0.15" step="0.01"
+                    style="flex:1;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;">
+            </div>
+
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Stop Loss (prueba)</label>
+            <div style="display:flex;gap:6px;margin-bottom:14px;">
+                <select id="at-sl-mode" style="padding:8px 6px;border:1px solid #d1d4dc;border-radius:5px;font-size:12px;background:#f8fafc;">
+                    <option value="pct">%</option>
+                    <option value="precio">Precio</option>
+                </select>
+                <input type="number" id="at-sl-value" value="0.15" step="0.01"
+                    style="flex:1;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;">
+            </div>
+
             <button onclick="probarEntradaAutoTrading()" id="at-btn-prueba" disabled
                 style="width:100%;padding:9px;border:1px dashed #f59e0b;border-radius:6px;font-size:12px;background:#fffbeb;color:#b45309;cursor:pointer;font-weight:bold;margin-bottom:4px;">
                 🧪 Realizar prueba
             </button>
             <div style="margin-bottom:14px;font-size:10px;color:#94a3b8;line-height:1.4;">
-                Abre una entrada mínima (long) con TP/SL a ±0.15% para validar la ejecución de punta a punta en tu cuenta actual. Si no se gatillan solos, cerrala manualmente desde el exchange.
+                Abre una entrada (long/short) con la palanca, el capital y el TP/SL de arriba, para validar la ejecución de punta a punta en tu cuenta actual. Si el nocional no llega al mínimo del exchange, avisa sin mandar la orden. Si no se gatilla sola, cerrala manualmente desde el exchange.
             </div>
 
             <div style="display:flex;gap:10px;">

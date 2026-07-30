@@ -2547,14 +2547,21 @@ app.post('/api/wspp-test', autenticar, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Endpoint de test: ejecuta una orden real en la cuenta (demo/testnet) del propio usuario.
-// Con `prueba:true` arma una entrada de verificación: usa el precio actual de mercado,
-// TP/SL bien cortos (±0.15%) para que se gatille rápido, y una qty mínima que respeta
-// el notional mínimo del exchange de la cuenta. Sirve para validar de punta a punta
-// (incluidas las órdenes de protección) sin tener que esperar una señal real.
+// Endpoint de test: ejecuta una orden real en la cuenta (demo/testnet/real) del propio
+// usuario. Con `prueba:true` arma una entrada de verificación: usa el precio actual de
+// mercado y permite elegir palanca, TP/SL (por % o por precio absoluto) y el nocional a
+// probar. Sirve para validar de punta a punta (incluidas las órdenes de protección) con
+// los MISMOS parámetros que usaría la estrategia en vivo, sin esperar una señal real —
+// por eso el nocional se valida igual que en `procesarCuenta` (nunca se infla la qty para
+// forzar que pase: si no llega al mínimo del exchange, se avisa y no se manda la orden).
 app.post('/api/autotrading/test', autenticar, async (req, res) => {
     const signal       = req.body.signal                    || 'long';
     const positionUsdt = parseFloat(req.body.positionUsdt)  || 100;
+    const leverage     = parseFloat(req.body.leverage)      || null;
+    const tpMode       = req.body.tpMode === 'precio' ? 'precio' : 'pct';
+    const slMode       = req.body.slMode === 'precio' ? 'precio' : 'pct';
+    const tpValue      = parseFloat(req.body.tpValue);
+    const slValue      = parseFloat(req.body.slValue);
     let entry          = parseFloat(req.body.entry)         || 95000;
     let tp             = parseFloat(req.body.tp)            || 95475;
     let sl             = parseFloat(req.body.sl)            || 94050;
@@ -2574,26 +2581,43 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
             try { await asegurarConfiguracionCuenta(ctx); } catch (_) {}
         }
 
+        // Palanca: se aplica ANTES de calcular qty/colocar la entrada, para que la prueba
+        // refleje exactamente la palanca elegida en el formulario (igual que hace la
+        // estrategia en vivo con palancaValor — ver procesarCuenta).
+        let leverageAplicado = null;
+        if (leverage && leverage > 0) {
+            try { leverageAplicado = { ok: await setBinanceLeverage(ctx, leverage), leverage: Math.round(leverage) }; }
+            catch (e) { leverageAplicado = { ok: false, error: e.message }; }
+        }
+
         if (req.body.prueba) {
             // Precio de referencia del mercado de ESTA cuenta (testnet o real), no de un feed global.
             // Cae a REST si el WS todavía no tiene dato en caché (ver precioLiveDeCtx).
             const ref = await precioLiveDeCtx(ctx);
             if (!ref) return res.status(503).json({ error: 'Aún no hay precio de mercado en vivo para tu entorno; probá de nuevo en unos segundos.' });
-            const pct = 0.0015; // ±0.15% → toca TP/SL en pocos minutos sin gatillarse al instante
             entry = ref;
-            tp = signal === 'long' ? ref * (1 + pct) : ref * (1 - pct);
-            sl = signal === 'long' ? ref * (1 - pct) : ref * (1 + pct);
+            const tpPct = Number.isFinite(tpValue) ? tpValue : 0.15; // ±0.15% default: se gatilla rápido
+            const slPct = Number.isFinite(slValue) ? slValue : 0.15;
+            tp = tpMode === 'precio' && Number.isFinite(tpValue) ? tpValue : (signal === 'long' ? ref * (1 + tpPct / 100) : ref * (1 - tpPct / 100));
+            sl = slMode === 'precio' && Number.isFinite(slValue) ? slValue : (signal === 'long' ? ref * (1 - slPct / 100) : ref * (1 + slPct / 100));
         }
 
         const trade = tradeDe(ctx);
         const qtyDecimales = (String(trade.qtyStep).split('.')[1] || '').length;
-        let qty = Number((Math.floor((positionUsdt / entry) / trade.qtyStep) * trade.qtyStep).toFixed(qtyDecimales));
-        // El exchange exige un notional mínimo; redondeamos hacia arriba al step para no
-        // caer en un rechazo por mínimo en la prueba (~20% de margen sobre el mínimo real).
-        if (req.body.prueba) {
-            const minNotionalPrueba = trade.minNotionalUsdt * 1.2;
-            const minQty = Number((Math.ceil((minNotionalPrueba / entry) / trade.qtyStep) * trade.qtyStep).toFixed(qtyDecimales));
-            if (qty < minQty) qty = minQty;
+        const qty = Number((Math.floor((positionUsdt / entry) / trade.qtyStep) * trade.qtyStep).toFixed(qtyDecimales));
+        const notionalUsdt = qty * entry;
+
+        // Mismo chequeo que la estrategia en vivo (procesarCuenta): si no llega al mínimo
+        // del exchange, NO se manda la orden — se avisa con el motivo, sin gastar un
+        // intento real. Antes esto se escondía inflando la qty artificialmente.
+        if (qty < trade.qtyStep || notionalUsdt < trade.minNotionalUsdt) {
+            return res.json({
+                bloqueado: true,
+                motivo: qty < trade.qtyStep
+                    ? `qty ${qty} < ${trade.qtyStep} BTC (mínimo del exchange)`
+                    : `nocional $${notionalUsdt.toFixed(2)} < $${trade.minNotionalUsdt} mínimo (${ctx.exchange})`,
+                qty, notionalUsdt, minNotionalUsdt: trade.minNotionalUsdt, leverageAplicado,
+            });
         }
 
         // Balance leído justo antes de la orden — para diagnosticar rechazos de margen sin
@@ -2618,7 +2642,7 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
         res.json({
             entrada: { ok: resEntrada.ok, orderId: resEntrada.orderId, msg: resEntrada.body?.msg, code: resEntrada.body?.code },
             proteccion,
-            qty, signal, entry, tp, sl, balance,
+            qty, signal, entry, tp, sl, balance, notionalUsdt, minNotionalUsdt: trade.minNotionalUsdt, leverageAplicado,
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
