@@ -1555,6 +1555,18 @@ function mercadoDeCtx(ctx) {
 // Último precio de futuros del mercado en el que opera la cuenta.
 function precioDeCtx(ctx) { return ultimoPrecioPorMercado[mercadoDeCtx(ctx)] ?? null; }
 
+// Precio de referencia para acciones puntuales (ej. la prueba manual del modal): usa el
+// caché del WS si está disponible (rápido), y si no cae a un fetch REST público del propio
+// adapter — cubre el caso de un feed WS que conecta pero nunca entrega ticks (ver Binance
+// real, IP de hosting) sin dejar la acción bloqueada indefinidamente.
+async function precioLiveDeCtx(ctx) {
+    const cache = precioDeCtx(ctx);
+    if (cache) return cache;
+    const getPrice = tradeDe(ctx).getPrice;
+    if (!getPrice) return null;
+    try { return await getPrice(ctx); } catch (_) { return null; }
+}
+
 function posDe(uid) {
     let arr = posicionesPorCuenta.get(uid);
     if (!arr) { arr = []; posicionesPorCuenta.set(uid, arr); }
@@ -2564,7 +2576,8 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
 
         if (req.body.prueba) {
             // Precio de referencia del mercado de ESTA cuenta (testnet o real), no de un feed global.
-            const ref = precioDeCtx(ctx);
+            // Cae a REST si el WS todavía no tiene dato en caché (ver precioLiveDeCtx).
+            const ref = await precioLiveDeCtx(ctx);
             if (!ref) return res.status(503).json({ error: 'Aún no hay precio de mercado en vivo para tu entorno; probá de nuevo en unos segundos.' });
             const pct = 0.0015; // ±0.15% → toca TP/SL en pocos minutos sin gatillarse al instante
             entry = ref;
