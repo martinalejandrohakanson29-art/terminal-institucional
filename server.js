@@ -2549,14 +2549,15 @@ app.post('/api/wspp-test', autenticar, async (req, res) => {
 
 // Endpoint de test: ejecuta una orden real en la cuenta (demo/testnet/real) del propio
 // usuario. Con `prueba:true` arma una entrada de verificación: usa el precio actual de
-// mercado y permite elegir palanca, TP/SL (por % o por precio absoluto) y el nocional a
-// probar. Sirve para validar de punta a punta (incluidas las órdenes de protección) con
-// los MISMOS parámetros que usaría la estrategia en vivo, sin esperar una señal real —
-// por eso el nocional se valida igual que en `procesarCuenta` (nunca se infla la qty para
-// forzar que pase: si no llega al mínimo del exchange, se avisa y no se manda la orden).
+// mercado y permite elegir palanca, TP/SL (por % o por precio absoluto) y el margen a
+// probar (nocional = margen × palanca, igual que calcularNocionalEntrada). Sirve para
+// validar de punta a punta (incluidas las órdenes de protección) con los MISMOS
+// parámetros que usaría la estrategia en vivo, sin esperar una señal real — por eso el
+// nocional se valida igual que en `procesarCuenta` (nunca se infla la qty para forzar
+// que pase: si no llega al mínimo del exchange, se avisa y no se manda la orden).
 app.post('/api/autotrading/test', autenticar, async (req, res) => {
     const signal       = req.body.signal                    || 'long';
-    const positionUsdt = parseFloat(req.body.positionUsdt)  || 100;
+    const positionUsdt = parseFloat(req.body.positionUsdt)  || 100; // MARGEN (no nocional)
     const leverage     = parseFloat(req.body.leverage)      || null;
     const tpMode       = req.body.tpMode === 'precio' ? 'precio' : 'pct';
     const slMode       = req.body.slMode === 'precio' ? 'precio' : 'pct';
@@ -2604,7 +2605,10 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
 
         const trade = tradeDe(ctx);
         const qtyDecimales = (String(trade.qtyStep).split('.')[1] || '').length;
-        const qty = Number((Math.floor((positionUsdt / entry) / trade.qtyStep) * trade.qtyStep).toFixed(qtyDecimales));
+        // positionUsdt es MARGEN, no nocional — igual que calcularNocionalEntrada (server.js:1824):
+        // nocional = margen × palanca. Sin palanca cargada, se asume 1x (nunca se amplifica sola).
+        const nocionalObjetivo = positionUsdt * (leverage || 1);
+        const qty = Number((Math.floor((nocionalObjetivo / entry) / trade.qtyStep) * trade.qtyStep).toFixed(qtyDecimales));
         const notionalUsdt = qty * entry;
 
         // Mismo chequeo que la estrategia en vivo (procesarCuenta): si no llega al mínimo

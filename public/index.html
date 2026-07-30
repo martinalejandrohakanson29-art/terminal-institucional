@@ -3211,7 +3211,8 @@
             const lado = confirm('Abrir entrada de PRUEBA con la configuración de arriba.\n\nAceptar = LONG · Cancelar = SHORT') ? 'long' : 'short';
 
             if (entorno === 'real') {
-                const ok = confirm(`⚠️ Vas a abrir una orden REAL en ${nombreExchange} con plata de verdad (≈$${positionUsdt} nocional, palanca ${leverage || 'actual'}x). Tendrás que cerrarla vos manualmente si no se gatilla sola. ¿Continuar?`);
+                const nocionalEstimado = (positionUsdt * (leverage || 1)).toFixed(2);
+                const ok = confirm(`⚠️ Vas a abrir una orden REAL en ${nombreExchange} con plata de verdad (margen $${positionUsdt} × palanca ${leverage || 1}x ≈ $${nocionalEstimado} nocional). Tendrás que cerrarla vos manualmente si no se gatilla sola. ¿Continuar?`);
                 if (!ok) return;
             }
 
@@ -3529,7 +3530,7 @@
             <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Estrategia</label>
             <select id="at-strat-sel" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;background:#f8fafc;"></select>
 
-            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Capital por operación (USDT)</label>
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Margen por operación (USDT) — nocional = margen × palanca</label>
             <input type="number" id="at-pos-usdt" min="10" step="10" value="100"
                 style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;">
 
