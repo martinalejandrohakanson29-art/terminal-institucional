@@ -2008,7 +2008,6 @@ async function migrarConfigGlobal() {
     console.log(`[AutoTrading] Config global migrada a la cuenta del usuario ${cfg.usuario_id}.`);
 }
 
-let avisoCuentasOmitidas = new Set();
 let cicloCorriendo = false;
 async function ejecutarAutoTrading() {
     if (!ENCRYPTION_KEY) return;        // sin master key no podemos descifrar las claves de las cuentas
@@ -2027,72 +2026,41 @@ async function ejecutarAutoTrading() {
                 if (r.rows.length && r.rows[0].api_key) rowsByUid.set(uid, r.rows[0]);
             }
         }
+        if (rowsByUid.size === 0) return;
 
-        // GUARD DE SEGURIDAD: una cuenta solo abre ENTRADAS si su exchange coincide con el
-        // exchange activo de DATOS (exch.name). Si no coincidieran, las señales se calcularían
-        // sobre precios de un exchange y las órdenes/TP/SL se ejecutarían en otro — exactamente
-        // la divergencia de precio (~$100 observados) que motivó esta migración. Las cuentas que
-        // no calzan pero tienen posiciones ABIERTAS sí se gestionan (solo salidas: tiempo /
-        // stop EMA), con velas de SU propio exchange — nunca con las del activo.
-        const cuentasSoloSalidas = new Map(); // uid -> row (otro exchange, con posiciones vivas)
-        for (const [uid, row] of rowsByUid) {
-            const cuentaExchange = row.exchange || 'binance';
-            if (cuentaExchange !== exch.name) {
-                rowsByUid.delete(uid);
-                if (posDe(uid).length) cuentasSoloSalidas.set(uid, row);
-                if (!avisoCuentasOmitidas.has(uid)) {
-                    console.warn(`⚠️ [AutoTrading u${uid}] Cuenta configurada en "${cuentaExchange}" pero el exchange activo de datos es "${exch.name}" — no se abren entradas nuevas hasta que coincidan (las posiciones abiertas se siguen gestionando con datos de ${cuentaExchange}).`);
-                    avisoCuentasOmitidas.add(uid);
-                }
-            }
-        }
-        if (rowsByUid.size === 0 && cuentasSoloSalidas.size === 0) return;
-
-        if (rowsByUid.size > 0) {
-            // Datos de mercado COMPARTIDOS: se descargan una sola vez por ciclo (BTCUSDT es igual
-            // para todas las cuentas). Velas suficientes para que EMA/MACD/RSI/ADX converjan
-            // (6000 de 1m = ~100 velas 1h derivadas, para que el ADX 1h converja como en backtest).
-            const [bars1m, bars5m, bars15m] = await Promise.all([
-                fetchKlinesBatch('1m',  6000),
-                fetchKlinesBatch('5m',  800),
-                fetchKlinesBatch('15m', 800),
-            ]);
-            // BingX: las velas REST vienen sin taker_buy_base — completarlo desde BD/acumulador
-            // para que los filtros de delta/CVD de las señales tengan dato real.
-            await completarDeltaFaltante(bars1m, exch);
-
-            for (const [uid, row] of rowsByUid) {
-                try { await procesarCuenta(row, bars1m, bars5m, bars15m); }
-                catch (e) { console.error(`[AutoTrading u${uid}] Error procesando cuenta:`, e.message); }
-            }
+        // Cada cuenta opera con los datos de SU PROPIO exchange (nunca se mezclan señales de
+        // un exchange con órdenes de otro). Se agrupa por exchange para descargar klines una
+        // sola vez por grupo (BTCUSDT es igual para todas las cuentas de un mismo exchange),
+        // en vez de una vez por cuenta.
+        const porExchange = new Map(); // exchangeName -> [rows]
+        for (const row of rowsByUid.values()) {
+            const nombre = row.exchange || 'binance';
+            if (!porExchange.has(nombre)) porExchange.set(nombre, []);
+            porExchange.get(nombre).push(row);
         }
 
-        // Cuentas de OTRO exchange con posiciones abiertas: gestión de salidas únicamente,
-        // con velas de su propio exchange (una descarga por exchange distinto, no por cuenta).
-        if (cuentasSoloSalidas.size > 0) {
-            const porExchange = new Map(); // exchangeName -> [rows]
-            for (const row of cuentasSoloSalidas.values()) {
-                const nombre = row.exchange || 'binance';
-                if (!porExchange.has(nombre)) porExchange.set(nombre, []);
-                porExchange.get(nombre).push(row);
-            }
-            for (const [nombre, rows] of porExchange) {
-                try {
-                    const exOtro = getExchange(nombre);
-                    if (nombre === 'bingx') iniciarMonitorPrecioBingX(); // TP/SL por tick con SU precio
-                    const [b1, b5, b15] = await Promise.all([
-                        fetchKlinesBatch('1m',  6000, exOtro),
-                        fetchKlinesBatch('5m',  800,  exOtro),
-                        fetchKlinesBatch('15m', 800,  exOtro),
-                    ]);
-                    await completarDeltaFaltante(b1, exOtro);
-                    for (const row of rows) {
-                        try { await procesarCuenta(row, b1, b5, b15, true); }
-                        catch (e) { console.error(`[AutoTrading u${row.usuario_id}] Error gestionando salidas (${nombre}):`, e.message); }
-                    }
-                } catch (e) {
-                    console.error(`[AutoTrading] Error en gestión de salidas de ${nombre}:`, e.message);
+        for (const [nombre, rows] of porExchange) {
+            try {
+                const ex = getExchange(nombre);
+                if (nombre === 'bingx') iniciarMonitorPrecioBingX(); // TP/SL por tick con SU precio
+                // Velas suficientes para que EMA/MACD/RSI/ADX converjan (6000 de 1m = ~100
+                // velas 1h derivadas, para que el ADX 1h converja como en backtest).
+                const [bars1m, bars5m, bars15m] = await Promise.all([
+                    fetchKlinesBatch('1m',  6000, ex),
+                    fetchKlinesBatch('5m',  800,  ex),
+                    fetchKlinesBatch('15m', 800,  ex),
+                ]);
+                // BingX: las velas REST vienen sin taker_buy_base — completarlo desde BD/acumulador
+                // para que los filtros de delta/CVD de las señales tengan dato real.
+                await completarDeltaFaltante(bars1m, ex);
+
+                for (const row of rows) {
+                    const uid = row.usuario_id;
+                    try { await procesarCuenta(row, bars1m, bars5m, bars15m, !row.habilitado, ex); }
+                    catch (e) { console.error(`[AutoTrading u${uid}] Error procesando cuenta:`, e.message); }
                 }
+            } catch (e) {
+                console.error(`[AutoTrading] Error procesando grupo ${nombre}:`, e.message);
             }
         }
     } catch (e) {
@@ -2103,10 +2071,10 @@ async function ejecutarAutoTrading() {
 }
 
 // Procesa UNA cuenta: gestiona salidas y evalúa/abre entrada según su estrategia, usando los
-// datos de mercado compartidos del ciclo. Aislada por try/catch en el llamador.
-// Con soloSalidas=true (cuenta de un exchange distinto al activo) SOLO gestiona salidas de
-// las posiciones vivas — jamás abre entradas, que exigen señales del exchange activo.
-async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false) {
+// datos de mercado de SU PROPIO exchange (`ex`), compartidos por el grupo del ciclo. Aislada
+// por try/catch en el llamador. Con soloSalidas=true (cuenta apagada con posiciones vivas)
+// SOLO gestiona salidas — jamás abre entradas nuevas.
+async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false, ex = exch) {
     let ctx;
     try { ctx = ctxDeCuenta(row); }
     catch (e) { console.error(`[AutoTrading u${row.usuario_id}] No se pudo descifrar la clave:`, e.message); return; }
@@ -2135,13 +2103,13 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false)
     const whaleRes = await pool.query(
         `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
          FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
-        [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5, exch.name]
+        [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5, ex.name]
     );
 
     const oiRows = p.useOIFilter
         ? (await pool.query(
             'SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 AND exchange = $2 ORDER BY tiempo ASC',
-            [((parseInt(p.oiLookbackMin) || 30) + 10) * 60, exch.name]
+            [((parseInt(p.oiLookbackMin) || 30) + 10) * 60, ex.name]
           )).rows
         : [];
 
