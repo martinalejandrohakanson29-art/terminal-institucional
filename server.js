@@ -1850,6 +1850,7 @@ function iniciarMonitorPrecio(wsUrl, entorno) {
 
     const ws = new WebSocket(wsUrl);
     registrarSaludWS(`precio-${entorno}`, ws);
+    let primerTick = true; // diagnóstico: confirma en el log que el feed realmente entrega datos tras conectar
 
     ws.on('open', () => {
         monitorConectando.delete(entorno);
@@ -1860,6 +1861,7 @@ function iniciarMonitorPrecio(wsUrl, entorno) {
         latidoWS(`precio-${entorno}`);
         try {
             const evento = JSON.parse(data);
+            if (primerTick) { primerTick = false; console.log(`[Monitor precio ${entorno}] primer tick recibido: $${evento.p}`); }
             await chequearSalida(parseFloat(evento.p), entorno);
         } catch (e) {
             console.error(`Error en monitor de precio (${entorno}):`, e.message);
