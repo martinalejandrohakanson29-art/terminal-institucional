@@ -3285,6 +3285,7 @@
                 const cfg = await cfgRes.json();
                 if (cfg.estrategia_nombre) sel.value = cfg.estrategia_nombre;
                 if (cfg.position_usdt) document.getElementById('at-pos-usdt').value = cfg.position_usdt;
+                if (cfg.exchange_datos) document.getElementById('at-exchange-datos').value = cfg.exchange_datos;
             }
 
             await refrescarEstadoCuenta();
@@ -3300,6 +3301,7 @@
         async function guardarConfigAutoTrading(activar) {
             const estrategia_nombre = document.getElementById('at-strat-sel').value;
             const position_usdt     = parseFloat(document.getElementById('at-pos-usdt').value);
+            const exchange_datos    = document.getElementById('at-exchange-datos').value;
             const msgEl = document.getElementById('at-msg');
 
             if (activar && !estrategia_nombre) {
@@ -3314,7 +3316,7 @@
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'same-origin',
-                    body: JSON.stringify({ habilitado: activar, estrategia_nombre, position_usdt })
+                    body: JSON.stringify({ habilitado: activar, estrategia_nombre, position_usdt, exchange_datos })
                 });
                 if (!res.ok) throw new Error((await res.json()).error);
                 await actualizarStatusAutoTrading();
@@ -3529,6 +3531,17 @@
 
             <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Estrategia</label>
             <select id="at-strat-sel" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:14px;background:#f8fafc;"></select>
+
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Datos de las señales (klines, ballenas, delta y precio de salida)</label>
+            <select id="at-exchange-datos" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;background:#f8fafc;">
+                <option value="binance">Binance</option>
+                <option value="bingx">BingX</option>
+            </select>
+            <div style="margin-top:5px;margin-bottom:14px;font-size:10px;color:#94a3b8;line-height:1.4;">
+                Las órdenes siempre se ejecutan en el exchange de tus claves. Elegí acá el mismo
+                exchange con el que <b>backtesteás</b>: si no coinciden, el bot decide con precios
+                distintos a los que validaste. BingX solo tiene ballenas y delta desde el 25/07/2026.
+            </div>
 
             <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Margen por operación (USDT) — nocional = margen × palanca</label>
             <input type="number" id="at-pos-usdt" min="10" step="10" value="100"

@@ -331,6 +331,13 @@ async function inicializarBaseDeDatos() {
         // EXCHANGE_ACTIVO global para que se procese — si no coincide, se omite (ver guard en
         // ejecutarAutoTrading) para nunca mezclar señales de un exchange con órdenes de otro.
         await pool.query(`ALTER TABLE cuentas_trading ADD COLUMN IF NOT EXISTS exchange VARCHAR(10) NOT NULL DEFAULT 'binance'`);
+        // Exchange de DATOS: de dónde salen klines/ballenas/delta para las señales y con qué
+        // feed de precio se evalúan TP/SL/BE. NULL = el mismo donde se ejecuta (comportamiento
+        // previo). Se separa del de ejecución porque el histórico no está parejo: BingX recién
+        // tiene ballenas y taker_buy_base desde 2026-07-25, así que una estrategia validada con
+        // 152 días de Binance no se puede backtestear contra datos de BingX. Sin esta separación
+        // el bot operaba señales BingX mientras el backtest medía Binance — sistemas distintos.
+        await pool.query(`ALTER TABLE cuentas_trading ADD COLUMN IF NOT EXISTS exchange_datos VARCHAR(10)`);
         // Cada entrada real queda tageada con el exchange donde se ejecutó (todas las existentes
         // son de Binance, único exchange con ejecución hasta ahora). Sin esto, el panel del
         // gráfico dibujaba las entradas de Binance encima de las velas de BingX al cambiar el
@@ -1546,10 +1553,21 @@ const posicionesPorCuenta = new Map(); // uid -> [{ id, lado, qty, entry, tp, sl
 const ctxActivos          = new Map(); // uid -> { uid, apiKey, secret, base, marginType, exchange } (claves descifradas en memoria)
 const ultimoPrecioPorMercado = {}; // clave de mercado (ver mercadoDeCtx) -> último precio del WS de futuros
 
-// Clave de mercado de una cuenta: para Binance distingue testnet/real (precios distintos);
-// para BingX es única (demo y real comparten precio de mercado).
+// Exchange del que salen los DATOS de una cuenta (klines, ballenas, delta, feed de precio).
+// Puede diferir del de ejecución: ver la migración de exchange_datos.
+function exchangeDatosDeCtx(ctx) { return ctx.exchangeDatos || ctx.exchange || 'binance'; }
+// ¿La cuenta opera "cruzada" (decide con datos de un exchange y ejecuta en otro)?
+function esEjecucionCruzada(ctx) { return exchangeDatosDeCtx(ctx) !== (ctx.exchange || 'binance'); }
+
+// Clave de mercado de una cuenta: la del exchange de DATOS, porque es ese feed el que dispara
+// el TP/SL/BE por tick. Para Binance distingue testnet/real (precios distintos); para BingX es
+// única (demo y real comparten precio de mercado). El desdoble testnet solo aplica cuando los
+// datos son del mismo Binance donde se ejecuta: si una cuenta BingX mira datos de Binance,
+// ctx.base es la URL de BingX y mirarla daría siempre 'real' por accidente, no por criterio.
 function mercadoDeCtx(ctx) {
-    if ((ctx.exchange || 'binance') !== 'binance') return ctx.exchange;
+    const datos = exchangeDatosDeCtx(ctx);
+    if (datos !== 'binance') return datos;
+    if ((ctx.exchange || 'binance') !== 'binance') return 'binance:real'; // datos públicos de Binance real
     return String(ctx.base).includes('testnet') ? 'binance:testnet' : 'binance:real';
 }
 // Último precio de futuros del mercado en el que opera la cuenta.
@@ -1565,6 +1583,18 @@ async function precioLiveDeCtx(ctx) {
     const getPrice = tradeDe(ctx).getPrice;
     if (!getPrice) return null;
     try { return await getPrice(ctx); } catch (_) { return null; }
+}
+
+// Precio del exchange donde se EJECUTA (no el de datos). Para acciones que se miden contra el
+// libro real —la prueba manual del modal, que coloca TP/SL a un % del precio— usar el precio
+// del exchange de datos dejaría los niveles corridos por el basis entre venues.
+async function precioEjecucionDeCtx(ctx) {
+    if (!esEjecucionCruzada(ctx)) return precioLiveDeCtx(ctx);
+    const getPrice = tradeDe(ctx).getPrice;
+    if (getPrice) {
+        try { const p = await getPrice(ctx); if (p) return p; } catch (_) {}
+    }
+    return precioLiveDeCtx(ctx); // último recurso: mejor un precio aproximado que ninguno
 }
 
 function posDe(uid) {
@@ -1583,6 +1613,8 @@ function ctxDeCuenta(row) {
         base:       row.base_url || getExchange(exchange).trade.baseDemo,
         marginType: (row.margin_type || 'ISOLATED').toUpperCase(),
         exchange,
+        // De dónde salen los datos de decisión. NULL en BD = el mismo de ejecución.
+        exchangeDatos: row.exchange_datos || exchange,
     };
 }
 
@@ -1631,6 +1663,23 @@ async function cancelarTodasLasOrdenes(ctx) {
     catch (e) { console.error(`[AutoTrading] Error cancelando todas las órdenes: ${e.message}`); }
 }
 
+// Colchón que se aplica a las órdenes de protección cuando la cuenta opera cruzada (decide
+// con datos de un exchange y ejecuta en otro). Sin él, el exchange de ejecución dispara sus
+// TP/SL con SU precio y le gana de mano al server, que decide con el precio del exchange de
+// datos: bastan unos pocos dólares de basis entre venues para cerrar una operación que en el
+// backtest seguía viva. Con el colchón, esas órdenes quedan como red ante caída del server
+// (que es para lo único que existen) y la decisión fina la toma siempre el server.
+const BUFFER_PROTECCION_CRUZADA = 0.25; // %
+
+// Corre el nivel de una orden de protección en la dirección que la vuelve MENOS sensible:
+// el TP se aleja (long arriba / short abajo) y el SL también (long abajo / short arriba).
+function nivelProteccionExchange(ctx, lado, nivel, tipo) {
+    if (!esEjecucionCruzada(ctx)) return nivel;
+    const b = BUFFER_PROTECCION_CRUZADA / 100;
+    const haciaArriba = tipo === 'tp' ? lado === 'long' : lado !== 'long';
+    return nivel * (haciaArriba ? 1 + b : 1 - b);
+}
+
 // Coloca en el exchange las órdenes de protección de una sub-posición recién abierta.
 // El TP siempre es un nivel fijo; el SL solo se coloca si el stop es por Porcentaje
 // (los stops por Ruptura EMA / Tiempo no son niveles de precio y los gestiona el server).
@@ -1639,12 +1688,14 @@ async function colocarProteccionExchange(ctx, sub) {
     const estado = { tp: null, sl: null }; // null = no intentada; {ok,msg} si se intentó
     try {
         if (sub.tp) {
-            const r = await colocarOrdenStop(ctx, sub.lado, sub.qty, sub.tp, 'TAKE_PROFIT_MARKET');
+            const nivel = nivelProteccionExchange(ctx, sub.lado, sub.tp, 'tp');
+            const r = await colocarOrdenStop(ctx, sub.lado, sub.qty, nivel, 'TAKE_PROFIT_MARKET');
             if (r.ok && r.orderId) sub.tpOrderId = r.orderId;
             estado.tp = { ok: r.ok, msg: r.body?.msg, code: r.body?.code };
         }
         if ((sub.stopType ?? 'Porcentaje') === 'Porcentaje' && sub.sl) {
-            const r = await colocarOrdenStop(ctx, sub.lado, sub.qty, sub.sl, 'STOP_MARKET');
+            const nivel = nivelProteccionExchange(ctx, sub.lado, sub.sl, 'sl');
+            const r = await colocarOrdenStop(ctx, sub.lado, sub.qty, nivel, 'STOP_MARKET');
             if (r.ok && r.orderId) sub.slOrderId = r.orderId;
             estado.sl = { ok: r.ok, msg: r.body?.msg, code: r.body?.code };
         }
@@ -1676,14 +1727,39 @@ async function cerrarSubPosicion(ctx, pos, razon, precio) {
     await sincronizarPosicionBD(ctx.uid);
     // Cancelar las órdenes de protección de esta sub-posición ANTES del cierre a mercado,
     // para no dejar stops huérfanos. Si una ya se ejecutó, el cancel falla silenciosamente.
-    // El cierre reduceOnly que sigue es benigno si el exchange ya cerró (Binance lo rechaza -2022).
     await cancelarOrden(ctx, pos.tpOrderId);
     await cancelarOrden(ctx, pos.slOrderId);
-    const rClose = await colocarOrdenCierre(ctx, pos.lado, pos.qty);
-    // Corregir precio_cierre con el fill real si la orden de cierre se ejecutó.
-    if (rClose.ok && rClose.body?.avgPrice) {
-        const fillClose = parseFloat(rClose.body.avgPrice);
-        if (fillClose > 0) await pool.query(`UPDATE auto_trading_entradas SET precio_cierre=$1 WHERE id=$2`, [fillClose, pos.id]);
+
+    // Cuánto cerrar realmente. Si el TP/SL de esta sub-posición YA se ejecutó en el exchange,
+    // mandar igual el cierre a mercado por pos.qty se come la posición de OTRA sub-posición
+    // viva: reduceOnly solo impide agrandar el neto, no sabe nada de nuestro libro. Por eso se
+    // cierra el excedente real sobre lo que las otras sub-posiciones deben conservar.
+    // `arr` ya no contiene a `pos` (el llamador la saca antes de cualquier await).
+    const reservado = arr.reduce((s, p) => s + p.qty, 0);
+    let qtyCierre = pos.qty;
+    try {
+        const amt = Math.abs(await obtenerPosicionExchange(ctx));
+        const step = tradeDe(ctx).qtyStep;
+        const dec  = (String(step).split('.')[1] || '').length;
+        qtyCierre = Number(Math.min(pos.qty, Math.max(0, amt - reservado)).toFixed(dec));
+        if (qtyCierre < step) qtyCierre = 0; // el exchange ya la cerró (o no queda nada que cerrar)
+    } catch (e) {
+        // Sin lectura de posición no podemos afinar: cerrar pos.qty es preferible a dejarla abierta.
+        console.error(`[AutoTrading u${ctx.uid}] No se pudo leer la posición para dimensionar el cierre #${pos.id}: ${e.message}`);
+    }
+
+    if (qtyCierre <= 0) {
+        console.log(`[AutoTrading u${ctx.uid}] Cierre #${pos.id} ya ejecutado en el exchange — no se manda orden (reservado para otras sub-pos: ${reservado}).`);
+    } else {
+        if (qtyCierre < pos.qty) {
+            console.warn(`[AutoTrading u${ctx.uid}] Cierre #${pos.id} parcial: ${qtyCierre} de ${pos.qty} (el resto ya lo cerró el exchange).`);
+        }
+        const rClose = await colocarOrdenCierre(ctx, pos.lado, qtyCierre);
+        // Corregir precio_cierre con el fill real si la orden de cierre se ejecutó.
+        if (rClose.ok && rClose.body?.avgPrice) {
+            const fillClose = parseFloat(rClose.body.avgPrice);
+            if (fillClose > 0) await pool.query(`UPDATE auto_trading_entradas SET precio_cierre=$1 WHERE id=$2`, [fillClose, pos.id]);
+        }
     }
     // Barrido final al quedar plana: limpia cualquier stop residual del exchange.
     if (arr.length === 0) await cancelarTodasLasOrdenes(ctx);
@@ -1749,7 +1825,8 @@ async function aplicarBreakevenExchange(ctx, pos) {
         await sincronizarPosicionBD(ctx.uid);
     } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error persistiendo breakeven #${pos.id}:`, e.message); }
     try {
-        const r = await colocarOrdenStop(ctx, pos.lado, pos.qty, pos.sl, 'STOP_MARKET');
+        const nivel = nivelProteccionExchange(ctx, pos.lado, pos.sl, 'sl');
+        const r = await colocarOrdenStop(ctx, pos.lado, pos.qty, nivel, 'STOP_MARKET');
         if (r.ok && r.orderId) {
             const viejo = pos.slOrderId;
             pos.slOrderId = r.orderId;
@@ -2040,13 +2117,13 @@ async function ejecutarAutoTrading() {
         }
         if (rowsByUid.size === 0) return;
 
-        // Cada cuenta opera con los datos de SU PROPIO exchange (nunca se mezclan señales de
-        // un exchange con órdenes de otro). Se agrupa por exchange para descargar klines una
-        // sola vez por grupo (BTCUSDT es igual para todas las cuentas de un mismo exchange),
-        // en vez de una vez por cuenta.
-        const porExchange = new Map(); // exchangeName -> [rows]
+        // Se agrupa por exchange de DATOS para descargar klines una sola vez por grupo (BTCUSDT
+        // es igual para todas las cuentas que miran el mismo exchange), en vez de una por cuenta.
+        // Ojo: el grupo define de dónde salen los datos de decisión, NO dónde se ejecuta — cada
+        // cuenta manda sus órdenes a su propio exchange vía ctx.exchange (ver tradeDe).
+        const porExchange = new Map(); // exchangeName (datos) -> [rows]
         for (const row of rowsByUid.values()) {
-            const nombre = row.exchange || 'binance';
+            const nombre = row.exchange_datos || row.exchange || 'binance';
             if (!porExchange.has(nombre)) porExchange.set(nombre, []);
             porExchange.get(nombre).push(row);
         }
@@ -2082,10 +2159,11 @@ async function ejecutarAutoTrading() {
     }
 }
 
-// Procesa UNA cuenta: gestiona salidas y evalúa/abre entrada según su estrategia, usando los
-// datos de mercado de SU PROPIO exchange (`ex`), compartidos por el grupo del ciclo. Aislada
-// por try/catch en el llamador. Con soloSalidas=true (cuenta apagada con posiciones vivas)
-// SOLO gestiona salidas — jamás abre entradas nuevas.
+// Procesa UNA cuenta: gestiona salidas y evalúa/abre entrada según su estrategia. `ex` es el
+// exchange de DATOS del grupo del ciclo (klines ya descargadas; ballenas/OI se consultan acá
+// con ese mismo nombre), que puede no ser donde se ejecuta: las órdenes salen siempre por
+// ctx.exchange. Aislada por try/catch en el llamador. Con soloSalidas=true (cuenta apagada con
+// posiciones vivas) SOLO gestiona salidas — jamás abre entradas nuevas.
 async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false, ex = exch) {
     let ctx;
     try { ctx = ctxDeCuenta(row); }
@@ -2294,9 +2372,11 @@ setTimeout(async () => {
     // SU mercado aunque el activo sea otro exchange.
     try {
         const hayBingx = exch.name === 'bingx'
-            || [...ctxActivos.values()].some(c => c.exchange === 'bingx')
+            || [...ctxActivos.values()].some(c => exchangeDatosDeCtx(c) === 'bingx')
             || (await pool.query(
-                   `SELECT 1 FROM cuentas_trading WHERE exchange = 'bingx' AND api_key IS NOT NULL AND habilitado = true LIMIT 1`
+                   `SELECT 1 FROM cuentas_trading
+                     WHERE COALESCE(exchange_datos, exchange) = 'bingx'
+                       AND api_key IS NOT NULL AND habilitado = true LIMIT 1`
                )).rows.length > 0;
         if (hayBingx) iniciarMonitorPrecioBingX();
     } catch (e) {
@@ -2318,9 +2398,9 @@ setTimeout(async () => {
                     try { ctx = ctxDeCuenta(row); ctxActivos.set(uid, ctx); }
                     catch (_) { continue; }
                 }
-                // Cuenta BingX detectada en runtime (p.ej. recién configurada): asegurar su
-                // feed de precio para el TP/SL por tick (idempotente).
-                if (ctx.exchange === 'bingx') iniciarMonitorPrecioBingX();
+                // Cuenta que decide con datos de BingX detectada en runtime (p.ej. recién
+                // configurada): asegurar su feed de precio para el TP/SL por tick (idempotente).
+                if (exchangeDatosDeCtx(ctx) === 'bingx') iniciarMonitorPrecioBingX();
                 await reconciliarCuenta(ctx).catch(() => {});
             }
         } catch (e) { console.error('[AutoTrading] Error en pasada de reconciliación:', e.message); }
@@ -2350,7 +2430,12 @@ setTimeout(() => {
 app.get('/api/autotrading', autenticar, async (req, res) => {
     try {
         const r = await pool.query(
-            `SELECT habilitado, estrategia_nombre, position_usdt, (api_key IS NOT NULL) AS configurada
+            // exchange_datos se devuelve resuelto (NULL en BD = el mismo de ejecución) porque el
+            // modal lo usa para preseleccionar el combo: sin el COALESCE volvía siempre al
+            // default del <select> y guardaba 'binance' aunque la cuenta mirara otro exchange.
+            `SELECT habilitado, estrategia_nombre, position_usdt, exchange,
+                    COALESCE(exchange_datos, exchange) AS exchange_datos,
+                    (api_key IS NOT NULL) AS configurada
              FROM cuentas_trading WHERE usuario_id = $1`, [req.usuario.id]
         );
         res.json(r.rows[0] || { configurada: false, habilitado: false });
@@ -2360,7 +2445,7 @@ app.get('/api/autotrading', autenticar, async (req, res) => {
 // Handler compartido por PUT /api/autotrading y PUT /api/mi-cuenta/autotrading (la UI usa
 // ambos alias con la misma semántica — antes eran dos copias que ya habían divergido).
 async function actualizarConfigAutotrading(req, res) {
-    const { habilitado, estrategia_nombre, position_usdt } = req.body;
+    const { habilitado, estrategia_nombre, position_usdt, exchange_datos } = req.body;
     try {
         const cuenta = await pool.query(
             'SELECT api_key, api_secret_cifrado, base_url, exchange FROM cuentas_trading WHERE usuario_id = $1',
@@ -2376,17 +2461,28 @@ async function actualizarConfigAutotrading(req, res) {
             const s = await pool.query('SELECT 1 FROM estrategias_guardadas WHERE nombre=$1 AND usuario_id=$2', [estrategia_nombre, req.usuario.id]);
             if (!s.rows.length) return res.status(400).json({ error: 'Estrategia no encontrada' });
         }
+        // Exchange de datos: debe ser uno soportado. Se guarda NULL cuando coincide con el de
+        // ejecución, para que la cuenta siga el default si algún día cambia de exchange.
+        let datos;
+        if (exchange_datos !== undefined) {
+            const nombre = String(exchange_datos || '').toLowerCase();
+            try { getExchange(nombre); }
+            catch (_) { return res.status(400).json({ error: `Exchange de datos no soportado: ${exchange_datos}` }); }
+            datos = nombre === (cuenta.rows[0].exchange || 'binance') ? null : nombre;
+        }
         await pool.query(
             `UPDATE cuentas_trading SET
                 habilitado        = COALESCE($1, habilitado),
                 estrategia_nombre = COALESCE($2, estrategia_nombre),
                 position_usdt     = COALESCE($3, position_usdt)
+                ${exchange_datos !== undefined ? ', exchange_datos = $5' : ''}
              WHERE usuario_id = $4`,
             [
                 habilitado !== undefined ? habilitado : null,
                 estrategia_nombre !== undefined ? estrategia_nombre : null,
                 position_usdt     !== undefined ? parseFloat(position_usdt) : null,
                 req.usuario.id,
+                ...(exchange_datos !== undefined ? [datos] : []),
             ]
         );
         // Reset de la última señal al cambiar config / encender, para re-evaluar limpio.
@@ -2574,11 +2670,12 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
         try { ctx = ctxDeCuenta(cr.rows[0]); }
         catch (e) { return res.status(500).json({ error: 'No se pudo descifrar la clave: ' + e.message }); }
         ctxActivos.set(req.usuario.id, ctx);
-        // Cuenta BingX: asegurar su feed de precio (idempotente) — sin él, precioDeCtx
-        // nunca tendría dato y la prueba respondería 503 indefinidamente. También asegura
-        // modo One-way (positionSide 'BOTH'), por si la cuenta se vinculó antes de este fix.
+        // Cuenta que mira datos de BingX: asegurar su feed de precio (idempotente) — sin él,
+        // precioDeCtx nunca tendría dato y la prueba respondería 503 indefinidamente.
+        if (exchangeDatosDeCtx(ctx) === 'bingx') iniciarMonitorPrecioBingX();
+        // Ejecución en BingX: asegurar modo One-way (positionSide 'BOTH'), por si la cuenta se
+        // vinculó antes de ese fix.
         if (ctx.exchange === 'bingx') {
-            iniciarMonitorPrecioBingX();
             try { await asegurarConfiguracionCuenta(ctx); } catch (_) {}
         }
 
@@ -2592,9 +2689,10 @@ app.post('/api/autotrading/test', autenticar, async (req, res) => {
         }
 
         if (req.body.prueba) {
-            // Precio de referencia del mercado de ESTA cuenta (testnet o real), no de un feed global.
-            // Cae a REST si el WS todavía no tiene dato en caché (ver precioLiveDeCtx).
-            const ref = await precioLiveDeCtx(ctx);
+            // Precio del exchange donde se va a ejecutar la prueba (testnet o real), no de un
+            // feed global ni del exchange de datos: los TP/SL de la prueba son un % sobre el
+            // libro contra el que se opera. Cae a REST si el WS no tiene dato en caché.
+            const ref = await precioEjecucionDeCtx(ctx);
             if (!ref) return res.status(503).json({ error: 'Aún no hay precio de mercado en vivo para tu entorno; probá de nuevo en unos segundos.' });
             entry = ref;
             const tpPct = Number.isFinite(tpValue) ? tpValue : 0.15; // ±0.15% default: se gatilla rápido
@@ -3246,7 +3344,7 @@ app.delete('/api/estrategias/:nombre', autenticar, async (req, res) => {
 app.get('/api/mi-cuenta', autenticar, async (req, res) => {
     try {
         const r = await pool.query(
-            `SELECT api_key, base_url, margin_type, estrategia_nombre, position_usdt, habilitado, exchange
+            `SELECT api_key, base_url, margin_type, estrategia_nombre, position_usdt, habilitado, exchange, exchange_datos
              FROM cuentas_trading WHERE usuario_id = $1`,
             [req.usuario.id]
         );
@@ -3257,6 +3355,7 @@ app.get('/api/mi-cuenta', autenticar, async (req, res) => {
             configurada:       !!c.api_key,
             api_key_mascara:   enmascararClave(c.api_key),
             exchange:          ex.name,
+            exchange_datos:    c.exchange_datos || ex.name,
             base_url:          c.base_url,
             entorno:           String(c.base_url) === ex.trade.baseDemo ? 'demo' : 'real',
             margin_type:       c.margin_type,
