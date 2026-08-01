@@ -338,6 +338,15 @@ async function inicializarBaseDeDatos() {
         // 152 días de Binance no se puede backtestear contra datos de BingX. Sin esta separación
         // el bot operaba señales BingX mientras el backtest medía Binance — sistemas distintos.
         await pool.query(`ALTER TABLE cuentas_trading ADD COLUMN IF NOT EXISTS exchange_datos VARCHAR(10)`);
+        // Precio de entrada en el espacio del exchange de DATOS (NULL = igual al de ejecución).
+        // Con ejecución cruzada, precio_entrada es el fill real del exchange donde se opera,
+        // pero los niveles de decisión (TP, SL y sobre todo el disparo del breakeven) se
+        // comparan contra los ticks del exchange de datos: mezclar ambos espacios corre el
+        // trigger por el basis entre venues, que es del mismo orden que el margen con el que
+        // el BE se gatilla o no (ver 2026-07-31: 0.676% en Binance vs 0.702% en BingX contra
+        // un trigger de 0.7%). Se guarda el precio de la señal para que el BE mida lo mismo
+        // que midió el backtest.
+        await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS precio_entrada_datos NUMERIC`);
         // Cada entrada real queda tageada con el exchange donde se ejecutó (todas las existentes
         // son de Binance, único exchange con ejecución hasta ahora). Sin esto, el panel del
         // gráfico dibujaba las entradas de Binance encima de las velas de BingX al cambiar el
@@ -1793,14 +1802,17 @@ async function chequearSalida(precio, mercado) {
             // nuevo nivel se evalúa recién en los PRÓXIMOS ticks, nunca en el que lo disparó.
             // beAplicado se marca síncrono antes de cualquier await para no re-disparar.
             if (pos.beTrigger != null && !pos.beAplicado) {
+                // Referencia en el espacio del feed que estamos evaluando (ver entryRef): con
+                // ejecución cruzada NO es el fill del exchange, sino el precio de la señal.
+                const ref = pos.entryRef ?? pos.entry;
                 const disparo = pos.lado === 'long'
-                    ? precio >= pos.entry * (1 + pos.beTrigger / 100)
-                    : precio <= pos.entry * (1 - pos.beTrigger / 100);
+                    ? precio >= ref * (1 + pos.beTrigger / 100)
+                    : precio <= ref * (1 - pos.beTrigger / 100);
                 if (disparo) {
                     pos.beAplicado = true;
                     pos.sl = pos.lado === 'long'
-                        ? pos.entry * (1 + pos.beOffset / 100)
-                        : pos.entry * (1 - pos.beOffset / 100);
+                        ? ref * (1 + pos.beOffset / 100)
+                        : ref * (1 - pos.beOffset / 100);
                     aMoverBE.push(pos);
                 }
             }
@@ -2271,15 +2283,21 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false,
         // edita la estrategia, las posiciones ya abiertas conservan su configuración).
         const beTrigger = p.useBreakeven === true ? (p.breakevenTrigger ?? 0.3)  : null;
         const beOffset  = p.useBreakeven === true ? (p.breakevenOffset  ?? 0.12) : null;
-        // Usar el precio de fill real (avgPrice) en vez del cierre de vela estimado.
+        // Usar el precio de fill real (avgPrice) en vez del cierre de vela estimado: es el
+        // costo real de la posición y con eso se calcula el PnL.
         const fillEntry = ordenEntrada.avgPrice || resultado.entry;
+        // Referencia para los niveles de decisión. TP y SL ya vienen del backtest en el espacio
+        // del exchange de datos; el BE debe medirse contra la misma referencia (precio de la
+        // señal) para no quedar corrido por el basis cuando la ejecución es en otro venue.
+        const entryRef = esEjecucionCruzada(ctx) ? resultado.entry : fillEntry;
         const ins = await pool.query(
-            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange, be_trigger, be_offset)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'abierta', $8, $8, $9, $10, $11) RETURNING id`,
-            [Date.now(), nuevaSenal, fillEntry, resultado.tp, resultado.sl, qty, stopType, row.usuario_id, ctx.exchange, beTrigger, beOffset]
+            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_entrada_datos, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange, be_trigger, be_offset)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'abierta', $9, $9, $10, $11, $12) RETURNING id`,
+            [Date.now(), nuevaSenal, fillEntry, esEjecucionCruzada(ctx) ? entryRef : null,
+             resultado.tp, resultado.sl, qty, stopType, row.usuario_id, ctx.exchange, beTrigger, beOffset]
         );
         const sub = {
-            id: ins.rows[0].id, lado: nuevaSenal, qty, entry: fillEntry,
+            id: ins.rows[0].id, lado: nuevaSenal, qty, entry: fillEntry, entryRef,
             tp: resultado.tp, sl: resultado.sl, entryTs: Date.now(), stopType,
             beTrigger, beOffset, beAplicado: false,
         };
@@ -2312,8 +2330,8 @@ setTimeout(async () => {
     // 1. Recuperar sub-posiciones abiertas agrupadas por cuenta (usuario_id).
     try {
         const openRows = await pool.query(
-            `SELECT id, ts, lado, precio_entrada, precio_tp, precio_sl, qty, stop_type, tp_order_id, sl_order_id, usuario_id,
-                    be_trigger, be_offset, be_aplicado
+            `SELECT id, ts, lado, precio_entrada, precio_entrada_datos, precio_tp, precio_sl, qty, stop_type,
+                    tp_order_id, sl_order_id, usuario_id, be_trigger, be_offset, be_aplicado
              FROM auto_trading_entradas WHERE estado = 'abierta' ORDER BY ts ASC`
         );
         for (const row of openRows.rows) {
@@ -2324,6 +2342,8 @@ setTimeout(async () => {
             posDe(uid).push({
                 id: row.id, lado: row.lado, qty,
                 entry: parseFloat(row.precio_entrada), tp: parseFloat(row.precio_tp), sl: parseFloat(row.precio_sl),
+                // Referencia del BE en el espacio del exchange de datos (NULL = no cruzada).
+                entryRef: row.precio_entrada_datos != null ? parseFloat(row.precio_entrada_datos) : parseFloat(row.precio_entrada),
                 entryTs: parseInt(row.ts), stopType: row.stop_type || 'Porcentaje',
                 tpOrderId: row.tp_order_id || null, slOrderId: row.sl_order_id || null,
                 // Breakeven: si ya estaba aplicado, precio_sl YA es el nivel BE persistido —
