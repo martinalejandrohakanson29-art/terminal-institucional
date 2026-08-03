@@ -358,6 +358,9 @@ async function inicializarBaseDeDatos() {
         // Migración: canal de notificación (whatsapp | discord) y webhook directo de Discord.
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS canal VARCHAR(20) NOT NULL DEFAULT 'whatsapp'`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS discord_webhook_url TEXT`);
+        // Exchange de DATOS de las notificaciones (klines/ballenas/OI para evaluar la señal).
+        // NULL = el exchange activo global del server (comportamiento previo, sin romper configs existentes).
+        await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS exchange_datos VARCHAR(10)`);
 
         // Migración multi-exchange: klines_1m y open_interest quedan taggeadas por exchange
         // (default 'binance' para no romper los datos ya guardados) y sus PK pasan a ser
@@ -2579,25 +2582,34 @@ app.get('/api/admin/autotrading', autenticar, soloAdmin, async (req, res) => {
 app.get('/api/wspp-config', autenticar, async (req, res) => {
     try {
         const r = await pool.query(
-            `SELECT estrategia, tipo_senal, canal, webhook_url, telefono, discord_webhook_url,
+            `SELECT estrategia, tipo_senal, canal, webhook_url, telefono, discord_webhook_url, exchange_datos,
                     activo, ultima_senal_enviada, ultima_senal_ts
              FROM wspp_notificaciones WHERE usuario_id=$1`,
             [req.usuario.id]
         );
-        res.json(r.rows[0] || null);
+        if (!r.rows.length) return res.json(null);
+        const c = r.rows[0];
+        // NULL en BD = el exchange activo global del server (ver EXCHANGE_ACTIVO) — se resuelve
+        // acá para que el selector del modal siempre muestre un valor concreto.
+        res.json({ ...c, exchange_datos: c.exchange_datos || exch.name });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.put('/api/wspp-config', autenticar, async (req, res) => {
-    const { estrategia, tipo_senal, canal, webhook_url, telefono, discord_webhook_url, activo } = req.body;
+    const { estrategia, tipo_senal, canal, webhook_url, telefono, discord_webhook_url, exchange_datos, activo } = req.body;
     const canalNorm = canal === 'discord' ? 'discord' : 'whatsapp';
     if (activo && !estrategia) return res.status(400).json({ error: 'Seleccioná una estrategia' });
     if (activo && canalNorm === 'discord' && !discord_webhook_url) return res.status(400).json({ error: 'Falta la URL del webhook de Discord' });
     if (activo && canalNorm === 'whatsapp' && !telefono) return res.status(400).json({ error: 'Falta el número de WhatsApp' });
+    let exchangeDatosNorm = null;
+    if (exchange_datos) {
+        try { exchangeDatosNorm = getExchange(exchange_datos).name; }
+        catch (e) { return res.status(400).json({ error: `Exchange de datos no soportado: ${exchange_datos}` }); }
+    }
     try {
         await pool.query(
-            `INSERT INTO wspp_notificaciones (usuario_id, estrategia, tipo_senal, canal, webhook_url, telefono, discord_webhook_url, activo, actualizado_en)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+            `INSERT INTO wspp_notificaciones (usuario_id, estrategia, tipo_senal, canal, webhook_url, telefono, discord_webhook_url, exchange_datos, activo, actualizado_en)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
              ON CONFLICT (usuario_id) DO UPDATE SET
                 estrategia           = EXCLUDED.estrategia,
                 tipo_senal           = EXCLUDED.tipo_senal,
@@ -2605,9 +2617,10 @@ app.put('/api/wspp-config', autenticar, async (req, res) => {
                 webhook_url          = EXCLUDED.webhook_url,
                 telefono             = EXCLUDED.telefono,
                 discord_webhook_url  = EXCLUDED.discord_webhook_url,
+                exchange_datos       = EXCLUDED.exchange_datos,
                 activo               = EXCLUDED.activo,
                 actualizado_en       = NOW()`,
-            [req.usuario.id, estrategia || null, tipo_senal || 'compra', canalNorm, webhook_url || null, telefono || null, discord_webhook_url || null, activo !== false]
+            [req.usuario.id, estrategia || null, tipo_senal || 'compra', canalNorm, webhook_url || null, telefono || null, discord_webhook_url || null, exchangeDatosNorm, activo !== false]
         );
         res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3151,7 +3164,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
 async function tickWsppNotificaciones() {
     try {
         const cfgs = await pool.query(
-            `SELECT w.id, w.usuario_id, w.estrategia, w.tipo_senal, w.canal,
+            `SELECT w.id, w.usuario_id, w.estrategia, w.tipo_senal, w.canal, w.exchange_datos,
                     w.webhook_url, w.telefono, w.discord_webhook_url, w.ultima_senal_enviada
              FROM wspp_notificaciones w
              WHERE w.activo = true
@@ -3163,90 +3176,107 @@ async function tickWsppNotificaciones() {
         );
         if (!cfgs.rows.length) return;
 
-        const [bars1m, bars5m, bars15m] = await Promise.all([
-            fetchKlinesBatch('1m', 6000),
-            fetchKlinesBatch('5m', 800),
-            fetchKlinesBatch('15m', 800),
-        ]);
-        // Igual que en ejecutarAutoTrading: sin esto, los filtros de delta/CVD en BingX
-        // evaluarían NaN y las notificaciones nunca dispararían.
-        await completarDeltaFaltante(bars1m, exch);
-
+        // Se agrupa por exchange de DATOS elegido en cada config (NULL = el global del server,
+        // ver EXCHANGE_ACTIVO) para descargar klines una sola vez por grupo — mismo criterio que
+        // ejecutarAutoTrading, así cada usuario puede recibir alertas con datos de un exchange
+        // distinto al que tiene configurado el proceso.
+        const porExchange = new Map(); // exchangeName -> [cfgs]
         for (const cfg of cfgs.rows) {
-            try {
-                const stratRes = await pool.query(
-                    'SELECT params FROM estrategias_guardadas WHERE usuario_id=$1 AND nombre=$2',
-                    [cfg.usuario_id, cfg.estrategia]
-                );
-                if (!stratRes.rows.length) continue;
-                const p = stratRes.rows[0].params;
+            const nombre = cfg.exchange_datos || exch.name;
+            if (!porExchange.has(nombre)) porExchange.set(nombre, []);
+            porExchange.get(nombre).push(cfg);
+        }
 
-                const [whaleRes, oiRes, lsRes] = await Promise.all([
-                    pool.query(
-                        `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
-                         FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
-                        [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5, exch.name]
-                    ),
-                    p.useOIFilter
-                        ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 AND exchange = $2 ORDER BY tiempo ASC', [((parseInt(p.oiLookbackMin) || 30) + 10) * 60, exch.name])
-                        : Promise.resolve({ rows: [] }),
-                    (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
-                        ? pool.query('SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC', [Math.max(1800, ((parseInt(p.topSlopeLookbackMin) || 15) + 10) * 60)])
-                        : Promise.resolve({ rows: [] }),
-                ]);
+        for (const [nombre, grupo] of porExchange) {
+            let ex;
+            try { ex = getExchange(nombre); }
+            catch (e) { console.warn(`[WSPP] Exchange de datos desconocido "${nombre}":`, e.message); continue; }
 
-                const resultado = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows, lsRes.rows);
-                const signal = resultado.signal; // 'long' | 'short' | null
+            const [bars1m, bars5m, bars15m] = await Promise.all([
+                fetchKlinesBatch('1m', 6000, ex),
+                fetchKlinesBatch('5m', 800, ex),
+                fetchKlinesBatch('15m', 800, ex),
+            ]);
+            // Igual que en ejecutarAutoTrading: sin esto, los filtros de delta/CVD en BingX
+            // evaluarían NaN y las notificaciones nunca dispararían.
+            await completarDeltaFaltante(bars1m, ex);
 
-                if (!signal) {
-                    if (cfg.ultima_senal_enviada) {
-                        await pool.query('UPDATE wspp_notificaciones SET ultima_senal_enviada=NULL WHERE id=$1', [cfg.id]);
-                    }
-                    continue;
-                }
-
-                const tipoSenal = signal === 'long' ? 'compra' : 'venta';
-                const debeNotificar = cfg.tipo_senal === 'ambas' || cfg.tipo_senal === tipoSenal;
-                if (!debeNotificar) continue;
-
-                // Dedup: no re-notificar mientras la señal sea la misma
-                if (cfg.ultima_senal_enviada === signal) continue;
-
-                const payload = {
-                    estrategia: cfg.estrategia,
-                    tipo_senal: tipoSenal,
-                    canal:      cfg.canal || 'whatsapp',
-                    telefono:   cfg.telefono,
-                    discord_webhook_url: cfg.discord_webhook_url,
-                    simbolo:    `${exch.symbol} (${exch.name})`,
-                    precio:     resultado.entry,
-                    timestamp:  Date.now(),
-                };
-
-                const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 8000);
+            for (const cfg of grupo) {
                 try {
-                    const resp = await fetch(cfg.webhook_url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload),
-                        signal: controller.signal,
-                    });
-                    if (resp.ok || resp.status < 500) {
-                        await pool.query(
-                            'UPDATE wspp_notificaciones SET ultima_senal_enviada=$1, ultima_senal_ts=$2 WHERE id=$3',
-                            [signal, Date.now(), cfg.id]
-                        );
-                        const destinoLog = cfg.canal === 'discord' ? cfg.discord_webhook_url : cfg.telefono;
-                        console.log(`[WSPP] Notificación enviada: ${signal.toUpperCase()} — "${cfg.estrategia}" → ${destinoLog} (${cfg.canal || 'whatsapp'})`);
-                    } else {
-                        console.warn(`[WSPP] Webhook ${resp.status} para usuario ${cfg.usuario_id}`);
+                    const stratRes = await pool.query(
+                        'SELECT params FROM estrategias_guardadas WHERE usuario_id=$1 AND nombre=$2',
+                        [cfg.usuario_id, cfg.estrategia]
+                    );
+                    if (!stratRes.rows.length) continue;
+                    const p = stratRes.rows[0].params;
+
+                    const [whaleRes, oiRes, lsRes] = await Promise.all([
+                        pool.query(
+                            `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
+                             FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
+                            [(parseInt(p.whaleWindow) || 30) + 5, p.whaleMinBTC || 5, ex.name]
+                        ),
+                        p.useOIFilter
+                            ? pool.query('SELECT tiempo, valor FROM open_interest WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 AND exchange = $2 ORDER BY tiempo ASC', [((parseInt(p.oiLookbackMin) || 30) + 10) * 60, ex.name])
+                            : Promise.resolve({ rows: [] }),
+                        (p.useTopTraderFilter || p.useRetailFilter || p.useTopSlopeFilter)
+                            ? pool.query('SELECT tiempo, top_pos, global_acc FROM long_short_ratio WHERE tiempo >= EXTRACT(EPOCH FROM NOW())::bigint - $1 ORDER BY tiempo ASC', [Math.max(1800, ((parseInt(p.topSlopeLookbackMin) || 15) + 10) * 60)])
+                            : Promise.resolve({ rows: [] }),
+                    ]);
+
+                    const resultado = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows, lsRes.rows);
+                    const signal = resultado.signal; // 'long' | 'short' | null
+
+                    if (!signal) {
+                        if (cfg.ultima_senal_enviada) {
+                            await pool.query('UPDATE wspp_notificaciones SET ultima_senal_enviada=NULL WHERE id=$1', [cfg.id]);
+                        }
+                        continue;
                     }
-                } finally {
-                    clearTimeout(timer);
+
+                    const tipoSenal = signal === 'long' ? 'compra' : 'venta';
+                    const debeNotificar = cfg.tipo_senal === 'ambas' || cfg.tipo_senal === tipoSenal;
+                    if (!debeNotificar) continue;
+
+                    // Dedup: no re-notificar mientras la señal sea la misma
+                    if (cfg.ultima_senal_enviada === signal) continue;
+
+                    const payload = {
+                        estrategia: cfg.estrategia,
+                        tipo_senal: tipoSenal,
+                        canal:      cfg.canal || 'whatsapp',
+                        telefono:   cfg.telefono,
+                        discord_webhook_url: cfg.discord_webhook_url,
+                        simbolo:    `${ex.symbol} (${ex.name})`,
+                        precio:     resultado.entry,
+                        timestamp:  Date.now(),
+                    };
+
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), 8000);
+                    try {
+                        const resp = await fetch(cfg.webhook_url, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                            signal: controller.signal,
+                        });
+                        if (resp.ok || resp.status < 500) {
+                            await pool.query(
+                                'UPDATE wspp_notificaciones SET ultima_senal_enviada=$1, ultima_senal_ts=$2 WHERE id=$3',
+                                [signal, Date.now(), cfg.id]
+                            );
+                            const destinoLog = cfg.canal === 'discord' ? cfg.discord_webhook_url : cfg.telefono;
+                            console.log(`[WSPP] Notificación enviada: ${signal.toUpperCase()} — "${cfg.estrategia}" (${ex.name}) → ${destinoLog} (${cfg.canal || 'whatsapp'})`);
+                        } else {
+                            console.warn(`[WSPP] Webhook ${resp.status} para usuario ${cfg.usuario_id}`);
+                        }
+                    } finally {
+                        clearTimeout(timer);
+                    }
+                } catch (e) {
+                    console.warn(`[WSPP] Error en config ${cfg.id}:`, e.message);
                 }
-            } catch (e) {
-                console.warn(`[WSPP] Error en config ${cfg.id}:`, e.message);
             }
         }
     } catch (e) {
@@ -3411,7 +3441,20 @@ app.put('/api/mi-cuenta', autenticar, async (req, res) => {
         // Se valida contra la base del entorno elegido: una clave de demo no sirve en real.
         let balance;
         try { balance = await ex.trade.getBalance({ apiKey, secret: apiSecret, base, exchange: ex.name }); }
-        catch (e) { return res.status(400).json({ error: `Las claves no pasaron la verificación con ${ex.name}: ` + e.message }); }
+        catch (e) {
+            // El error crudo de Binance/BingX ante clave inválida, IP no autorizada o mismatch
+            // de entorno es el mismo código ("Invalid API-key, IP, or permissions for action"),
+            // así que ante ese caso puntual se agrega un hint con las 3 causas típicas — en
+            // especial la de Binance, donde Testnet y cuenta real son sistemas de claves
+            // totalmente separados (a diferencia de BingX, donde demo/real comparten clave).
+            let hint = '';
+            if (/invalid api-key/i.test(e.message)) {
+                hint = ex.name === 'binance'
+                    ? ' — revisá: (1) que el Entorno elegido sea el correcto (las claves de Binance Futures Testnet y las de tu cuenta REAL son independientes, no sirve una en el otro sistema); (2) que la API key tenga habilitado "Enable Futures"; (3) si tiene restricción de IP, que incluya la IP de este servidor.'
+                    : ' — revisá: (1) que la API key tenga habilitado el trading de futuros; (2) si tiene restricción de IP, que incluya la IP de este servidor.';
+            }
+            return res.status(400).json({ error: `Las claves no pasaron la verificación con ${ex.name}: ${e.message}${hint}` });
+        }
 
         const secretCifrado = cifrarSecreto(apiSecret);
         await pool.query(

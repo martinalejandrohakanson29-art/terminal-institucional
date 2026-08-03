@@ -3257,7 +3257,7 @@
                 aviso.innerHTML = 'Las claves se guardan cifradas. Usá una API key <b>VST (demo)</b> creada en el panel de BingX — a diferencia de Binance, la demo de BingX opera sobre el mismo precio real, solo con saldo virtual.';
                 aviso.style.color = '#94a3b8';
             } else {
-                aviso.innerHTML = 'Las claves se guardan cifradas. Usá claves de <b>Futures Testnet</b>, sin permiso de retiro.';
+                aviso.innerHTML = 'Las claves se guardan cifradas. Usá claves de <b>Futures Testnet</b> (generadas en testnet.binancefuture.com), sin permiso de retiro. ⚠️ Si tenés claves de tu cuenta REAL de Binance, no van a funcionar acá — elegí "Real" arriba.';
                 aviso.style.color = '#94a3b8';
             }
         }
@@ -3365,6 +3365,7 @@
                 document.getElementById('wspp-telefono').value     = wsppConfig.telefono    || '';
                 document.getElementById('wspp-discord-webhook-url').value = wsppConfig.discord_webhook_url || '';
                 document.getElementById('wspp-webhook-url').value  = wsppConfig.webhook_url || '';
+                document.getElementById('wspp-exchange-datos').value = wsppConfig.exchange_datos || 'binance';
 
                 if (wsppConfig.ultima_senal_ts) {
                     const ts = new Date(parseInt(wsppConfig.ultima_senal_ts));
@@ -3379,6 +3380,7 @@
             } else {
                 document.getElementById('wspp-canal-sel').value = 'whatsapp';
                 document.getElementById('wspp-discord-webhook-url').value = '';
+                document.getElementById('wspp-exchange-datos').value = 'binance';
                 ultimoEl.style.display = 'none';
             }
 
@@ -3409,6 +3411,7 @@
             const telefono     = document.getElementById('wspp-telefono').value.trim();
             const discord_webhook_url = document.getElementById('wspp-discord-webhook-url').value.trim();
             const webhook_url  = document.getElementById('wspp-webhook-url').value.trim();
+            const exchange_datos = document.getElementById('wspp-exchange-datos').value;
             const msgEl        = document.getElementById('wspp-msg');
 
             if (!estrategia) {
@@ -3432,11 +3435,11 @@
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'same-origin',
-                    body: JSON.stringify({ estrategia, tipo_senal, canal, telefono, discord_webhook_url, webhook_url, activo: true })
+                    body: JSON.stringify({ estrategia, tipo_senal, canal, telefono, discord_webhook_url, webhook_url, exchange_datos, activo: true })
                 });
                 if (!r.ok) throw new Error((await r.json()).error);
 
-                wsppConfig = { estrategia, tipo_senal, canal, telefono, discord_webhook_url, webhook_url, activo: true };
+                wsppConfig = { estrategia, tipo_senal, canal, telefono, discord_webhook_url, webhook_url, exchange_datos, activo: true };
                 document.getElementById('wspp-dot').style.background = canal === 'discord' ? '#5865F2' : '#25D366';
 
                 msgEl.style.cssText = 'display:block;background:#f0fdf4;border:1px solid #86efac;color:#16a34a;border-radius:5px;padding:8px 12px;font-size:12px;margin-bottom:12px;';
@@ -3480,6 +3483,7 @@
                         estrategia: cfg.estrategia || '', tipo_senal: cfg.tipo_senal || 'compra',
                         canal: cfg.canal || 'whatsapp', telefono: cfg.telefono || '',
                         discord_webhook_url: cfg.discord_webhook_url || '', webhook_url: cfg.webhook_url || '',
+                        exchange_datos: cfg.exchange_datos || '',
                         activo: false
                     })
                 });
@@ -3620,6 +3624,16 @@
                 <option value="venta">🔴 Señal de venta</option>
                 <option value="ambas">⚡ Compra y venta</option>
             </select>
+
+            <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Datos de la señal (klines, ballenas, delta)</label>
+            <select id="wspp-exchange-datos" style="width:100%;padding:8px 10px;border:1px solid #d1d4dc;border-radius:5px;font-size:13px;margin-bottom:4px;background:#f8fafc;box-sizing:border-box;">
+                <option value="binance">Binance</option>
+                <option value="bingx">BingX</option>
+            </select>
+            <div style="margin-bottom:14px;font-size:10px;color:#94a3b8;line-height:1.4;">
+                Elegí el mismo exchange con el que backtesteás esta estrategia — si no coincide,
+                la alerta puede avisar con precios distintos a los que validaste.
+            </div>
 
             <!-- Canal de notificación -->
             <label style="display:block;font-size:12px;font-weight:bold;color:#374151;margin-bottom:5px;">Canal</label>
