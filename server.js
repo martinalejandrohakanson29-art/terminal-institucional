@@ -1696,16 +1696,20 @@ function nivelProteccionExchange(ctx, lado, nivel, tipo) {
 // El TP siempre es un nivel fijo; el SL solo se coloca si el stop es por Porcentaje
 // (los stops por Ruptura EMA / Tiempo no son niveles de precio y los gestiona el server).
 // Sirven de red de seguridad: si el server se cae, el exchange igual cierra la posición.
+// IDEMPOTENTE: solo intenta la(s) pata(s) que todavía falten (sub.tpOrderId/slOrderId ya
+// puestos se respetan) — así se puede reintentar sin riesgo de duplicar una orden ya viva.
+// Necesario porque las dos patas se piden por separado: si una falla (timeout, rate limit)
+// y la otra no, un reintento ciego duplicaría la que sí prendió.
 async function colocarProteccionExchange(ctx, sub) {
     const estado = { tp: null, sl: null }; // null = no intentada; {ok,msg} si se intentó
     try {
-        if (sub.tp) {
+        if (sub.tp && !sub.tpOrderId) {
             const nivel = nivelProteccionExchange(ctx, sub.lado, sub.tp, 'tp');
             const r = await colocarOrdenStop(ctx, sub.lado, sub.qty, nivel, 'TAKE_PROFIT_MARKET');
             if (r.ok && r.orderId) sub.tpOrderId = r.orderId;
             estado.tp = { ok: r.ok, msg: r.body?.msg, code: r.body?.code };
         }
-        if ((sub.stopType ?? 'Porcentaje') === 'Porcentaje' && sub.sl) {
+        if ((sub.stopType ?? 'Porcentaje') === 'Porcentaje' && sub.sl && !sub.slOrderId) {
             const nivel = nivelProteccionExchange(ctx, sub.lado, sub.sl, 'sl');
             const r = await colocarOrdenStop(ctx, sub.lado, sub.qty, nivel, 'STOP_MARKET');
             if (r.ok && r.orderId) sub.slOrderId = r.orderId;
@@ -1789,39 +1793,49 @@ async function chequearSalida(precio, mercado) {
         if (!ctx) continue; // sin claves en memoria no podemos cerrar; el exchange igual tiene el TP/SL
         if (mercadoDeCtx(ctx) !== mercado) continue; // este feed es de otro mercado: no aplica
 
-        const aCerrar = [], aMoverBE = [];
-        for (let i = arr.length - 1; i >= 0; i--) {
-            const pos = arr[i];
-            const golpeTP   = pos.lado === 'long' ? precio >= pos.tp : precio <= pos.tp;
-            const slPorTick = (pos.stopType ?? 'Porcentaje') === 'Porcentaje' || pos.beAplicado;
-            const golpeSL   = slPorTick && pos.sl != null && (pos.lado === 'long' ? precio <= pos.sl : precio >= pos.sl);
-            if (golpeTP || golpeSL) {
-                arr.splice(i, 1); // remover síncronamente antes de awaits
-                aCerrar.push({ pos, razon: golpeTP ? 'TP' : (pos.beAplicado ? 'BE' : 'SL') });
-                continue;
-            }
-            // Disparo del breakeven: si el precio avanzó el trigger a favor, mover el stop a
-            // entrada ± offset. Igual que en el backtest ("rige desde la próxima vela"), el
-            // nuevo nivel se evalúa recién en los PRÓXIMOS ticks, nunca en el que lo disparó.
-            // beAplicado se marca síncrono antes de cualquier await para no re-disparar.
-            if (pos.beTrigger != null && !pos.beAplicado) {
-                // Referencia en el espacio del feed que estamos evaluando (ver entryRef): con
-                // ejecución cruzada NO es el fill del exchange, sino el precio de la señal.
-                const ref = pos.entryRef ?? pos.entry;
-                const disparo = pos.lado === 'long'
-                    ? precio >= ref * (1 + pos.beTrigger / 100)
-                    : precio <= ref * (1 - pos.beTrigger / 100);
-                if (disparo) {
-                    pos.beAplicado = true;
-                    pos.sl = pos.lado === 'long'
-                        ? ref * (1 + pos.beOffset / 100)
-                        : ref * (1 - pos.beOffset / 100);
-                    aMoverBE.push(pos);
+        // Aislado por cuenta: un error cerrando/moviendo BE de UNA cuenta (timeout de red,
+        // rechazo del exchange, etc.) no debe frenar el chequeo de las cuentas siguientes en
+        // este mismo tick. Sin este try/catch, una excepción acá abortaba todo el for-of y
+        // dejaba a las cuentas posteriores en el orden del Map (las más nuevas, insertadas
+        // último) sin evaluar TP/SL/BE hasta el próximo tick — que podía tardar en volver a
+        // fallar del mismo modo, dejándolas efectivamente sin monitoreo en vivo por horas.
+        try {
+            const aCerrar = [], aMoverBE = [];
+            for (let i = arr.length - 1; i >= 0; i--) {
+                const pos = arr[i];
+                const golpeTP   = pos.lado === 'long' ? precio >= pos.tp : precio <= pos.tp;
+                const slPorTick = (pos.stopType ?? 'Porcentaje') === 'Porcentaje' || pos.beAplicado;
+                const golpeSL   = slPorTick && pos.sl != null && (pos.lado === 'long' ? precio <= pos.sl : precio >= pos.sl);
+                if (golpeTP || golpeSL) {
+                    arr.splice(i, 1); // remover síncronamente antes de awaits
+                    aCerrar.push({ pos, razon: golpeTP ? 'TP' : (pos.beAplicado ? 'BE' : 'SL') });
+                    continue;
+                }
+                // Disparo del breakeven: si el precio avanzó el trigger a favor, mover el stop a
+                // entrada ± offset. Igual que en el backtest ("rige desde la próxima vela"), el
+                // nuevo nivel se evalúa recién en los PRÓXIMOS ticks, nunca en el que lo disparó.
+                // beAplicado se marca síncrono antes de cualquier await para no re-disparar.
+                if (pos.beTrigger != null && !pos.beAplicado) {
+                    // Referencia en el espacio del feed que estamos evaluando (ver entryRef): con
+                    // ejecución cruzada NO es el fill del exchange, sino el precio de la señal.
+                    const ref = pos.entryRef ?? pos.entry;
+                    const disparo = pos.lado === 'long'
+                        ? precio >= ref * (1 + pos.beTrigger / 100)
+                        : precio <= ref * (1 - pos.beTrigger / 100);
+                    if (disparo) {
+                        pos.beAplicado = true;
+                        pos.sl = pos.lado === 'long'
+                            ? ref * (1 + pos.beOffset / 100)
+                            : ref * (1 - pos.beOffset / 100);
+                        aMoverBE.push(pos);
+                    }
                 }
             }
+            for (const { pos, razon } of aCerrar) await cerrarSubPosicion(ctx, pos, razon, precio);
+            for (const pos of aMoverBE) await aplicarBreakevenExchange(ctx, pos);
+        } catch (e) {
+            console.error(`[AutoTrading u${uid}] Error chequeando salida por tick:`, e.message);
         }
-        for (const { pos, razon } of aCerrar) await cerrarSubPosicion(ctx, pos, razon, precio);
-        for (const pos of aMoverBE) await aplicarBreakevenExchange(ctx, pos);
     }
 }
 
@@ -2376,9 +2390,11 @@ setTimeout(async () => {
             // Reconciliar: si el exchange está plano, los stops cerraron la posición con el server caído.
             try {
                 await reconciliarCuenta(ctx);
-                // Si tras reconciliar siguen abiertas, recolocar protección a sub-pos sin órdenes.
+                // Si tras reconciliar siguen abiertas, recolocar protección a sub-pos con
+                // alguna pata faltante (OR, no AND: colocarProteccionExchange es idempotente y
+                // solo pide la que falte, así que alcanza con que falte una para reintentar).
                 for (const sub of posDe(uid)) {
-                    if (!sub.tpOrderId && !sub.slOrderId) await colocarProteccionExchange(ctx, sub);
+                    if (!sub.tpOrderId || !sub.slOrderId) await colocarProteccionExchange(ctx, sub);
                 }
             } catch (e) { console.error(`[AutoTrading u${uid}] Error reconciliando al arrancar:`, e.message); }
 
@@ -2425,6 +2441,12 @@ setTimeout(async () => {
                 // configurada): asegurar su feed de precio para el TP/SL por tick (idempotente).
                 if (exchangeDatosDeCtx(ctx) === 'bingx') iniciarMonitorPrecioBingX();
                 await reconciliarCuenta(ctx).catch(() => {});
+                // Autocura sin depender de un reinicio: si a alguna sub-posición le falta el
+                // TP o el SL en el exchange (una pata falló al abrir y nunca se reintentó),
+                // se completa acá cada 5 min. colocarProteccionExchange es idempotente.
+                for (const sub of posDe(uid)) {
+                    if (!sub.tpOrderId || !sub.slOrderId) await colocarProteccionExchange(ctx, sub).catch(() => {});
+                }
             }
         } catch (e) { console.error('[AutoTrading] Error en pasada de reconciliación:', e.message); }
     }, 5 * 60 * 1000);
