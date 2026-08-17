@@ -2010,11 +2010,26 @@ const REST_PRECIO_BINANCE_POR_ENTORNO = {
     real:    'https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT',
 };
 const UMBRAL_FALLBACK_MS = 30 * 1000;
+// Un log por transición (entra/sale de fallback) en vez de uno por poll (cada 15s) — con el WS
+// mudo por horas como se vio en producción, loguear cada poll inundaría el log sin aportar nada
+// nuevo después del primero.
+const fallbackActivoPorEntorno = {};
 
 async function pollFallbackPrecioBinance(entorno) {
     const nombreFeed = `precio-binance:${entorno}`;
     const s = wsSalud.get(nombreFeed);
-    if (s && Date.now() - s.ultimoMsg < UMBRAL_FALLBACK_MS) return; // el WS está al día, no hace falta
+    if (s && Date.now() - s.ultimoMsg < UMBRAL_FALLBACK_MS) {
+        if (fallbackActivoPorEntorno[entorno]) {
+            fallbackActivoPorEntorno[entorno] = false;
+            console.log(`[Fallback REST precio binance:${entorno}] WS recuperado — vuelve a mandar chequearSalida el monitor por WS.`);
+        }
+        return; // el WS está al día, no hace falta
+    }
+    if (!fallbackActivoPorEntorno[entorno]) {
+        fallbackActivoPorEntorno[entorno] = true;
+        const silencioSeg = s ? Math.round((Date.now() - s.ultimoMsg) / 1000) : null;
+        console.warn(`[Fallback REST precio binance:${entorno}] WS mudo hace ${silencioSeg ?? '?'}s — arranca a chequear TP/SL/BE por REST cada 15s.`);
+    }
     try {
         const r = await fetch(REST_PRECIO_BINANCE_POR_ENTORNO[entorno]);
         const body = await r.json();
