@@ -1997,6 +1997,35 @@ function iniciarMonitorPrecio(wsUrl, entorno) {
     });
 }
 
+// Fallback REST cuando el WS de precio de Binance queda mudo: se vio en producción que
+// fstream.binance.com puede abrir el socket y no empujar un solo mensaje durante horas sin
+// disparar 'error' ni 'close' (el watchdog lo detecta recién a los 3 min y ahí reconecta, pero
+// el problema tiende a repetirse en loop) — mientras tanto el TP/SL/BE por tick de las cuentas
+// Binance queda ciego. Sondea cada 15 s y, si el feed lleva más de UMBRAL_FALLBACK_MS sin un
+// mensaje real del WS, pide el precio por REST y corre el mismo chequearSalida que correría
+// con un tick del WS. No reemplaza al WS (el watchdog lo sigue matando/reconectando igual):
+// solo tapa el hueco de protección mientras el WS está mudo.
+const REST_PRECIO_BINANCE_POR_ENTORNO = {
+    testnet: 'https://testnet.binancefuture.com/fapi/v1/ticker/price?symbol=BTCUSDT',
+    real:    'https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT',
+};
+const UMBRAL_FALLBACK_MS = 30 * 1000;
+
+async function pollFallbackPrecioBinance(entorno) {
+    const nombreFeed = `precio-binance:${entorno}`;
+    const s = wsSalud.get(nombreFeed);
+    if (s && Date.now() - s.ultimoMsg < UMBRAL_FALLBACK_MS) return; // el WS está al día, no hace falta
+    try {
+        const r = await fetch(REST_PRECIO_BINANCE_POR_ENTORNO[entorno]);
+        const body = await r.json();
+        const precio = parseFloat(body.price);
+        if (precio > 0) await chequearSalida(precio, `binance:${entorno}`);
+        else console.error(`[Fallback REST precio binance:${entorno}] Respuesta inesperada:`, JSON.stringify(body).slice(0, 200));
+    } catch (e) {
+        console.error(`[Fallback REST precio binance:${entorno}] Error:`, e.message);
+    }
+}
+
 // Monitor de precio para BingX: reutiliza el mismo feed de trades del adapter (gzip +
 // ping/pong resueltos ahí) en vez de un WS plano — BingX no distingue demo/real en precio,
 // así que hay una sola clave de mercado ('bingx') para todas las cuentas de ese exchange.
@@ -2079,10 +2108,19 @@ async function reconciliarCuenta(ctx) {
         if (Math.abs(amt) < 1e-8) {
             console.warn(`[AutoTrading u${ctx.uid}] ⚠️ Reconciliación: exchange PLANO pero libro con ${arr.length} sub-pos — marcando como cerradas.`);
             const ahoraMs = Date.now();
+            // Precio de cierre: se pide fresco por REST en vez de usar el caché del WS, que
+            // puede tener horas de atraso si el feed estaba mudo (ver fallback REST de precio
+            // más arriba) — sin esto quedaba precio_cierre NULL en cada cierre detectado por
+            // reconciliación y no se podía saber el PnL real ni compararlo contra el backtest
+            // (ver caso real: entrada #363 del admin, 2026-08-17).
+            let precioCierre = null;
+            const getPrice = tradeDe(ctx).getPrice;
+            if (getPrice) { try { precioCierre = await getPrice(ctx); } catch (_) {} }
+            if (precioCierre == null) precioCierre = precioDeCtx(ctx);
             for (const pos of arr) {
                 await pool.query(
-                    `UPDATE auto_trading_entradas SET estado='cerrada', razon_cierre='Exchange', ts_cierre=$1 WHERE id=$2`,
-                    [ahoraMs, pos.id]
+                    `UPDATE auto_trading_entradas SET estado='cerrada', precio_cierre=$1, razon_cierre='Exchange', ts_cierre=$2 WHERE id=$3`,
+                    [precioCierre, ahoraMs, pos.id]
                 );
             }
             posicionesPorCuenta.set(ctx.uid, []);
@@ -2406,6 +2444,12 @@ setTimeout(async () => {
 
     iniciarMonitorPrecio(WS_PRECIO_BINANCE_POR_ENTORNO.testnet, 'binance:testnet');
     iniciarMonitorPrecio(WS_PRECIO_BINANCE_POR_ENTORNO.real,    'binance:real');
+    // Red de seguridad del punto anterior: cubre los huecos en que el WS está mudo (ver
+    // pollFallbackPrecioBinance) sin esperar a que el watchdog lo mate y reconecte.
+    setInterval(() => {
+        pollFallbackPrecioBinance('testnet').catch(() => {});
+        pollFallbackPrecioBinance('real').catch(() => {});
+    }, 15 * 1000);
     // El monitor BingX arranca si es el exchange activo, o si alguna cuenta BingX tiene el
     // bot encendido o posiciones abiertas: sus TP/SL por tick se evalúan con el precio de
     // SU mercado aunque el activo sea otro exchange.
