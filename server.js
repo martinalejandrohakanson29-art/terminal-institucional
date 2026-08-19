@@ -2354,21 +2354,42 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false,
         const beTrigger = p.useBreakeven === true ? (p.breakevenTrigger ?? 0.3)  : null;
         const beOffset  = p.useBreakeven === true ? (p.breakevenOffset  ?? 0.12) : null;
         // Usar el precio de fill real (avgPrice) en vez del cierre de vela estimado: es el
-        // costo real de la posición y con eso se calcula el PnL.
-        const fillEntry = ordenEntrada.avgPrice || resultado.entry;
+        // costo real de la posición y con eso se calcula el PnL. Si el exchange no lo trae en
+        // la respuesta inmediata de la orden MARKET (pasa cuando la confirmación del match
+        // tarda unos ms más que la respuesta HTTP), reintentar consultando la orden antes de
+        // resignarse al precio de señal — ver caso real: entrada #366 del admin, 2026-08-19,
+        // donde precio_entrada quedó en el precio de señal y corrió TP/SL/breakeven ~26 USD
+        // del costo real.
+        let fillEntry = ordenEntrada.avgPrice;
+        for (let intento = 0; !fillEntry && intento < 3 && ordenEntrada.orderId && trade.getOrderFill; intento++) {
+            await new Promise(res => setTimeout(res, 300));
+            try { fillEntry = await trade.getOrderFill(ctx, ordenEntrada.orderId); } catch (_) {}
+        }
+        if (!fillEntry) fillEntry = resultado.entry;
         // Referencia para los niveles de decisión. TP y SL ya vienen del backtest en el espacio
         // del exchange de datos; el BE debe medirse contra la misma referencia (precio de la
         // señal) para no quedar corrido por el basis cuando la ejecución es en otro venue.
         const entryRef = esEjecucionCruzada(ctx) ? resultado.entry : fillEntry;
+        // TP/SL (%) recalculados sobre el fill real cuando la cuenta decide y ejecuta en el
+        // MISMO exchange: dejarlos calculados sobre el precio de señal corre los niveles por el
+        // slippage/basis entre la señal y el fill sin que el % configurado cambie. En ejecución
+        // cruzada NO se rebasa: TP/SL ya están a propósito en el espacio del exchange de datos.
+        let tpFinal = resultado.tp, slFinal = resultado.sl;
+        if (!esEjecucionCruzada(ctx) && fillEntry !== resultado.entry) {
+            if (resultado.tp != null) tpFinal = fillEntry * (1 + (resultado.tp - resultado.entry) / resultado.entry);
+            if (stopType === 'Porcentaje' && resultado.sl != null) {
+                slFinal = fillEntry * (1 + (resultado.sl - resultado.entry) / resultado.entry);
+            }
+        }
         const ins = await pool.query(
             `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_entrada_datos, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange, be_trigger, be_offset)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'abierta', $9, $9, $10, $11, $12) RETURNING id`,
             [Date.now(), nuevaSenal, fillEntry, esEjecucionCruzada(ctx) ? entryRef : null,
-             resultado.tp, resultado.sl, qty, stopType, row.usuario_id, ctx.exchange, beTrigger, beOffset]
+             tpFinal, slFinal, qty, stopType, row.usuario_id, ctx.exchange, beTrigger, beOffset]
         );
         const sub = {
             id: ins.rows[0].id, lado: nuevaSenal, qty, entry: fillEntry, entryRef,
-            tp: resultado.tp, sl: resultado.sl, entryTs: Date.now(), stopType,
+            tp: tpFinal, sl: slFinal, entryTs: Date.now(), stopType,
             beTrigger, beOffset, beAplicado: false,
         };
         arr.push(sub);
