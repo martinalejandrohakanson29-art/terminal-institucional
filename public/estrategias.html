@@ -487,6 +487,9 @@
                         <option value="1m">1m</option>
                         <option value="5m">5m</option>
                         <option value="15m" selected>15m</option>
+                        <option value="1h">1h</option>
+                        <option value="4h">4h</option>
+                        <option value="1d">1d</option>
                     </select>
                 </div>
                 <div class="form-row">
@@ -500,6 +503,9 @@
                 <div class="form-row">
                     <label>Umbral Short (≤)</label>
                     <input type="number" id="p-rsi-short" class="form-input" value="40" min="1" max="99" step="1">
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                    ⚠ Con 4h/1d el RSI necesita mucho historial para calentar (período×TF): usá un rango de backtest largo o el arranque no generará trades.
                 </div>
             </div>
         </div>
@@ -516,6 +522,9 @@
                         <option value="1m">1m</option>
                         <option value="5m" selected>5m</option>
                         <option value="15m">15m</option>
+                        <option value="1h">1h</option>
+                        <option value="4h">4h</option>
+                        <option value="1d">1d</option>
                     </select>
                 </div>
                 <div class="form-row">
@@ -529,6 +538,9 @@
                 <div class="form-row">
                     <label>Signal</label>
                     <input type="number" id="p-macd-signal" class="form-input" value="9" min="1" max="200">
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
+                    ⚠ Con 4h/1d el MACD necesita mucho historial para calentar (slow×TF): usá un rango de backtest largo o el arranque no generará trades.
                 </div>
             </div>
         </div>
