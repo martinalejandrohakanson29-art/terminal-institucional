@@ -1345,7 +1345,7 @@ const {
 async function fetchKlinesBatch(interval, totalBars, ex = exch) {
     const perReq = 1000;
     const CHUNK = 20; // requests en paralelo por tanda
-    const dur = { '1m': 60000, '5m': 300000, '15m': 900000 }[interval] || 60000;
+    const dur = { '1m': 60000, '5m': 300000, '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[interval] || 60000;
     const n = Math.ceil(totalBars / perReq);
     const now = Date.now();
 
@@ -1869,10 +1869,13 @@ async function aplicarBreakevenExchange(ctx, pos) {
 
 // Cada ciclo (1 min): salida por tiempo máximo y stop EMA dinámico, por sub-posición de la
 // cuenta `ctx`. Usa los klines 1m compartidos del ciclo. Replica el backtest al cierre de vela.
-async function gestionarPosicionAbierta(ctx, p, bars1m, bars5m, bars15m) {
+async function gestionarPosicionAbierta(ctx, p, velas) {
+    const { bars1m, bars5m, bars15m, bars1h, bars4h, bars1d } = velas;
     const arr = posDe(ctx.uid);
     if (arr.length === 0) return;
     const ahora = Date.now();
+
+    const barsPorTf_live = { '5m': bars5m, '15m': bars15m, '1h': bars1h, '4h': bars4h, '1d': bars1d };
 
     const stopEMA = (p.stopType === 'Ruptura EMA' || p.stopType === 'Ruptura EMA 200' || p.stopType === 'Ruptura EMA 500');
     let precioActual = precioDeCtx(ctx), stopEmaVals = [];
@@ -1890,14 +1893,13 @@ async function gestionarPosicionAbierta(ctx, p, bars1m, bars5m, bars15m) {
             let val = null;
             if (tf === '1m') {
                 val = calcEMA(c1m_live, period)[last];
-            } else if (tf === '5m' && bars5m && bars5m.length >= period) {
-                const vals = calcEMA(bars5m.map(b => parseFloat(b[4])), period);
-                const tsArr = bars5m.map(b => parseInt(b[6])).sort((a,b)=>a-b);
-                val = lookupHTF(tsArr, new Map(bars5m.map((b,i)=>[parseInt(b[6]),vals[i]])), tsClose_live);
-            } else if (tf === '15m' && bars15m && bars15m.length >= period) {
-                const vals = calcEMA(bars15m.map(b => parseFloat(b[4])), period);
-                const tsArr = bars15m.map(b => parseInt(b[6])).sort((a,b)=>a-b);
-                val = lookupHTF(tsArr, new Map(bars15m.map((b,i)=>[parseInt(b[6]),vals[i]])), tsClose_live);
+            } else {
+                const barsTf = barsPorTf_live[tf];
+                if (barsTf && barsTf.length >= period) {
+                    const vals = calcEMA(barsTf.map(b => parseFloat(b[4])), period);
+                    const tsArr = barsTf.map(b => parseInt(b[6])).sort((a,b)=>a-b);
+                    val = lookupHTF(tsArr, new Map(barsTf.map((b,i)=>[parseInt(b[6]),vals[i]])), tsClose_live);
+                }
             }
             if (val != null) stopEmaVals.push(val);
         }
@@ -2215,19 +2217,25 @@ async function ejecutarAutoTrading() {
                 const ex = getExchange(nombre);
                 if (nombre === 'bingx') iniciarMonitorPrecioBingX(); // TP/SL por tick con SU precio
                 // Velas suficientes para que EMA/MACD/RSI/ADX converjan (6000 de 1m = ~100
-                // velas 1h derivadas, para que el ADX 1h converja como en backtest).
-                const [bars1m, bars5m, bars15m] = await Promise.all([
+                // velas 1h derivadas, para que el ADX 1h converja como en backtest). 1h/4h/1d
+                // se piden nativas del exchange (igual que 5m/15m) para tener historial real
+                // de warmup en vez de derivarlas de una ventana corta de 1m.
+                const [bars1m, bars5m, bars15m, bars1h, bars4h, bars1d] = await Promise.all([
                     fetchKlinesBatch('1m',  6000, ex),
                     fetchKlinesBatch('5m',  800,  ex),
                     fetchKlinesBatch('15m', 800,  ex),
+                    fetchKlinesBatch('1h',  500,  ex),
+                    fetchKlinesBatch('4h',  500,  ex),
+                    fetchKlinesBatch('1d',  500,  ex),
                 ]);
                 // BingX: las velas REST vienen sin taker_buy_base — completarlo desde BD/acumulador
                 // para que los filtros de delta/CVD de las señales tengan dato real.
                 await completarDeltaFaltante(bars1m, ex);
+                const velas = { bars1m, bars5m, bars15m, bars1h, bars4h, bars1d };
 
                 for (const row of rows) {
                     const uid = row.usuario_id;
-                    try { await procesarCuenta(row, bars1m, bars5m, bars15m, !row.habilitado, ex); }
+                    try { await procesarCuenta(row, velas, !row.habilitado, ex); }
                     catch (e) { console.error(`[AutoTrading u${uid}] Error procesando cuenta:`, e.message); }
                 }
             } catch (e) {
@@ -2246,7 +2254,8 @@ async function ejecutarAutoTrading() {
 // con ese mismo nombre), que puede no ser donde se ejecuta: las órdenes salen siempre por
 // ctx.exchange. Aislada por try/catch en el llamador. Con soloSalidas=true (cuenta apagada con
 // posiciones vivas) SOLO gestiona salidas — jamás abre entradas nuevas.
-async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false, ex = exch) {
+async function procesarCuenta(row, velas, soloSalidas = false, ex = exch) {
+    const { bars1m, bars5m, bars15m } = velas;
     let ctx;
     try { ctx = ctxDeCuenta(row); }
     catch (e) { console.error(`[AutoTrading u${row.usuario_id}] No se pudo descifrar la clave:`, e.message); return; }
@@ -2261,7 +2270,7 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false,
     const arr = posDe(row.usuario_id);
 
     // Gestionar salidas de sub-posiciones abiertas (tiempo / EMA). El WS cubre TP/SL fijos.
-    if (arr.length > 0) await gestionarPosicionAbierta(ctx, p, bars1m, bars5m, bars15m);
+    if (arr.length > 0) await gestionarPosicionAbierta(ctx, p, velas);
 
     // Cuenta de otro exchange: solo salidas — nunca abrir entradas acá.
     if (soloSalidas) return;
@@ -2302,7 +2311,7 @@ async function procesarCuenta(row, bars1m, bars5m, bars15m, soloSalidas = false,
         }
     }
 
-    const resultado  = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRows, lsRows);
+    const resultado  = evaluarSenal(velas, whaleRes.rows, p, oiRows, lsRows);
     const nuevaSenal = resultado.signal;
 
     // Filtro opcional: no apilar entradas mientras alguna sub-posición esté en pérdida.
@@ -2906,63 +2915,61 @@ app.post('/api/mi-cuenta/leverage', autenticar, async (req, res) => {
 });
 
 // ── Evaluación de señal en tiempo real ────────────────────────
-function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
+function evaluarSenal(velas, whalesArr, p, oiArr, lsArr) {
+    const { bars1m, bars5m, bars15m, bars1h, bars4h, bars1d } = velas;
     if (bars1m.length < 510) return { signal: null, reason: 'datos_insuficientes' };
 
     const c1m  = bars1m.map(b => parseFloat(b[4]));
+
+    // Resuelve el array de velas para cualquier temporalidad soportada por los filtros HTF
+    // (idéntico criterio que barsPorTf en backtest-core.js).
+    const barsPorTf_sn = (tf) => tf === '5m' ? bars5m : tf === '15m' ? bars15m
+        : tf === '1h' ? bars1h : tf === '4h' ? bars4h : bars1d;
 
     // Pullback EMAs configurables
     const pbEMAConfig = (Array.isArray(p.pullbackEMAs) && p.pullbackEMAs.length > 0)
         ? p.pullbackEMAs
         : [{ period:50,tf:'1m' },{ period:100,tf:'1m' },{ period:200,tf:'1m' },{ period:500,tf:'1m' }];
-    const pbSn1m = {}, pbSn5m = {}, pbSn15m = {};
+    const pbSn1m = {}, pbSnHTF = { '5m': {}, '15m': {}, '1h': {}, '4h': {}, '1d': {} };
     const c5m_sn  = bars5m.map(b => parseFloat(b[4]));
     const c15m_sn = bars15m.map(b => parseFloat(b[4]));
     for (const { period, tf } of pbEMAConfig) {
-        if (tf === '1m' && !pbSn1m[period]) {
-            pbSn1m[period] = calcEMA(c1m, period);
-        } else if (tf === '5m' && !pbSn5m[period]) {
-            const vals = calcEMA(c5m_sn, period);
-            pbSn5m[period] = {
-                ts:  bars5m.map(b => parseInt(b[6])).sort((a, b) => a - b),
-                map: new Map(bars5m.map((b, idx) => [parseInt(b[6]), vals[idx]]))
-            };
-        } else if (tf === '15m' && !pbSn15m[period]) {
-            const vals = calcEMA(c15m_sn, period);
-            pbSn15m[period] = {
-                ts:  bars15m.map(b => parseInt(b[6])).sort((a, b) => a - b),
-                map: new Map(bars15m.map((b, idx) => [parseInt(b[6]), vals[idx]]))
+        if (tf === '1m') {
+            if (!pbSn1m[period]) pbSn1m[period] = calcEMA(c1m, period);
+        } else if (!pbSnHTF[tf][period]) {
+            const barsTf = barsPorTf_sn(tf);
+            const vals = calcEMA(barsTf.map(b => parseFloat(b[4])), period);
+            pbSnHTF[tf][period] = {
+                ts:  barsTf.map(b => parseInt(b[6])).sort((a, b) => a - b),
+                map: new Map(barsTf.map((b, idx) => [parseInt(b[6]), vals[idx]]))
             };
         }
     }
 
     // RSI — configurable período, temporalidad y umbrales de entrada
     const rsiPeriod_sn   = p.rsiPeriod   || 14;
-    const rsiTf_sn       = p.rsiTf       || '15m';
+    const rsiTf_sn       = ['1m','5m','15m','1h','4h','1d'].includes(p.rsiTf) ? p.rsiTf : '15m';
     const rsiLongMin_sn  = p.rsiLongMin  ?? 60;
     const rsiShortMax_sn = p.rsiShortMax ?? 40;
     const useRsiFilter_sn = p.useRsiFilter !== false;   // default ON (compat. estrategias previas)
     let rsiSnByTs = null, rsiSnTs = null, rsiSnDirect = null;
     if (rsiTf_sn === '1m') {
         rsiSnDirect = calcRSI(c1m, rsiPeriod_sn);
-    } else if (rsiTf_sn === '5m') {
-        const arr = calcRSI(c5m_sn, rsiPeriod_sn);
-        rsiSnByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), arr[i]]));
-        rsiSnTs   = [...rsiSnByTs.keys()].sort((a, b) => a - b);
     } else {
-        const arr = calcRSI(c15m_sn, rsiPeriod_sn);
-        rsiSnByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), arr[i]]));
+        const barsRsi = barsPorTf_sn(rsiTf_sn);
+        const closesRsi = rsiTf_sn === '5m' ? c5m_sn : rsiTf_sn === '15m' ? c15m_sn : barsRsi.map(b => parseFloat(b[4]));
+        const arr = calcRSI(closesRsi, rsiPeriod_sn);
+        rsiSnByTs = new Map(barsRsi.map((b, i) => [parseInt(b[6]), arr[i]]));
         rsiSnTs   = [...rsiSnByTs.keys()].sort((a, b) => a - b);
     }
 
-    // ADX — temporalidad configurable (1m/5m/15m/1h), idéntico al backtest. La de 1h
-    // se deriva agregando las velas 1m del ciclo.
-    const adxTf_sn = ['1m', '5m', '15m', '1h'].includes(p.adxTf) ? p.adxTf : '15m';
+    // ADX — temporalidad configurable (1m/5m/15m/1h/4h/1d), idéntico al backtest.
+    const adxTf_sn = ['1m', '5m', '15m', '1h', '4h', '1d'].includes(p.adxTf) ? p.adxTf : '15m';
     let adxValue = null;
     if (adxTf_sn === '1m') {
         adxValue = calcADX(bars1m.map(b => parseFloat(b[2])), bars1m.map(b => parseFloat(b[3])), c1m)[bars1m.length - 1];
     } else {
-        const barsAdx = adxTf_sn === '5m' ? bars5m : adxTf_sn === '15m' ? bars15m : agregarVelas1m(bars1m, 3600000);
+        const barsAdx = barsPorTf_sn(adxTf_sn);
         const arr = calcADX(barsAdx.map(b => parseFloat(b[2])), barsAdx.map(b => parseFloat(b[3])), barsAdx.map(b => parseFloat(b[4])));
         const adxByTs_sn = new Map(barsAdx.map((b, idx) => [parseInt(b[6]), arr[idx]]));
         const adxTs_sn   = [...adxByTs_sn.keys()].sort((a, b) => a - b);
@@ -2971,7 +2978,7 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
 
     // Angulación de EMA — pendiente normalizada por ATR (idéntico al backtest)
     const useEmaAngFilter_sn = p.useEmaAngFilter === true;
-    const emaAngTf_sn        = p.emaAngTf        || '15m';
+    const emaAngTf_sn        = ['1m','5m','15m','1h','4h','1d'].includes(p.emaAngTf) ? p.emaAngTf : '15m';
     const emaAngLen_sn       = p.emaAngLen       || 200;
     const emaAngSlopeBars_sn = p.emaAngSlopeBars || 10;
     const emaAngAtr_sn       = p.emaAngAtr       || 14;
@@ -2982,27 +2989,27 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     if (useEmaAngFilter_sn) {
         if (emaAngTf_sn === '1m') {
             emaAngSnDirect = calcEMAangSlope(c1m, bars1m.map(b => parseFloat(b[2])), bars1m.map(b => parseFloat(b[3])), emaAngLen_sn, emaAngAtr_sn, emaAngSlopeBars_sn);
-        } else if (emaAngTf_sn === '5m') {
-            const arr = calcEMAangSlope(c5m_sn, bars5m.map(b => parseFloat(b[2])), bars5m.map(b => parseFloat(b[3])), emaAngLen_sn, emaAngAtr_sn, emaAngSlopeBars_sn);
-            emaAngSnByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), arr[i]]));
-            emaAngSnTs   = [...emaAngSnByTs.keys()].sort((a, b) => a - b);
         } else {
-            const arr = calcEMAangSlope(c15m_sn, bars15m.map(b => parseFloat(b[2])), bars15m.map(b => parseFloat(b[3])), emaAngLen_sn, emaAngAtr_sn, emaAngSlopeBars_sn);
-            emaAngSnByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), arr[i]]));
+            const barsAng = barsPorTf_sn(emaAngTf_sn);
+            const cAng = barsAng.map(b => parseFloat(b[4]));
+            const hAng = barsAng.map(b => parseFloat(b[2]));
+            const lAng = barsAng.map(b => parseFloat(b[3]));
+            const arr = calcEMAangSlope(cAng, hAng, lAng, emaAngLen_sn, emaAngAtr_sn, emaAngSlopeBars_sn);
+            emaAngSnByTs = new Map(barsAng.map((b, i) => [parseInt(b[6]), arr[i]]));
             emaAngSnTs   = [...emaAngSnByTs.keys()].sort((a, b) => a - b);
         }
     }
 
     // EMA de Tendencia — sesgo direccional (idéntico al backtest)
     const useEmaTrendFilter_sn = p.useEmaTrendFilter === true;
-    const emaTrendTf_sn  = p.emaTrendTf  || '1h';
+    const emaTrendTf_sn  = ['1m','5m','15m','1h','4h','1d'].includes(p.emaTrendTf) ? p.emaTrendTf : '1h';
     const emaTrendLen_sn = p.emaTrendLen || 21;
     let emaTrendSnDirect = null, emaTrendSnByTs = null, emaTrendSnTs = null;
     if (useEmaTrendFilter_sn) {
         if (emaTrendTf_sn === '1m') {
             emaTrendSnDirect = calcEMA(c1m, emaTrendLen_sn);
         } else {
-            const barsTrend_sn = emaTrendTf_sn === '5m' ? bars5m : emaTrendTf_sn === '15m' ? bars15m : agregarVelas1m(bars1m, 3600000);
+            const barsTrend_sn = barsPorTf_sn(emaTrendTf_sn);
             const arr = calcEMA(barsTrend_sn.map(b => parseFloat(b[4])), emaTrendLen_sn);
             emaTrendSnByTs = new Map(barsTrend_sn.map((b, i) => [parseInt(b[6]), arr[i]]));
             emaTrendSnTs   = [...emaTrendSnByTs.keys()].sort((a, b) => a - b);
@@ -3010,19 +3017,16 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     }
 
     // VWAP — configurable timeframe y sesión
-    const vwapTf_sn      = p.vwapTf      || '5m';
+    const vwapTf_sn      = ['1m','5m','15m','1h','4h','1d'].includes(p.vwapTf) ? p.vwapTf : '5m';
     const vwapSession_sn = p.vwapSession || 'daily';
     let vwapDirect_sn = null, vwapByTs_sn = null, tsVwap_sn = null;
     if (p.useVwapFilter) {
         if (vwapTf_sn === '1m') {
             vwapDirect_sn = calcVWAP(bars1m, vwapSession_sn);
-        } else if (vwapTf_sn === '5m') {
-            const vals = calcVWAP(bars5m, vwapSession_sn);
-            vwapByTs_sn = new Map(bars5m.map((b, idx) => [parseInt(b[6]), vals[idx]]));
-            tsVwap_sn   = [...vwapByTs_sn.keys()].sort((a, b) => a - b);
         } else {
-            const vals = calcVWAP(bars15m, vwapSession_sn);
-            vwapByTs_sn = new Map(bars15m.map((b, idx) => [parseInt(b[6]), vals[idx]]));
+            const barsVwap_sn = barsPorTf_sn(vwapTf_sn);
+            const vals = calcVWAP(barsVwap_sn, vwapSession_sn);
+            vwapByTs_sn = new Map(barsVwap_sn.map((b, idx) => [parseInt(b[6]), vals[idx]]));
             tsVwap_sn   = [...vwapByTs_sn.keys()].sort((a, b) => a - b);
         }
     }
@@ -3031,19 +3035,17 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const macdFast_sn   = p.macdFast   || 12;
     const macdSlow_sn   = p.macdSlow   || 26;
     const macdSignal_sn = p.macdSignal || 9;
-    const macdTf_sn     = p.macdTf     || '5m';
+    const macdTf_sn     = ['1m','5m','15m','1h','4h','1d'].includes(p.macdTf) ? p.macdTf : '5m';
     const useMacdFilter_sn = p.useMacdFilter !== false;  // default ON (compat. estrategias previas)
     let macdSnDirect = null, macdSnByTs = null, macdSnTs = null;
     if (macdTf_sn === '1m') {
         const { macd: mArr, signal: sArr } = calcMACDArr(c1m, macdFast_sn, macdSlow_sn, macdSignal_sn);
         macdSnDirect = mArr.map((m, idx) => ({ macd: m, sig: sArr[idx] }));
-    } else if (macdTf_sn === '5m') {
-        const { macd: mArr, signal: sArr } = calcMACDArr(c5m_sn, macdFast_sn, macdSlow_sn, macdSignal_sn);
-        macdSnByTs = new Map(bars5m.map((b, i) => [parseInt(b[6]), { macd: mArr[i], sig: sArr[i] }]));
-        macdSnTs   = [...macdSnByTs.keys()].sort((a, b) => a - b);
     } else {
-        const { macd: mArr, signal: sArr } = calcMACDArr(c15m_sn, macdFast_sn, macdSlow_sn, macdSignal_sn);
-        macdSnByTs = new Map(bars15m.map((b, i) => [parseInt(b[6]), { macd: mArr[i], sig: sArr[i] }]));
+        const barsMacd = barsPorTf_sn(macdTf_sn);
+        const closesMacd = macdTf_sn === '5m' ? c5m_sn : macdTf_sn === '15m' ? c15m_sn : barsMacd.map(b => parseFloat(b[4]));
+        const { macd: mArr, signal: sArr } = calcMACDArr(closesMacd, macdFast_sn, macdSlow_sn, macdSignal_sn);
+        macdSnByTs = new Map(barsMacd.map((b, i) => [parseInt(b[6]), { macd: mArr[i], sig: sArr[i] }]));
         macdSnTs   = [...macdSnByTs.keys()].sort((a, b) => a - b);
     }
 
@@ -3054,10 +3056,9 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
     const close = parseFloat(bar[4]);
 
     const alignVals = pbEMAConfig.map(({ period, tf }) => {
-        if (tf === '1m')  return pbSn1m[period]?.[i] ?? null;
-        if (tf === '5m')  return pbSn5m[period]  ? lookupHTF(pbSn5m[period].ts,  pbSn5m[period].map,  tsClose) : null;
-        if (tf === '15m') return pbSn15m[period] ? lookupHTF(pbSn15m[period].ts, pbSn15m[period].map, tsClose) : null;
-        return null;
+        if (tf === '1m') return pbSn1m[period]?.[i] ?? null;
+        const idx = pbSnHTF[tf]?.[period];
+        return idx ? lookupHTF(idx.ts, idx.map, tsClose) : null;
     });
     if (alignVals.some(v => !v)) return { signal: null, reason: 'emas_no_calentadas', indicadores: {} };
     // El alineamiento se evalúa por período (de la EMA más chica a la más grande),
@@ -3243,9 +3244,8 @@ function evaluarSenal(bars1m, bars5m, bars15m, whalesArr, p, oiArr, lsArr) {
                 ? p.stopEMAs : [{ period:200, tf:'1m' }, { period:500, tf:'1m' }];
             const stopVals_sl = stopCfgs_sl.map(({ period, tf }) => {
                 if (tf === '1m') return calcEMA(c1m, period)[i];
-                const c = tf === '5m' ? c5m_sn : c15m_sn;
-                const bars = tf === '5m' ? bars5m : bars15m;
-                const vals = calcEMA(c, period);
+                const bars = barsPorTf_sn(tf);
+                const vals = calcEMA(bars.map(b => parseFloat(b[4])), period);
                 const map = new Map(bars.map((b, idx) => [parseInt(b[6]), vals[idx]]));
                 const tsArr = bars.map(b => parseInt(b[6])).sort((a,b) => a-b);
                 return lookupHTF(tsArr, map, tsClose);
@@ -3294,14 +3294,18 @@ async function tickWsppNotificaciones() {
             try { ex = getExchange(nombre); }
             catch (e) { console.warn(`[WSPP] Exchange de datos desconocido "${nombre}":`, e.message); continue; }
 
-            const [bars1m, bars5m, bars15m] = await Promise.all([
+            const [bars1m, bars5m, bars15m, bars1h, bars4h, bars1d] = await Promise.all([
                 fetchKlinesBatch('1m', 6000, ex),
                 fetchKlinesBatch('5m', 800, ex),
                 fetchKlinesBatch('15m', 800, ex),
+                fetchKlinesBatch('1h', 500, ex),
+                fetchKlinesBatch('4h', 500, ex),
+                fetchKlinesBatch('1d', 500, ex),
             ]);
             // Igual que en ejecutarAutoTrading: sin esto, los filtros de delta/CVD en BingX
             // evaluarían NaN y las notificaciones nunca dispararían.
             await completarDeltaFaltante(bars1m, ex);
+            const velas = { bars1m, bars5m, bars15m, bars1h, bars4h, bars1d };
 
             for (const cfg of grupo) {
                 try {
@@ -3326,7 +3330,7 @@ async function tickWsppNotificaciones() {
                             : Promise.resolve({ rows: [] }),
                     ]);
 
-                    const resultado = evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows, lsRes.rows);
+                    const resultado = evaluarSenal(velas, whaleRes.rows, p, oiRes.rows, lsRes.rows);
                     const signal = resultado.signal; // 'long' | 'short' | null
 
                     if (!signal) {
@@ -3398,13 +3402,17 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
         if (stratRes.rows.length === 0) return res.status(404).json({ error: 'Estrategia no encontrada' });
         const p = stratRes.rows[0].params;
 
-        const [bars1m, bars5m, bars15m, whaleRes, oiRes, lsRes] = await Promise.all([
+        const [bars1m, bars5m, bars15m, bars1h, bars4h, bars1d, whaleRes, oiRes, lsRes] = await Promise.all([
             // Suficientes velas para que EMA/MACD/RSI/ADX (incluso de período alto en HTF)
             // converjan igual que en el backtest y no diverja la señal en vivo
-            // (6000 de 1m = ~100 velas 1h derivadas para el ADX 1h).
+            // (6000 de 1m = ~100 velas 1h derivadas para el ADX 1h). 1h/4h/1d se piden
+            // nativas del exchange para tener historial real de warmup.
             fetchKlinesBatch('1m',  6000, exVista),
             fetchKlinesBatch('5m',  800, exVista),
             fetchKlinesBatch('15m', 800, exVista),
+            fetchKlinesBatch('1h',  500, exVista),
+            fetchKlinesBatch('4h',  500, exVista),
+            fetchKlinesBatch('1d',  500, exVista),
             pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
                  FROM ballenas WHERE fecha >= NOW() - make_interval(mins => $1) AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
@@ -3424,7 +3432,7 @@ app.get('/api/estrategia/signal', autenticar, async (req, res) => {
                 : Promise.resolve({ rows: [] }),
         ]);
 
-        res.json(evaluarSenal(bars1m, bars5m, bars15m, whaleRes.rows, p, oiRes.rows, lsRes.rows));
+        res.json(evaluarSenal({ bars1m, bars5m, bars15m, bars1h, bars4h, bars1d }, whaleRes.rows, p, oiRes.rows, lsRes.rows));
     } catch (e) {
         console.error('Error signal:', e);
         res.status(500).json({ error: e.message });
