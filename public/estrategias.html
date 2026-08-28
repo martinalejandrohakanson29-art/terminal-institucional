@@ -445,6 +445,25 @@
                 </div>
                 <div style="font-size:9px;color:#64748b;line-height:1.3;margin-top:4px;">Cuando el precio avanza el % de disparo a favor, el stop se mueve a entrada ± offset (rige desde la vela siguiente). Offset ≈ 2×(comisión+slippage) para no perder los costos del round-trip: 0.12% con los defaults. Debe ser menor que el disparo.</div>
             </div>
+            <div class="form-row">
+                <label>Protección escalonada</label>
+                <input type="checkbox" id="p-staged" class="form-check" onchange="toggleStaged()">
+            </div>
+            <div id="staged-config" style="display:none;">
+                <div style="font-size:9px;color:#64748b;line-height:1.3;margin:2px 0 6px;">Al llegar el precio al % de disparo a favor, mueve el stop a entrada ± % indicado. Ratchea al cierre de la vela y rige desde la siguiente. Solo con stop tipo Porcentaje.</div>
+                <div class="form-row"><label><input type="checkbox" id="p-staged-1-on" class="form-check" checked style="margin-right:5px;">Nivel 1 · disparo %</label>
+                    <input type="number" id="p-staged-1-trig" class="form-input" value="1.00" step="0.05" min="0.05" style="width:70px;"></div>
+                <div class="form-row"><label>Nivel 1 · mover SL a %</label>
+                    <input type="number" id="p-staged-1-stop" class="form-input" value="0.50" step="0.05" style="width:70px;"></div>
+                <div class="form-row"><label><input type="checkbox" id="p-staged-2-on" class="form-check" checked style="margin-right:5px;">Nivel 2 · disparo %</label>
+                    <input type="number" id="p-staged-2-trig" class="form-input" value="1.50" step="0.05" min="0.05" style="width:70px;"></div>
+                <div class="form-row"><label>Nivel 2 · mover SL a %</label>
+                    <input type="number" id="p-staged-2-stop" class="form-input" value="1.00" step="0.05" style="width:70px;"></div>
+                <div class="form-row"><label><input type="checkbox" id="p-staged-3-on" class="form-check" checked style="margin-right:5px;">Nivel 3 · disparo %</label>
+                    <input type="number" id="p-staged-3-trig" class="form-input" value="2.00" step="0.05" min="0.05" style="width:70px;"></div>
+                <div class="form-row"><label>Nivel 3 · mover SL a %</label>
+                    <input type="number" id="p-staged-3-stop" class="form-input" value="1.50" step="0.05" style="width:70px;"></div>
+            </div>
         </div>
 
         <div class="form-section">
@@ -460,6 +479,20 @@
             <div class="form-row">
                 <label>Operar fin de semana</label>
                 <input type="checkbox" id="p-fds" class="form-check">
+            </div>
+            <div class="form-row">
+                <label>Filtrar por día</label>
+                <input type="checkbox" id="p-day-filter" class="form-check" onchange="toggleDayFilter()">
+            </div>
+            <div id="day-filter-config" style="display:none;font-size:11px;color:#475569;margin:2px 0 4px;">
+                <label style="margin-right:8px;"><input type="checkbox" id="p-day-1" class="form-check" checked> Lun</label>
+                <label style="margin-right:8px;"><input type="checkbox" id="p-day-2" class="form-check" checked> Mar</label>
+                <label style="margin-right:8px;"><input type="checkbox" id="p-day-3" class="form-check" checked> Mié</label>
+                <label style="margin-right:8px;"><input type="checkbox" id="p-day-4" class="form-check" checked> Jue</label>
+                <label style="margin-right:8px;"><input type="checkbox" id="p-day-5" class="form-check" checked> Vie</label>
+                <label style="margin-right:8px;"><input type="checkbox" id="p-day-6" class="form-check"> Sáb</label>
+                <label style="margin-right:8px;"><input type="checkbox" id="p-day-0" class="form-check"> Dom</label>
+                <div style="font-size:9px;color:#94a3b8;margin-top:3px;">Con el filtro activo se opera solo los días marcados (ignora "operar fin de semana").</div>
             </div>
             <div style="font-size:10px;color:#94a3b8;margin-top:2px;">Todo en horario Argentina (UTC-3, sin DST)</div>
         </div>
@@ -576,6 +609,50 @@
                     <input type="checkbox" id="p-ema-align" class="form-check" checked>
                 </div>
                 <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">EMA 50 &gt; 100 &gt; 200 &gt; 500 para longs (inverso para shorts)</div>
+            </div>
+        </div>
+        <div class="form-section collapsible" data-ctrl="p-twemas">
+            <h3>EMAs multi-timeframe (TW)</h3>
+            <div class="section-body">
+                <div class="form-row">
+                    <label>Activar filtro</label>
+                    <input type="checkbox" id="p-twemas" class="form-check">
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin:2px 0 4px;">3 EMAs del gráfico (alineación / cierre vs EMA lenta / pullback) + alineación en 15m y 1h. Replica la estrategia "TW 5 15 1h" de TradingView.</div>
+                <div class="form-row">
+                    <label>Temporalidad gráfico</label>
+                    <select id="p-tw-chart-tf" class="form-select">
+                        <option value="1m">1m</option>
+                        <option value="5m" selected>5m</option>
+                        <option value="15m">15m</option>
+                        <option value="1h">1h</option>
+                    </select>
+                </div>
+                <div class="form-row"><label>EMAs gráfico (r/m/l)</label>
+                    <span style="display:flex;gap:4px;">
+                        <input type="number" id="p-tw-chart-fast" class="form-input" value="21" min="1" style="width:52px;">
+                        <input type="number" id="p-tw-chart-mid"  class="form-input" value="35" min="1" style="width:52px;">
+                        <input type="number" id="p-tw-chart-slow" class="form-input" value="50" min="1" style="width:52px;">
+                    </span>
+                </div>
+                <div class="form-row"><label><input type="checkbox" id="p-tw-align" class="form-check" checked style="margin-right:5px;">Exigir alineación (r&gt;m&gt;l)</label></div>
+                <div class="form-row"><label><input type="checkbox" id="p-tw-slowclose" class="form-check" style="margin-right:5px;">Cierre respetando EMA lenta</label></div>
+                <div class="form-row"><label><input type="checkbox" id="p-tw-pullback" class="form-check" style="margin-right:5px;">Pullback (low/high) a EMA %</label>
+                    <input type="number" id="p-tw-pullback-perc" class="form-input" value="0.40" step="0.05" min="0.01" style="width:64px;"></div>
+                <div class="form-row" style="margin-top:6px;"><label><input type="checkbox" id="p-tw-use15" class="form-check" style="margin-right:5px;">Alineación 15m (r/m/l)</label>
+                    <span style="display:flex;gap:4px;">
+                        <input type="number" id="p-tw-15-fast" class="form-input" value="21" min="1" style="width:52px;">
+                        <input type="number" id="p-tw-15-mid"  class="form-input" value="35" min="1" style="width:52px;">
+                        <input type="number" id="p-tw-15-slow" class="form-input" value="50" min="1" style="width:52px;">
+                    </span>
+                </div>
+                <div class="form-row"><label><input type="checkbox" id="p-tw-use1h" class="form-check" style="margin-right:5px;">Alineación 1h (r/m/l)</label>
+                    <span style="display:flex;gap:4px;">
+                        <input type="number" id="p-tw-1h-fast" class="form-input" value="21" min="1" style="width:52px;">
+                        <input type="number" id="p-tw-1h-mid"  class="form-input" value="35" min="1" style="width:52px;">
+                        <input type="number" id="p-tw-1h-slow" class="form-input" value="50" min="1" style="width:52px;">
+                    </span>
+                </div>
             </div>
         </div>
         <div class="form-section collapsible" data-ctrl="p-emaang">
@@ -817,11 +894,39 @@
                     </select>
                 </div>
                 <div class="form-row">
-                    <label>Umbral ADX</label>
-                    <input type="number" id="p-adx-threshold" class="form-input" value="25" min="1" max="100">
+                    <label>Modo</label>
+                    <select id="p-adx-mode" class="form-select" onchange="toggleAdxMode()">
+                        <option value="adx" selected>ADX ≥ umbral (fuerza)</option>
+                        <option value="dmi">DI+ / DI- (como ta.dmi de TradingView)</option>
+                    </select>
+                </div>
+                <div id="adx-mode-adx">
+                    <div class="form-row">
+                        <label>Umbral ADX</label>
+                        <input type="number" id="p-adx-threshold" class="form-input" value="25" min="1" max="100">
+                    </div>
+                </div>
+                <div id="adx-mode-dmi" style="display:none;">
+                    <div class="form-row">
+                        <label>Período DMI</label>
+                        <input type="number" id="p-dmi-length" class="form-input" value="14" min="1" max="100">
+                    </div>
+                    <div class="form-row">
+                        <label>Suavizado ADX</label>
+                        <input type="number" id="p-adx-smoothing" class="form-input" value="14" min="1" max="100">
+                    </div>
+                    <div class="form-row">
+                        <label>DI+ mínimo LONG</label>
+                        <input type="number" id="p-di-plus-min" class="form-input" value="25" step="0.5" min="0" max="100">
+                    </div>
+                    <div class="form-row">
+                        <label>DI- mínimo SHORT</label>
+                        <input type="number" id="p-di-minus-min" class="form-input" value="25" step="0.5" min="0" max="100">
+                    </div>
                 </div>
                 <div style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.4;">
-                    ADX ≥ umbral = tendencia fuerte<br>ADX &lt; 25: rango / tendencia débil<br>
+                    ADX ≥ umbral = tendencia fuerte (no direccional).<br>
+                    Modo DI+/DI-: LONG exige DI+ ≥ nivel, SHORT exige DI- ≥ nivel (direccional).<br>
                     ⚠ Con 1h el ADX necesita ~29 h de historial para calentar: en backtests cortos el primer tramo no genera trades.
                 </div>
             </div>
@@ -988,6 +1093,22 @@
     function toggleBreakeven() {
         const on = document.getElementById('p-breakeven').checked;
         document.getElementById('breakeven-config').style.display = on ? 'block' : 'none';
+    }
+
+    function toggleStaged() {
+        document.getElementById('staged-config').style.display =
+            document.getElementById('p-staged').checked ? 'block' : 'none';
+    }
+
+    function toggleDayFilter() {
+        document.getElementById('day-filter-config').style.display =
+            document.getElementById('p-day-filter').checked ? 'block' : 'none';
+    }
+
+    function toggleAdxMode() {
+        const dmi = document.getElementById('p-adx-mode').value === 'dmi';
+        document.getElementById('adx-mode-adx').style.display = dmi ? 'none' : 'block';
+        document.getElementById('adx-mode-dmi').style.display = dmi ? 'block' : 'none';
     }
 
     function toggleStopEmaCount() {
@@ -1167,6 +1288,36 @@
             useADXFilter:        document.getElementById('p-adx').checked,
             adxTf:               document.getElementById('p-adx-tf').value,
             adxThreshold:        numOrDefault('p-adx-threshold', 25),
+            adxMode:             document.getElementById('p-adx-mode').value,
+            dmiLength:           parseInt(document.getElementById('p-dmi-length').value) || 14,
+            adxSmoothing:        parseInt(document.getElementById('p-adx-smoothing').value) || 14,
+            diPlusMin:           numOrDefault('p-di-plus-min', 25),
+            diMinusMin:          numOrDefault('p-di-minus-min', 25),
+            useTwEmasFilter:     document.getElementById('p-twemas').checked,
+            twChartTf:           document.getElementById('p-tw-chart-tf').value,
+            twChartFast:         parseInt(document.getElementById('p-tw-chart-fast').value) || 21,
+            twChartMid:          parseInt(document.getElementById('p-tw-chart-mid').value)  || 35,
+            twChartSlow:         parseInt(document.getElementById('p-tw-chart-slow').value) || 50,
+            twUseAlign:          document.getElementById('p-tw-align').checked,
+            twUseSlowClose:      document.getElementById('p-tw-slowclose').checked,
+            twUsePullback:       document.getElementById('p-tw-pullback').checked,
+            twPullbackPerc:      numOrDefault('p-tw-pullback-perc', 0.40),
+            twUse15:             document.getElementById('p-tw-use15').checked,
+            tw15Fast:            parseInt(document.getElementById('p-tw-15-fast').value) || 21,
+            tw15Mid:             parseInt(document.getElementById('p-tw-15-mid').value)  || 35,
+            tw15Slow:            parseInt(document.getElementById('p-tw-15-slow').value) || 50,
+            twUse1h:             document.getElementById('p-tw-use1h').checked,
+            tw1hFast:            parseInt(document.getElementById('p-tw-1h-fast').value) || 21,
+            tw1hMid:             parseInt(document.getElementById('p-tw-1h-mid').value)  || 35,
+            tw1hSlow:            parseInt(document.getElementById('p-tw-1h-slow').value) || 50,
+            useStagedProtection: document.getElementById('p-staged').checked,
+            stagedLevels: [1, 2, 3].map(k => ({
+                on:   document.getElementById(`p-staged-${k}-on`).checked,
+                trig: numOrDefault(`p-staged-${k}-trig`, k === 1 ? 1.0 : k === 2 ? 1.5 : 2.0),
+                stop: numOrDefault(`p-staged-${k}-stop`, k === 1 ? 0.5 : k === 2 ? 1.0 : 1.5),
+            })),
+            useDayFilter:        document.getElementById('p-day-filter').checked,
+            tradeDays:           [0, 1, 2, 3, 4, 5, 6].map(d => document.getElementById(`p-day-${d}`).checked),
             useVwapFilter:       document.getElementById('p-vwap').checked,
             vwapTf:              document.getElementById('p-vwap-tf').value,
             vwapSession:         document.getElementById('p-vwap-session').value,
@@ -1232,8 +1383,8 @@
     let filtroTipo  = 'Todos';
     let filtroRazon = 'Todos';
 
-    const RAZON_CLASS = { TP: 'active-tp', SL: 'active-sl', BE: 'active-be', EMA: 'active-ema', Tiempo: 'active-time', LIQ: 'active-liq', Fin: 'active-time' };
-    const RAZON_BADGE = { TP: 'badge-tp',  SL: 'badge-sl',  BE: 'badge-be',  EMA: 'badge-ema', Tiempo: 'badge-time',  LIQ: 'badge-liq', Fin: 'badge-time' };
+    const RAZON_CLASS = { TP: 'active-tp', SL: 'active-sl', PROT: 'active-be', BE: 'active-be', EMA: 'active-ema', Tiempo: 'active-time', LIQ: 'active-liq', Fin: 'active-time' };
+    const RAZON_BADGE = { TP: 'badge-tp',  SL: 'badge-sl',  PROT: 'badge-be', BE: 'badge-be',  EMA: 'badge-ema', Tiempo: 'badge-time',  LIQ: 'badge-liq', Fin: 'badge-time' };
 
     function setFiltroTipo(v) {
         filtroTipo = v;
@@ -1380,7 +1531,23 @@
             { label: 'Breakeven',     activo: params.useBreakeven === true, desc: `disparo ${params.breakevenTrigger ?? 0.3}% → entrada ± ${params.breakevenOffset ?? 0.12}%` },
             { label: 'Delta Vol.',    activo: params.useDeltaFilter,      desc: `${params.deltaVelas} velas` },
             { label: 'Ballenas',      activo: params.useWhaleFilter,      desc: `${params.whaleWindow}m / ≥${params.whaleMinBTC}BTC` },
-            { label: `ADX ${params.adxTf||'15m'}`, activo: params.useADXFilter, desc: `≥${params.adxThreshold}` },
+            { label: `${params.adxMode==='dmi'?'DI+/DI-':'ADX'} ${params.adxTf||'15m'}`, activo: params.useADXFilter,
+              desc: params.adxMode==='dmi'
+                        ? `DI+ ≥${params.diPlusMin??25} L / DI- ≥${params.diMinusMin??25} S · ${params.dmiLength??14}/${params.adxSmoothing??14}`
+                        : `≥${params.adxThreshold}` },
+            { label: `EMAs TW ${params.twChartTf||'5m'}`, activo: params.useTwEmasFilter === true,
+              desc: [
+                  `${params.twChartFast||21}/${params.twChartMid||35}/${params.twChartSlow||50}`,
+                  params.twUseAlign !== false ? 'alin.' : '',
+                  params.twUseSlowClose ? 'EMA lenta' : '',
+                  params.twUsePullback ? `pb≤${params.twPullbackPerc??0.40}%` : '',
+                  params.twUse15 ? '15m' : '',
+                  params.twUse1h ? '1h' : '',
+              ].filter(Boolean).join(' · ') },
+            { label: 'Prot. escalonada', activo: params.useStagedProtection === true,
+              desc: (params.stagedLevels||[]).filter(l=>l.on).map(l=>`${l.trig}→${l.stop}`).join(' / ') },
+            { label: 'Filtro días', activo: params.useDayFilter === true,
+              desc: ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'].filter((_,d)=>(params.tradeDays||[])[d]).join(' ') },
             { label: `VWAP ${params.vwapTf||'5m'}`, activo: params.useVwapFilter,
               desc: [
                   params.vwapSession === 'weekly' ? 'Semanal' : params.vwapSession === 'monthly' ? 'Mensual' : 'Diaria',
@@ -1682,6 +1849,44 @@
         document.getElementById('p-adx').checked                 = !!p.useADXFilter;
         document.getElementById('p-adx-tf').value                = p.adxTf || '15m';
         document.getElementById('p-adx-threshold').value         = p.adxThreshold ?? 25;
+        document.getElementById('p-adx-mode').value              = p.adxMode === 'dmi' ? 'dmi' : 'adx';
+        document.getElementById('p-dmi-length').value            = p.dmiLength ?? 14;
+        document.getElementById('p-adx-smoothing').value         = p.adxSmoothing ?? 14;
+        document.getElementById('p-di-plus-min').value           = p.diPlusMin ?? 25;
+        document.getElementById('p-di-minus-min').value          = p.diMinusMin ?? 25;
+        toggleAdxMode();
+        document.getElementById('p-twemas').checked              = !!p.useTwEmasFilter;
+        document.getElementById('p-tw-chart-tf').value           = p.twChartTf || '5m';
+        document.getElementById('p-tw-chart-fast').value         = p.twChartFast ?? 21;
+        document.getElementById('p-tw-chart-mid').value          = p.twChartMid ?? 35;
+        document.getElementById('p-tw-chart-slow').value         = p.twChartSlow ?? 50;
+        document.getElementById('p-tw-align').checked            = p.twUseAlign !== false;
+        document.getElementById('p-tw-slowclose').checked        = !!p.twUseSlowClose;
+        document.getElementById('p-tw-pullback').checked         = !!p.twUsePullback;
+        document.getElementById('p-tw-pullback-perc').value      = p.twPullbackPerc ?? 0.40;
+        document.getElementById('p-tw-use15').checked            = !!p.twUse15;
+        document.getElementById('p-tw-15-fast').value            = p.tw15Fast ?? 21;
+        document.getElementById('p-tw-15-mid').value             = p.tw15Mid ?? 35;
+        document.getElementById('p-tw-15-slow').value            = p.tw15Slow ?? 50;
+        document.getElementById('p-tw-use1h').checked            = !!p.twUse1h;
+        document.getElementById('p-tw-1h-fast').value            = p.tw1hFast ?? 21;
+        document.getElementById('p-tw-1h-mid').value             = p.tw1hMid ?? 35;
+        document.getElementById('p-tw-1h-slow').value            = p.tw1hSlow ?? 50;
+        document.getElementById('p-staged').checked              = !!p.useStagedProtection;
+        (Array.isArray(p.stagedLevels) ? p.stagedLevels : []).forEach((lv, idx) => {
+            const k = idx + 1;
+            if (!document.getElementById(`p-staged-${k}-on`)) return;
+            document.getElementById(`p-staged-${k}-on`).checked  = lv.on !== false;
+            document.getElementById(`p-staged-${k}-trig`).value  = lv.trig ?? [1.0, 1.5, 2.0][idx];
+            document.getElementById(`p-staged-${k}-stop`).value  = lv.stop ?? [0.5, 1.0, 1.5][idx];
+        });
+        toggleStaged();
+        document.getElementById('p-day-filter').checked          = !!p.useDayFilter;
+        [0, 1, 2, 3, 4, 5, 6].forEach(d => {
+            const def = (d >= 1 && d <= 5);
+            document.getElementById(`p-day-${d}`).checked = Array.isArray(p.tradeDays) ? !!p.tradeDays[d] : def;
+        });
+        toggleDayFilter();
         document.getElementById('p-vwap').checked                = !!p.useVwapFilter;
         document.getElementById('p-vwap-tf').value               = p.vwapTf       || '5m';
         document.getElementById('p-vwap-session').value          = p.vwapSession  || 'daily';
@@ -1823,6 +2028,7 @@
         { key:'macd',      ctrl:'p-macd',      flag:'useMacdFilter',      label:'MACD',                      desc:'Cruce MACD vs señal como dirección',                kw:'macd cruce convergencia divergencia señal' },
         { key:'pullback',  ctrl:'p-pullback',  flag:'usePullbackFilter',  label:'Pullback a EMAs',           desc:'Entrar solo cerca de una EMA (retroceso)',          kw:'pullback retroceso ema medias cercania distancia' },
         { key:'ema-align', ctrl:'p-ema-align', flag:'useEmaAlignment',    label:'Alineamiento EMAs',         desc:'EMA 50>100>200>500 (inverso en shorts)',            kw:'alineamiento ema orden tendencia medias apiladas' },
+        { key:'twemas',    ctrl:'p-twemas',    flag:'useTwEmasFilter',    label:'EMAs multi-timeframe (TW)', desc:'3 EMAs gráfico + 15m + 1h (estrategia TW de TradingView)', kw:'tw tradingview ema multi timeframe mtf 15m 1h alineacion pullback cierre lenta grafico' },
         { key:'emaang',    ctrl:'p-emaang',    flag:'useEmaAngFilter',    label:'Angulación EMA',            desc:'Pendiente mínima de la EMA (fuerza de tendencia)',  kw:'angulacion pendiente slope ema inclinacion angulo' },
         { key:'ema-trend', ctrl:'p-ema-trend', flag:'useEmaTrendFilter',  label:'EMA de Tendencia',          desc:'Precio arriba de la EMA → solo longs (y viceversa)',kw:'ema tendencia sesgo direccion bias trend' },
         { key:'oi',        ctrl:'p-oi',        flag:'useOIFilter',        label:'Open Interest',             desc:'Entra solo si el OI sube (dinero nuevo)',           kw:'open interest oi interes abierto futuros dinero nuevo' },
