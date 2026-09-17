@@ -2592,8 +2592,9 @@ async function actualizarConfigAutotrading(req, res) {
             return res.status(400).json({ error: 'Seleccioná una estrategia para encender el bot' });
         }
         if (estrategia_nombre) {
-            const s = await pool.query('SELECT 1 FROM estrategias_guardadas WHERE nombre=$1 AND usuario_id=$2', [estrategia_nombre, req.usuario.id]);
+            const s = await pool.query('SELECT params FROM estrategias_guardadas WHERE nombre=$1 AND usuario_id=$2', [estrategia_nombre, req.usuario.id]);
             if (!s.rows.length) return res.status(400).json({ error: 'Estrategia no encontrada' });
+            if (s.rows[0].params.strategyType === 'tw_mtf') return res.status(400).json({ error: 'TW MTF está disponible para análisis en /estrategias; todavía no admite ejecución automática.' });
         }
         // Exchange de datos: debe ser uno soportado. Se guarda NULL cuando coincide con el de
         // ejecución, para que la cuenta siga el default si algún día cambia de exchange.
@@ -2916,6 +2917,7 @@ app.post('/api/mi-cuenta/leverage', autenticar, async (req, res) => {
 
 // ── Evaluación de señal en tiempo real ────────────────────────
 function evaluarSenal(velas, whalesArr, p, oiArr, lsArr) {
+    if (p.strategyType === 'tw_mtf') return { signal: null, reason: 'TW MTF disponible solo para backtest', indicadores: {} };
     const { bars1m, bars5m, bars15m, bars1h, bars4h, bars1d } = velas;
     if (bars1m.length < 510) return { signal: null, reason: 'datos_insuficientes' };
 
@@ -3647,7 +3649,12 @@ app.post('/api/backtest', autenticar, async (req, res) => {
             return res.status(400).json({ error: 'Breakeven: el offset debe ser menor que el % de disparo.' });
         }
         const days = Math.min(Math.max(parseInt(req.body.lookbackDays) || 7, 1), 365);
-        const periodStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        const evaluationEnd = Math.floor(Date.now() / 60000) * 60000;
+        const periodStart = new Date(evaluationEnd - days * 24 * 60 * 60 * 1000);
+        const isTW = p.strategyType === 'tw_mtf';
+        const warmupDays = isTW ? Math.min(60, Math.ceil(require('./lib/tw-backtest').warmupMs(p) / 86400000) + 1) : 0;
+        const dataDays = days + warmupDays;
+        if (isTW) { p._tradeStartTs = periodStart.getTime(); p._endTs = evaluationEnd; }
         // Exchange elegido en /estrategias (default: exchange activo si no viene o es inválido).
         const exVista = exchangeConsultado(req);
         // Fuente de velas: 'bd' (cache local, default) o el exchange elegido (descarga en vivo).
@@ -3655,15 +3662,15 @@ app.post('/api/backtest', autenticar, async (req, res) => {
         const fuente = req.body.fuenteDatos === exVista.name ? exVista.name : 'bd';
         const cargarKlines = fuente === exVista.name
             ? (tf, n) => fetchKlinesBatch(tf, n, exVista)
-            : (tf)    => fetchKlinesDesdeBD(tf, days, exVista);
+            : (tf)    => fetchKlinesDesdeBD(tf, dataDays, exVista);
         // Serie de OI del período (solo si el filtro está activo). Traemos un poco antes del inicio
         // para que el lookback de las primeras velas tenga muestra previa.
         const oiDesdeSeg = Math.floor((periodStart.getTime() - (p.oiLookbackMin || 30) * 60000) / 1000);
         const [bars1m, bars5m, bars15m, whaleRes, oiRes, lsRes] = await Promise.all([
-            cargarKlines('1m',  days * 1440).then(b => fuente === 'bd' ? b : completarDeltaFaltante(b, exVista)),
-            cargarKlines('5m',  days * 288),
-            cargarKlines('15m', days * 96),
-            pool.query(
+            cargarKlines('1m',  dataDays * 1440).then(b => fuente === 'bd' || isTW ? b : completarDeltaFaltante(b, exVista)),
+            isTW ? Promise.resolve([]) : cargarKlines('5m', days * 288),
+            isTW ? Promise.resolve([]) : cargarKlines('15m', days * 96),
+            isTW ? Promise.resolve({ rows: [] }) : pool.query(
                 `SELECT EXTRACT(EPOCH FROM fecha) as ts_sec, cantidad, es_venta
                  FROM ballenas WHERE fecha >= $1 AND cantidad >= $2 AND exchange = $3 ORDER BY fecha ASC`,
                 [periodStart.toISOString(), p.whaleMinBTC, exVista.name]
@@ -3686,7 +3693,7 @@ app.post('/api/backtest', autenticar, async (req, res) => {
         resultado.barsUsadas = { m1: bars1m.length, m5: bars5m.length, m15: bars15m.length };
 
         // ── Advertencias de calidad de datos que afectan la validez del backtest ──
-        const warnings = [];
+        const warnings = resultado.warnings || [];
         if (p.useWhaleFilter) {
             const covRes = await pool.query(
                 'SELECT MIN(fecha) AS primera FROM ballenas WHERE cantidad >= $1 AND exchange = $2',

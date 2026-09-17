@@ -49,7 +49,7 @@
         const h = candles(pivotRows, hms, now), p = candles(patternRows, pms, now);
         const zones = { support: [], resistance: [] }, signals = [], active = { top: null, bottom: null };
         const previous = { high: null, low: null };
-        const emit = (time, price, side, text, early = false) => signals.push({ time, price, side, text, early });
+        const emit = (time, price, side, text, early = false, detail = {}) => signals.push({ time, price, side, text, early, ...detail });
         function pivot(i, high) {
             const k = i - c.pivotRight, key = high ? 'high' : 'low';
             if (k < c.pivotLeft) return null;
@@ -102,7 +102,8 @@
                 const invalid = top ? b.close > a.level * (1 + c.doubleInvalidationPerc / 100) : b.close < a.level * (1 - c.doubleInvalidationPerc / 100);
                 if (invalid) { active[kind] = null; continue; }
                 if (top ? b.close < a.neckline : b.close > a.neckline) {
-                    emit(time, b.close, a.side, top ? 'Doble techo confirmado' : 'Doble piso confirmado');
+                    emit(time, b.close, a.side, top ? 'Doble techo confirmado' : 'Doble piso confirmado', false,
+                        { category: 'double', stopReference: a.level, neckline: a.neckline, patternStart: a.start });
                     active[kind] = null;
                 }
             }
@@ -137,7 +138,10 @@
             }
             for (const [labels, z, side, price] of [[bull, s, 'bull', b.low], [bear, r, 'bear', b.high]]) {
                 if (labels.length && (!c.requirePatternNearZone || z) && (!c.oneSignalPerVisit || !z || !z.used)) {
-                    emit(time, price, side, labels.join(' + '));
+                    emit(time, price, side, labels.join(' + '), false, {
+                        category: 'rejection', stopReference: side === 'bull' ? Math.min(b.low, z ? z.lower : b.low) : Math.max(b.high, z ? z.upper : b.high),
+                        zone: z ? { price: z.price, lower: z.lower, upper: z.upper, start: z.start, side: z.side } : null
+                    });
                     if (z) z.used = true;
                 }
             }

@@ -228,6 +228,8 @@
         }
         .cond-quitar:hover { color: #ef5350; }
     </style>
+    <script src="/tw-pivots.js"></script>
+    <script src="/tw-strategy-ui.js"></script>
 </head>
 <body>
 
@@ -263,6 +265,25 @@
             <div id="strat-msg" class="strat-msg"></div>
         </div>
 
+        <div class="form-section">
+            <h3>Motor de estrategia</h3>
+            <select id="p-strategy-type" class="form-select" style="width:100%" onchange="updateTWStrategyMode()">
+                <option value="classic">Clásica · filtros combinados</option>
+                <option value="tw_mtf">TW MTF · Pivots y Price Action</option>
+            </select>
+        </div>
+        <div class="form-section" id="tw-strategy-panel" style="display:none">
+            <h3>TW MTF</h3>
+            <div class="form-row"><label for="p-tw-mode">Entradas</label><select id="p-tw-mode" class="form-select"><option value="rejection">Rechazos de zona</option><option value="double">Dobles confirmados</option><option value="both">Ambas</option></select></div>
+            <div class="form-row"><label for="p-tw-rr">Objetivo (R)</label><input id="p-tw-rr" class="form-input" type="number" min="0.1" max="20" step="0.1" value="2"></div>
+            <div class="form-row"><label for="p-tw-buffer">Margen stop %</label><input id="p-tw-buffer" class="form-input" type="number" min="0" max="10" step="0.05" value="0.1"></div>
+            <div class="form-row"><label for="p-tw-min-stop">Stop mínimo %</label><input id="p-tw-min-stop" class="form-input" type="number" min="0.001" max="50" step="0.001" value="0.05"></div>
+            <div class="form-row"><label for="p-tw-max-stop">Stop máximo %</label><input id="p-tw-max-stop" class="form-input" type="number" min="0.001" max="50" step="0.001" value="5"></div>
+            <div class="form-row"><label for="p-tw-max-hold">Máximo minutos (0 = sin límite)</label><input id="p-tw-max-hold" class="form-input" type="number" min="0" max="525600" value="0"></div>
+            <div class="form-row"><label for="p-tw-validation">Tramo final de validación %</label><input id="p-tw-validation" class="form-input" type="number" min="0" max="80" value="30"></div>
+            <p style="font-size:11px;color:#64748b;line-height:1.5">Solo backtest. Una posición por vez, todos los días y horarios. Entrada en apertura siguiente a la señal cerrada; stop estructural y objetivo en R. Los filtros y salidas de la estrategia clásica no se aplican. Los candidatos anticipados nunca abren operaciones.</p>
+            <details><summary style="cursor:pointer;margin:10px 0">Parámetros del indicador TW</summary><div id="tw-strategy-fields"></div></details>
+        </div>
         <div class="form-section">
             <h3>General</h3>
             <div class="form-row">
@@ -330,6 +351,7 @@
                 <label>Activar Shorts</label>
                 <input type="checkbox" id="p-shorts" class="form-check" checked>
             </div>
+            <div id="classic-entry-options">
             <div class="form-row">
                 <label>Múltiples entradas</label>
                 <input type="checkbox" id="p-multiple-entries" class="form-check" onchange="toggleMultipleEntries()">
@@ -350,6 +372,7 @@
             </div>
         </div>
 
+        </div>
         <div class="form-section">
             <h3>Tamaño de Posición</h3>
             <div class="form-row">
@@ -1215,6 +1238,7 @@
 
     function getParams() {
         const p = {
+            ...readTWStrategy(),
             exchange:          exchangeSeleccionado,
             fuenteDatos:       fuenteSeleccionada,
             initialCapital:    parseFloat(document.getElementById('p-capital').value) || 1000,
@@ -1337,10 +1361,15 @@
             const sec = seccionCond(c.key);
             if (!sec || !sec.classList.contains('en-panel')) p[c.flag] = false;
         });
+        if (p.strategyType === 'tw_mtf') {
+            for (const key of Object.keys(p)) if (key.startsWith('use')) p[key] = false;
+            p.allowMultipleEntries = false;
+        }
         return p;
     }
 
     async function ejecutar() {
+        const submittedParams = getParams();
         const btn = document.getElementById('btn-run');
         const esBD = fuenteSeleccionada === 'bd';
         btn.disabled = true; btn.textContent = esBD ? '⏳ Cargando velas...' : '⏳ Descargando velas...';
@@ -1356,11 +1385,11 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'same-origin',
-                body: JSON.stringify(getParams())
+                body: JSON.stringify(submittedParams)
             });
             if (!res.ok) { const e = await res.json(); throw new Error(e.error || `HTTP ${res.status}`); }
             const data = await res.json();
-            renderResults(data, getParams());
+            renderResults(data, submittedParams);
         } catch (err) {
             document.getElementById('results').innerHTML = `<div class="loading-msg" style="color:#ef5350;">Error: ${err.message}</div>`;
         } finally {
@@ -1454,6 +1483,13 @@
             // que tenían filtro activo traen valor; null se omite). Permite validar visualmente
             // que p.ej. todo Long entró con OI subiendo y top traders netos long.
             const diag = [];
+            if (t.entryReason) {
+                diag.push(escHtml(t.entryReason));
+                diag.push(`SL ${f2(t.sl)} · TP ${f2(t.tp)} · señal ${fTs(t.signalTs)}`);
+                if (t.zone) diag.push(`Zona ${f2(t.zone.lower)}–${f2(t.zone.upper)}`);
+                if (t.neckline != null) diag.push(`Neckline ${f2(t.neckline)}`);
+                diag.push(`Costos: comisión $${f2(t.fees)} · funding $${f2(t.fundingCost)}`);
+            }
             if (t.oiSlope    != null && !isNaN(t.oiSlope))    diag.push(`OI ${t.oiSlope >= 0 ? '+' : ''}${f2(t.oiSlope)}%`);
             if (t.topRatio   != null && !isNaN(t.topRatio))   diag.push(`Top ${f2(t.topRatio)}`);
             if (t.globalRatio != null && !isNaN(t.globalRatio)) diag.push(`Ret ${f2(t.globalRatio)}`);
@@ -1501,7 +1537,8 @@
         </div>`;
     }
 
-    function renderResults({ stats: s, trades, equity, warnings = [] }, params) {
+    function renderResults({ stats: s, trades, equity, warnings = [], tw }, params) {
+        const twHTML = renderTWSummary(tw);
         const initialCapital = params.initialCapital;
         const pClass = s.netProfit >= 0 ? 'positive' : 'negative';
 
@@ -1513,7 +1550,7 @@
             </div>` : '';
 
         // ── Filtros activos ──
-        const filtros = [
+        const filtros = params.strategyType === 'tw_mtf' ? [{ label: 'TW MTF', activo: true, desc: `${params.twMode} · ${params.twRewardRisk}R · ${params.twConfig.pivotTimeframe}/${params.twConfig.patternTimeframe}` }] : [
             { label: `RSI ${params.rsiTf||'15m'}`, activo: params.useRsiFilter !== false, desc: `≥${params.rsiLongMin??60} L / ≤${params.rsiShortMax??40} S · per.${params.rsiPeriod||14}` },
             { label: `MACD ${params.macdTf||'5m'}`, activo: params.useMacdFilter !== false, desc: `${params.macdFast||12}/${params.macdSlow||26}/${params.macdSignal||9}` },
             { label: `EMA∠ ${params.emaAngTf||'15m'}`, activo: params.useEmaAngFilter === true,
@@ -1596,7 +1633,7 @@
             </div>
             <div class="stat-card">
                 <div class="stat-label">Profit Factor</div>
-                <div class="stat-value ${s.profitFactor >= 1.2 ? 'positive' : s.profitFactor >= 1 ? 'neutral' : 'negative'}">${isFinite(s.profitFactor) ? f2(s.profitFactor) : '∞'}</div>
+                <div class="stat-value ${s.profitFactor == null || s.profitFactor >= 1.2 ? 'positive' : s.profitFactor >= 1 ? 'neutral' : 'negative'}">${s.profitFactor != null && isFinite(s.profitFactor) ? f2(s.profitFactor) : '∞'}</div>
                 <div class="stat-sub">Ganancias / Pérdidas</div>
             </div>
             <div class="stat-card">
@@ -1637,7 +1674,7 @@
         </div>`;
 
         if (s.totalTrades === 0) {
-            document.getElementById('results').innerHTML = warningsHTML + filtrosHTML + statsHTML + `
+            document.getElementById('results').innerHTML = warningsHTML + twHTML + filtrosHTML + statsHTML + `
                 <div class="loading-msg" style="flex-direction:column;gap:6px;">
                     <span style="font-size:24px;">🔍</span>
                     <span>Sin trades en el período. Probá relajar los filtros o aumentar los días.</span>
@@ -1662,7 +1699,7 @@
         </div>`;
 
         document.getElementById('results').innerHTML =
-            warningsHTML + filtrosHTML + verEnGraficoHTML + statsHTML + equityHTML + reasonHTML +
+            warningsHTML + twHTML + filtrosHTML + verEnGraficoHTML + statsHTML + equityHTML + reasonHTML +
             '<div id="trades-section"></div>';
 
         renderTradesTable();
@@ -1772,6 +1809,7 @@
     }
 
     function aplicarParams(p) {
+        restoreTWStrategy(p);
         document.getElementById('p-capital').value       = p.initialCapital ?? 1000;
         document.getElementById('p-days').value          = p.lookbackDays ?? 7;
         document.getElementById('p-commission').value    = p.commission ?? 0.04;
@@ -2141,6 +2179,7 @@
             </button>`).join('');
     }
 
+    initTWStrategy();
     renderPullbackEMAList();
     initCollapsibles();
     initCondicionales();
