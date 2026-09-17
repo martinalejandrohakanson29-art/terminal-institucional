@@ -8,6 +8,8 @@
     <link rel="icon" href="data:,">
     
     <script src="https://cdn.jsdelivr.net/npm/klinecharts/dist/klinecharts.min.js"></script>
+    <script src="/tw-pivots.js"></script>
+    <script src="/tw-pivots-ui.js"></script>
     
     <style>
         * { box-sizing: border-box; }
@@ -1652,6 +1654,7 @@
 
         // Definición de todos los indicadores disponibles
         const INDICADORES_DEF = [
+            { id: 'TW_MTF', label: 'TW MTF · Pivots y Price Action', shortLabel: 'TW MTF', config: 'tw' },
             { id: 'VWAP',      label: 'VWAP',      config: 'vwap'     },
             { id: 'DELTA',     label: 'Delta',     config: null        },
             { id: 'DELTASUM',  label: 'ΔSum',      config: 'deltasum' },
@@ -1667,6 +1670,7 @@
         ];
 
         function indicadorEsVisible(id) {
+            if (id === 'TW_MTF') return twState.visible;
             if (id === 'VWAP')      return vwapVisible;
             if (id === 'DELTA')     return deltaVisible;
             if (id === 'DELTASUM')  return deltaSumVisible;
@@ -1722,7 +1726,7 @@
                            <option value="1h"  ${configEMAang.timeframe==='1h'  ?'selected':''}>1H</option>
                        </select>`
                     : '';
-                return `<span class="chip-ind">${d.label}${vwapSelHtml}${rsiSelHtml}${emaAngSelHtml}${gearHtml}<span class="chip-x" onclick="toggleDesdeChip('${d.id}')" title="Quitar">&times;</span></span>`;
+                return `<span class="chip-ind">${d.shortLabel || d.label}${vwapSelHtml}${rsiSelHtml}${emaAngSelHtml}${gearHtml}<span class="chip-x" onclick="toggleDesdeChip('${d.id}')" title="Quitar">&times;</span></span>`;
             }).join('');
             renderIndicadorList();
         }
@@ -1763,6 +1767,7 @@
         }
 
         function abrirConfigIndicador(tipo) {
+            if (tipo === 'tw') { twOpenConfig(); return; }
             if (tipo === 'deltasum') toggleDeltaSumConfig();
             else if (tipo === 'ema') toggleMAConfig();
             else if (tipo === 'rsi') toggleRSIConfig();
@@ -1778,6 +1783,7 @@
         });
 
         function toggleIndicator(tipo) {
+            if (tipo === 'TW_MTF') { twToggle(); return; }
             if (tipo === 'VWAP') {
                 vwapVisible = !vwapVisible;
                 if (vwapVisible) { chart.createIndicator('VWAP_CUSTOM', true, { id: 'candle_pane' }); cambiarVwap(); }
@@ -2058,6 +2064,7 @@
                 } catch (e) { console.error('Error cargando OI/ratios inicial:', e); }
 
                 chart.applyNewData(velasActuales);
+                twDraw();
                 restaurarDibujos(temporalidad);
                 dibujarMarcadores();
                 dibujarNiveles();
@@ -2094,6 +2101,7 @@
                         if (ultima && ultima.timestamp === ts) velasActuales[velasActuales.length - 1] = kActualizada;
                         else { velasActuales.push(kActualizada); tiemposVelasActivas.push(ts); }
                         chart.updateData(kActualizada);
+                        if (!ultima || ultima.timestamp !== ts) twDraw();
                         actualizarDisplayDeltaVol();
                     } catch (err) {
                         console.error('Error procesando mensaje kline:', err);
@@ -2116,6 +2124,7 @@
         // temporalidad propia, ballenas, histograma y OI en vivo. No toca el exchange activo
         // para señales/ejecución del auto-trading (eso sigue siendo EXCHANGE_ACTIVO del server).
         function cambiarExchangeGlobal() {
+            if (twState.visible) twStart();
             guardarConfigServidor('exchangeSeleccionado', selectExchange.value).catch(() => {});
             cargarDatos(temporalidadActual);
             cargarVelas15m();
@@ -2516,6 +2525,8 @@
                 configNiveles:  { ...configNiveles },
                 configRSI:      { ...configRSI },
                 configEMAang:   { ...configEMAang },
+                twVisible: twState.visible,
+                configTW: { ...twState.config },
                 vwapReset:      vwapPeriod,
                 deltaSumPeriod: parseInt(document.getElementById('input-deltasum').value),
                 dibujos:        registroDibujos
@@ -2945,6 +2956,8 @@
             await cargarConfigServidor();
 
             const cfg = cfgGet('userConfig', null);
+            twState.config = TWPivots.normalize(cfgGet('configTW', cfg && cfg.configTW || {}));
+            twState.visible = !!(cfg && cfg.twVisible);
 
             if (cfg) {
                 // Filtros
@@ -3067,6 +3080,8 @@
                 renderChips();
                 cambiarTemporalidad('1m');
             }
+
+            if (twState.visible) twStart();
 
             // Estrategias guardadas para el live
             await cargarEstrategiasLive();

@@ -1,0 +1,599 @@
+//@version=5
+indicator("TW MTF Pivot Zones + Price Action + Double Top/Bottom", "TW MTF V3", overlay=true, max_boxes_count=100, max_labels_count=200)
+
+// =====================================================
+// CONFIGURACIÓN GENERAL PIVOTS HTF
+// =====================================================
+
+usePivotZones = input.bool(true, "Usar zonas Pivot HTF")
+
+pivotTimeframe = input.timeframe("60", "Temporalidad Pivots")
+
+pivotLeft = input.int(5, "Pivot - Velas izquierda", minval=1)
+pivotRight = input.int(5, "Pivot - Velas derecha", minval=1)
+
+maxActiveZones = input.int(8, "Máximo de zonas por lado", minval=1, maxval=20)
+
+// =====================================================
+// CONFIGURACIÓN DE ZONAS
+// =====================================================
+
+zoneWidthPerc = input.float(0.25, "Ancho zona +/- %", step=0.05, minval=0.0)
+
+breakMarginPerc = input.float(0.10, "Margen ruptura zona %", step=0.05, minval=0.0)
+
+invalidateOnClose = input.bool(true, "Invalidar zona por cierre HTF")
+
+showResistanceZones = input.bool(true, "Mostrar zonas resistencia")
+showSupportZones = input.bool(true, "Mostrar zonas soporte")
+
+// =====================================================
+// TEMPORALIDAD DE PATRONES
+// =====================================================
+
+patternTimeframe = input.timeframe("5", "Temporalidad patrones de velas")
+
+// =====================================================
+// FILTRO CERCANÍA A ZONA
+// =====================================================
+
+requirePatternNearZone = input.bool(true, "Exigir patrón cerca de Pivot HTF")
+
+useExtraProximityFilter = input.bool(true, "Usar margen de cercanía adicional")
+
+patternProximityPerc = input.float(0.20, "Cercanía máxima adicional a zona %", step=0.05, minval=0.0)
+
+oneSignalPerVisit = input.bool(true, "Solo una señal por visita a zona")
+
+// =====================================================
+// PATRONES ON/OFF
+// =====================================================
+
+useBullEngulfing = input.bool(true, "Envolvente alcista")
+useBearEngulfing = input.bool(true, "Envolvente bajista")
+
+useHammer = input.bool(true, "Martillo alcista")
+useShootingStar = input.bool(true, "Shooting Star")
+
+// =====================================================
+// ENVOLVENTES
+// =====================================================
+
+minEngulfBodyPerc = input.float(40.0, "Envolvente - cuerpo mínimo % rango", step=5.0, minval=0.0, maxval=100.0)
+
+// =====================================================
+// MARTILLO / SHOOTING STAR
+// =====================================================
+
+wickBodyRatio = input.float(2.0, "Mecha principal mínima x cuerpo", step=0.1, minval=1.0)
+
+oppositeWickMaxRatio = input.float(0.5, "Mecha opuesta máxima x cuerpo", step=0.1, minval=0.0)
+
+maxBodyRangePerc = input.float(40.0, "Cuerpo máximo % rango", step=5.0, minval=1.0, maxval=100.0)
+
+// =====================================================
+// DOBLE TECHO / DOBLE PISO
+// =====================================================
+
+useDoubleTop = input.bool(true, "Detectar Doble Techo")
+useDoubleBottom = input.bool(true, "Detectar Doble Piso")
+
+doubleTolerancePerc = input.float(0.50, "DT/DB - tolerancia entre extremos %", step=0.05, minval=0.0)
+
+doubleMinSeparation = input.int(5, "DT/DB - separación mínima velas HTF", minval=1)
+
+doubleMaxSeparation = input.int(50, "DT/DB - separación máxima velas HTF", minval=2)
+
+doubleMinRetracePerc = input.float(1.00, "DT/DB - retroceso mínimo %", step=0.10, minval=0.0)
+
+showEarlyDouble = input.bool(true, "Mostrar DT/DB anticipado")
+
+confirmDoubleWithNeckline = input.bool(true, "Confirmar DT/DB por neckline")
+
+showDoubleNeckline = input.bool(true, "Mostrar neckline activa")
+
+doubleInvalidationPerc = input.float(0.20, "DT/DB - margen invalidación %", step=0.05, minval=0.0)
+
+// =====================================================
+// FUNCIONES PIVOTS
+// =====================================================
+
+pivotHighFunc() =>
+    ta.pivothigh(high, pivotLeft, pivotRight)
+
+pivotLowFunc() =>
+    ta.pivotlow(low, pivotLeft, pivotRight)
+
+pivotHighTimeFunc() =>
+    ph = ta.pivothigh(high, pivotLeft, pivotRight)
+    not na(ph) ? time[pivotRight] : na
+
+pivotLowTimeFunc() =>
+    pl = ta.pivotlow(low, pivotLeft, pivotRight)
+    not na(pl) ? time[pivotRight] : na
+
+// =====================================================
+// PIVOTS HTF
+// =====================================================
+
+pivotHighHTF = request.security(syminfo.tickerid, pivotTimeframe, pivotHighFunc(), barmerge.gaps_on, barmerge.lookahead_off)
+
+pivotLowHTF = request.security(syminfo.tickerid, pivotTimeframe, pivotLowFunc(), barmerge.gaps_on, barmerge.lookahead_off)
+
+pivotHighTimeHTF = request.security(syminfo.tickerid, pivotTimeframe, pivotHighTimeFunc(), barmerge.gaps_on, barmerge.lookahead_off)
+
+pivotLowTimeHTF = request.security(syminfo.tickerid, pivotTimeframe, pivotLowTimeFunc(), barmerge.gaps_on, barmerge.lookahead_off)
+
+// =====================================================
+// CIERRE HTF
+// =====================================================
+
+htfClose = request.security(syminfo.tickerid, pivotTimeframe, close, barmerge.gaps_off, barmerge.lookahead_off)
+
+newHTFBar = ta.change(time(pivotTimeframe)) != 0
+
+// =====================================================
+// NUEVOS PIVOTS
+// =====================================================
+
+newPivotHigh = not na(pivotHighHTF) and not na(pivotHighTimeHTF)
+
+newPivotLow = not na(pivotLowHTF) and not na(pivotLowTimeHTF)
+
+// =====================================================
+// ARRAYS ZONAS RESISTENCIA
+// =====================================================
+
+var resistancePrices = array.new_float()
+var resistanceBoxes = array.new_box()
+var resistanceUsed = array.new_bool()
+
+// =====================================================
+// ARRAYS ZONAS SOPORTE
+// =====================================================
+
+var supportPrices = array.new_float()
+var supportBoxes = array.new_box()
+var supportUsed = array.new_bool()
+
+// =====================================================
+// CREAR ZONA RESISTENCIA
+// =====================================================
+
+if usePivotZones and newPivotHigh
+    resistancePrice = pivotHighHTF
+
+    resistanceUpper = resistancePrice * (1 + zoneWidthPerc / 100)
+    resistanceLower = resistancePrice * (1 - zoneWidthPerc / 100)
+
+    resistanceBox = box.new(left=pivotHighTimeHTF, top=resistanceUpper, right=time, bottom=resistanceLower, xloc=xloc.bar_time, bgcolor=color.new(color.red, 90), border_color=color.new(color.red, 45))
+
+    array.push(resistancePrices, resistancePrice)
+    array.push(resistanceBoxes, resistanceBox)
+    array.push(resistanceUsed, false)
+
+    if array.size(resistancePrices) > maxActiveZones
+        oldResistanceBox = array.shift(resistanceBoxes)
+
+        box.delete(oldResistanceBox)
+
+        array.shift(resistancePrices)
+        array.shift(resistanceUsed)
+
+// =====================================================
+// CREAR ZONA SOPORTE
+// =====================================================
+
+if usePivotZones and newPivotLow
+    supportPrice = pivotLowHTF
+
+    supportUpper = supportPrice * (1 + zoneWidthPerc / 100)
+    supportLower = supportPrice * (1 - zoneWidthPerc / 100)
+
+    supportBox = box.new(left=pivotLowTimeHTF, top=supportUpper, right=time, bottom=supportLower, xloc=xloc.bar_time, bgcolor=color.new(color.green, 90), border_color=color.new(color.green, 45))
+
+    array.push(supportPrices, supportPrice)
+    array.push(supportBoxes, supportBox)
+    array.push(supportUsed, false)
+
+    if array.size(supportPrices) > maxActiveZones
+        oldSupportBox = array.shift(supportBoxes)
+
+        box.delete(oldSupportBox)
+
+        array.shift(supportPrices)
+        array.shift(supportUsed)
+
+// =====================================================
+// EXTENDER ZONAS ACTIVAS
+// =====================================================
+
+if array.size(resistanceBoxes) > 0
+    for i = 0 to array.size(resistanceBoxes) - 1
+
+        currentBox = array.get(resistanceBoxes, i)
+
+        box.set_right(currentBox, time)
+
+        box.set_bgcolor(currentBox, showResistanceZones ? color.new(color.red, 90) : color.new(color.red, 100))
+
+        box.set_border_color(currentBox, showResistanceZones ? color.new(color.red, 45) : color.new(color.red, 100))
+
+if array.size(supportBoxes) > 0
+    for i = 0 to array.size(supportBoxes) - 1
+
+        currentBox = array.get(supportBoxes, i)
+
+        box.set_right(currentBox, time)
+
+        box.set_bgcolor(currentBox, showSupportZones ? color.new(color.green, 90) : color.new(color.green, 100))
+
+        box.set_border_color(currentBox, showSupportZones ? color.new(color.green, 45) : color.new(color.green, 100))
+
+// =====================================================
+// INVALIDAR RESISTENCIAS POR RUPTURA
+// =====================================================
+
+if usePivotZones and invalidateOnClose and newHTFBar and array.size(resistancePrices) > 0
+
+    i = array.size(resistancePrices) - 1
+
+    while i >= 0
+
+        resistancePrice = array.get(resistancePrices, i)
+
+        resistanceUpper = resistancePrice * (1 + zoneWidthPerc / 100)
+
+        breakLevel = resistanceUpper * (1 + breakMarginPerc / 100)
+
+        if htfClose > breakLevel
+
+            resistanceBox = array.get(resistanceBoxes, i)
+
+            box.delete(resistanceBox)
+
+            array.remove(resistancePrices, i)
+            array.remove(resistanceBoxes, i)
+            array.remove(resistanceUsed, i)
+
+        i -= 1
+
+// =====================================================
+// INVALIDAR SOPORTES POR RUPTURA
+// =====================================================
+
+if usePivotZones and invalidateOnClose and newHTFBar and array.size(supportPrices) > 0
+
+    i = array.size(supportPrices) - 1
+
+    while i >= 0
+
+        supportPrice = array.get(supportPrices, i)
+
+        supportLower = supportPrice * (1 - zoneWidthPerc / 100)
+
+        breakLevel = supportLower * (1 - breakMarginPerc / 100)
+
+        if htfClose < breakLevel
+
+            supportBox = array.get(supportBoxes, i)
+
+            box.delete(supportBox)
+
+            array.remove(supportPrices, i)
+            array.remove(supportBoxes, i)
+            array.remove(supportUsed, i)
+
+        i -= 1
+
+// =====================================================
+// FUNCIÓN ENVOLVENTE ALCISTA
+// =====================================================
+
+bullEngulfingFunc() =>
+    prevBearish = close[1] < open[1]
+
+    currentBullish = close > open
+
+    body = math.abs(close - open)
+
+    candleRange = high - low
+
+    bodyPerc = candleRange > 0 ? body / candleRange * 100 : 0.0
+
+    engulf = open <= close[1] and close >= open[1]
+
+    prevBearish and currentBullish and engulf and bodyPerc >= minEngulfBodyPerc
+
+// =====================================================
+// FUNCIÓN ENVOLVENTE BAJISTA
+// =====================================================
+
+bearEngulfingFunc() =>
+    prevBullish = close[1] > open[1]
+
+    currentBearish = close < open
+
+    body = math.abs(close - open)
+
+    candleRange = high - low
+
+    bodyPerc = candleRange > 0 ? body / candleRange * 100 : 0.0
+
+    engulf = open >= close[1] and close <= open[1]
+
+    prevBullish and currentBearish and engulf and bodyPerc >= minEngulfBodyPerc
+
+// =====================================================
+// FUNCIÓN MARTILLO
+// =====================================================
+
+hammerFunc() =>
+    body = math.abs(close - open)
+
+    upperWick = high - math.max(open, close)
+
+    lowerWick = math.min(open, close) - low
+
+    candleRange = high - low
+
+    bodyPerc = candleRange > 0 ? body / candleRange * 100 : 0.0
+
+    validBody = body > 0
+
+    validBody and lowerWick >= body * wickBodyRatio and upperWick <= body * oppositeWickMaxRatio and bodyPerc <= maxBodyRangePerc
+
+// =====================================================
+// FUNCIÓN SHOOTING STAR
+// =====================================================
+
+shootingStarFunc() =>
+    body = math.abs(close - open)
+
+    upperWick = high - math.max(open, close)
+
+    lowerWick = math.min(open, close) - low
+
+    candleRange = high - low
+
+    bodyPerc = candleRange > 0 ? body / candleRange * 100 : 0.0
+
+    validBody = body > 0
+
+    validBody and upperWick >= body * wickBodyRatio and lowerWick <= body * oppositeWickMaxRatio and bodyPerc <= maxBodyRangePerc
+
+// =====================================================
+// PATRONES EN TEMPORALIDAD ELEGIDA
+// =====================================================
+
+bullEngulfingLTF = request.security(syminfo.tickerid, patternTimeframe, bullEngulfingFunc(), barmerge.gaps_off, barmerge.lookahead_off)
+
+bearEngulfingLTF = request.security(syminfo.tickerid, patternTimeframe, bearEngulfingFunc(), barmerge.gaps_off, barmerge.lookahead_off)
+
+hammerLTF = request.security(syminfo.tickerid, patternTimeframe, hammerFunc(), barmerge.gaps_off, barmerge.lookahead_off)
+
+shootingStarLTF = request.security(syminfo.tickerid, patternTimeframe, shootingStarFunc(), barmerge.gaps_off, barmerge.lookahead_off)
+
+// =====================================================
+// HIGH / LOW DEL TF DEL PATRÓN
+// =====================================================
+
+patternHigh = request.security(syminfo.tickerid, patternTimeframe, high, barmerge.gaps_off, barmerge.lookahead_off)
+
+patternLow = request.security(syminfo.tickerid, patternTimeframe, low, barmerge.gaps_off, barmerge.lookahead_off)
+
+// =====================================================
+// NUEVA VELA DEL TF DEL PATRÓN
+// =====================================================
+
+newPatternBar = ta.change(time(patternTimeframe)) != 0
+
+// =====================================================
+// BUSCAR ZONA DE RESISTENCIA CERCANA
+// =====================================================
+
+bool nearResistanceZone = false
+
+int resistanceMatchIndex = na
+
+float bestResistanceDistance = 1000000.0
+
+if array.size(resistancePrices) > 0
+
+    for i = 0 to array.size(resistancePrices) - 1
+
+        resistancePrice = array.get(resistancePrices, i)
+
+        resistanceUpper = resistancePrice * (1 + zoneWidthPerc / 100)
+
+        resistanceLower = resistancePrice * (1 - zoneWidthPerc / 100)
+
+        extraMargin = useExtraProximityFilter ? resistancePrice * (patternProximityPerc / 100) : 0.0
+
+        resistanceUpperExtended = resistanceUpper + extraMargin
+
+        resistanceLowerExtended = resistanceLower - extraMargin
+
+        nearResistance = patternHigh >= resistanceLowerExtended and patternLow <= resistanceUpperExtended
+
+        if not nearResistance
+            array.set(resistanceUsed, i, false)
+
+        if nearResistance
+
+            currentDistance = math.abs(patternHigh - resistancePrice) / resistancePrice * 100
+
+            if currentDistance < bestResistanceDistance
+
+                bestResistanceDistance := currentDistance
+
+                resistanceMatchIndex := i
+
+                nearResistanceZone := true
+
+// =====================================================
+// BUSCAR ZONA DE SOPORTE CERCANA
+// =====================================================
+
+bool nearSupportZone = false
+
+int supportMatchIndex = na
+
+float bestSupportDistance = 1000000.0
+
+if array.size(supportPrices) > 0
+
+    for i = 0 to array.size(supportPrices) - 1
+
+        supportPrice = array.get(supportPrices, i)
+
+        supportUpper = supportPrice * (1 + zoneWidthPerc / 100)
+
+        supportLower = supportPrice * (1 - zoneWidthPerc / 100)
+
+        extraMargin = useExtraProximityFilter ? supportPrice * (patternProximityPerc / 100) : 0.0
+
+        supportUpperExtended = supportUpper + extraMargin
+
+        supportLowerExtended = supportLower - extraMargin
+
+        nearSupport = patternHigh >= supportLowerExtended and patternLow <= supportUpperExtended
+
+        if not nearSupport
+            array.set(supportUsed, i, false)
+
+        if nearSupport
+
+            currentDistance = math.abs(patternLow - supportPrice) / supportPrice * 100
+
+            if currentDistance < bestSupportDistance
+
+                bestSupportDistance := currentDistance
+
+                supportMatchIndex := i
+
+                nearSupportZone := true
+
+// =====================================================
+// FILTRO DE ZONA
+// =====================================================
+
+bullZoneOK = not requirePatternNearZone or nearSupportZone
+
+bearZoneOK = not requirePatternNearZone or nearResistanceZone
+
+// =====================================================
+// CONTROL UNA SEÑAL POR VISITA
+// =====================================================
+
+bool bullVisitOK = true
+
+bool bearVisitOK = true
+
+if oneSignalPerVisit and not na(supportMatchIndex)
+    bullVisitOK := not array.get(supportUsed, supportMatchIndex)
+
+if oneSignalPerVisit and not na(resistanceMatchIndex)
+    bearVisitOK := not array.get(resistanceUsed, resistanceMatchIndex)
+
+// =====================================================
+// SEÑALES PRICE ACTION
+// =====================================================
+
+bullEngulfSignal = newPatternBar and useBullEngulfing and bullEngulfingLTF and bullZoneOK and bullVisitOK
+
+bearEngulfSignal = newPatternBar and useBearEngulfing and bearEngulfingLTF and bearZoneOK and bearVisitOK
+
+hammerSignal = newPatternBar and useHammer and hammerLTF and bullZoneOK and bullVisitOK
+
+shootingStarSignal = newPatternBar and useShootingStar and shootingStarLTF and bearZoneOK and bearVisitOK
+
+// =====================================================
+// MARCAR VISITA COMO UTILIZADA
+// =====================================================
+
+bullSignalAny = bullEngulfSignal or hammerSignal
+
+bearSignalAny = bearEngulfSignal or shootingStarSignal
+
+if bullSignalAny and oneSignalPerVisit and not na(supportMatchIndex)
+    array.set(supportUsed, supportMatchIndex, true)
+
+if bearSignalAny and oneSignalPerVisit and not na(resistanceMatchIndex)
+    array.set(resistanceUsed, resistanceMatchIndex, true)
+
+// =====================================================
+// VARIABLES DOBLE TECHO / DOBLE PISO
+// =====================================================
+
+var float previousPivotHighPrice = na
+var int previousPivotHighTime = na
+
+var float previousPivotLowPrice = na
+var int previousPivotLowTime = na
+
+var float lastPivotHighPrice = na
+var int lastPivotHighTime = na
+
+var float lastPivotLowPrice = na
+var int lastPivotLowTime = na
+
+// =====================================================
+// DOBLE TECHO ACTIVO
+// =====================================================
+
+var bool doubleTopActive = false
+
+var float doubleTopNeckline = na
+
+var float doubleTopLevel = na
+
+// =====================================================
+// DOBLE PISO ACTIVO
+// =====================================================
+
+var bool doubleBottomActive = false
+
+var float doubleBottomNeckline = na
+
+var float doubleBottomLevel = na
+
+// =====================================================
+// SEÑALES DOBLE TECHO / PISO
+// =====================================================
+
+bool doubleTopCandidateSignal = false
+
+bool doubleBottomCandidateSignal = false
+
+bool doubleTopConfirmedSignal = false
+
+bool doubleBottomConfirmedSignal = false
+
+// =====================================================
+// SEGUNDOS POR TF PIVOT
+// =====================================================
+
+pivotTfSeconds = timeframe.in_seconds(pivotTimeframe)
+
+// =====================================================
+// PROCESAR NUEVO PIVOT HIGH
+// =====================================================
+
+if newPivotHigh
+
+    currentHighPrice = pivotHighHTF
+
+    currentHighTime = pivotHighTimeHTF
+
+    if useDoubleTop and not na(previousPivotHighPrice) and not na(previousPivotHighTime) and not na(lastPivotLowPrice) and not na(lastPivotLowTime)
+
+        separationBars = (currentHighTime - previousPivotHighTime) / 1000.0 / pivotTfSeconds
+
+        topDifferencePerc = math.abs(currentHighPrice - previousPivotHighPrice) / previousPivotHighPrice * 100
+
+        lowBetweenTops = lastPivotLowTime > previousPivotHighTime and lastPivotLowTime < currentHighTime
+
+        referenceTop = math.min(currentHighPrice, previousPivotHighPrice)
+
+        retracePer
