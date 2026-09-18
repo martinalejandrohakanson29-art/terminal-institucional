@@ -21,11 +21,28 @@ Se utiliza `/api/klines` con el exchange seleccionado en el terminal. La carga i
 
 La disponibilidad histórica depende de la caché del servidor; no se inventan velas faltantes. Se conservan hasta 20 zonas por lado y se dibujan las últimas 200 señales dentro del historial del gráfico. Las zonas invalidadas se eliminan; las señales históricas permanecen mientras estén dentro de la ventana cargada. Un error de lectura retira los dibujos y muestra un aviso hasta que la consulta se recupere.
 
-Este módulo es un indicador visual: no modifica el motor de backtest ni las condiciones de ejecución automática.
+El indicador visual y los motores de backtest y AutoBot comparten `public/tw-pivots.js`.
+
+## AutoBot: TW MTF
+
+Guardá una estrategia con motor **TW MTF** en `/estrategias` y seleccioná ese nombre en el modal de AutoBot. La cuenta y el entorno del modal determinan dónde se ejecutan las órdenes (Binance o BingX, demo o real); el selector de datos determina de dónde salen las señales y los precios de salida.
+
+- Se respetan modo rechazo/doble/ambos, temporalidades, patrones, zonas, direcciones habilitadas, buffer y límites del stop, objetivo R, tamaño de posición y apalancamiento guardados. Los filtros, pyramiding y breakeven clásicos se desactivan como en el backtest. En vivo, TW exige apalancamiento entero entre 1 y 100; si el exchange no acepta fijarlo, no abre.
+- Solo se opera una confirmación de la última frontera de minuto, con todas las temporalidades cerradas y actualizadas. Nunca se operan candidatos anticipados; los dobles requieren neckline. Un hueco reinicia el historial utilizable. Señales opuestas simultáneas se descartan; con el mismo lado se prioriza el doble confirmado.
+- El ciclo evalúa cada 60 segundos. La entrada real es MARKET al detectar la confirmación, no una ejecución garantizada en la apertura del backtest. Se vuelve a validar el riesgo con el precio disponible y con el fill. El stop estructural queda fijo y el TP se calcula desde el fill al R guardado. En ejecución cruzada, los niveles permanecen en el mercado de datos y se conserva el mecanismo existente de protección con buffer en el exchange de ejecución.
+- Una señal se reclama atómicamente en BD antes de mandar la orden. No se reintenta esa confirmación tras un error ambiguo, cierre, cambio de configuración o reinicio. Se requiere otro evento. Una sola posición por cuenta.
+- Se colocan TP y SL en el exchange y se controlan también por ticks. Si falta una protección o el fill excede el riesgo configurado, se solicita cierre inmediato (`TW Protec` / `TW Riesgo`). Como toda orden, el cierre depende de la respuesta del exchange.
+- La duración máxima se congela por entrada y se recupera al reiniciar. Cambiar/borrar la estrategia o detener AutoBot no elimina la gestión de esa salida. Los stops EMA y límites de tiempo clásicos no se aplican a posiciones TW.
+
+El historial en vivo es una ventana de velas nativas: se amplía según las ventanas configuradas (al menos 800 velas por temporalidad TW, o las que ya trae el ciclo). Zonas anteriores a esa ventana no se reconstruyen; un backtest con más historia puede diferir. La comparación exacta requiere el mismo exchange, historial y parámetros; los fills reales además dependen de latencia, spread y deslizamiento.
+
+Al desplegar y reiniciar `server.js`, la inicialización añade `cuentas_trading.ultima_tw_signal_ts` y `auto_trading_entradas.tw_max_hold_minutes` sin borrar datos. No hace falta volver a guardar las estrategias TW existentes.
+
+Las pruebas automatizadas no arrancan el servidor ni usan credenciales: simulan BD y exchanges. No certifican permisos API, saldo, aceptación de órdenes ni ejecución real de una cuenta concreta.
 
 ## Verificación
 
-`node --test scripts/test-tw-pivots.js`
+`node --test scripts/test-tw-pivots.js scripts/test-tw-backtest.js scripts/test-tw-live.js`
 
 Pruebas de confirmación causal, cierres, patrones, visitas, dobles techos/pisos, invalidación, MTF, huecos, parámetros, cancelación de respuestas antiguas e integración del menú y layout.
 

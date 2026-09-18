@@ -281,7 +281,7 @@
             <div class="form-row"><label for="p-tw-max-stop">Stop máximo %</label><input id="p-tw-max-stop" class="form-input" type="number" min="0.001" max="50" step="0.001" value="5"></div>
             <div class="form-row"><label for="p-tw-max-hold">Máximo minutos (0 = sin límite)</label><input id="p-tw-max-hold" class="form-input" type="number" min="0" max="525600" value="0"></div>
             <div class="form-row"><label for="p-tw-validation">Tramo final de validación %</label><input id="p-tw-validation" class="form-input" type="number" min="0" max="80" value="30"></div>
-            <p style="font-size:11px;color:#64748b;line-height:1.5">Solo backtest. Una posición por vez, todos los días y horarios. Entrada en apertura siguiente a la señal cerrada; stop estructural y objetivo en R. Los filtros y salidas de la estrategia clásica no se aplican. Los candidatos anticipados nunca abren operaciones.</p>
+            <p style="font-size:11px;color:#64748b;line-height:1.5">Disponible en backtest y AutoBot (Binance/BingX). Una posición por vez, todos los días y horarios. En backtest entra en la apertura siguiente; AutoBot entra a mercado al detectar la señal cerrada; stop estructural y objetivo en R. Los filtros y salidas de la estrategia clásica no se aplican. Los candidatos anticipados nunca abren operaciones.</p>
             <details><summary style="cursor:pointer;margin:10px 0">Parámetros del indicador TW</summary><div id="tw-strategy-fields"></div></details>
         </div>
         <div class="form-section">

@@ -352,6 +352,8 @@ async function inicializarBaseDeDatos() {
         // gráfico dibujaba las entradas de Binance encima de las velas de BingX al cambiar el
         // selector de vista — visualmente engañoso, niveles de precio de un exchange sobre otro.
         await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS exchange VARCHAR(10) NOT NULL DEFAULT 'binance'`);
+        await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS tw_max_hold_minutes INTEGER`);
+        await pool.query(`ALTER TABLE cuentas_trading ADD COLUMN IF NOT EXISTS ultima_tw_signal_ts BIGINT`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS telefono VARCHAR(30)`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_enviada VARCHAR(10)`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_ts BIGINT`);
@@ -1341,6 +1343,7 @@ const {
     agregarVelas1m, lookupHTF, calcCapitalEntrada, costoOperacion,
     runBacktest, normalizarParams,
 } = require('./lib/backtest-core');
+const { evaluateTW, levels: twLevels } = require('./lib/tw-live');
 
 async function fetchKlinesBatch(interval, totalBars, ex = exch) {
     const perReq = 1000;
@@ -1709,7 +1712,7 @@ async function colocarProteccionExchange(ctx, sub) {
             if (r.ok && r.orderId) sub.tpOrderId = r.orderId;
             estado.tp = { ok: r.ok, msg: r.body?.msg, code: r.body?.code };
         }
-        if ((sub.stopType ?? 'Porcentaje') === 'Porcentaje' && sub.sl && !sub.slOrderId) {
+        if (['Porcentaje', 'TW'].includes(sub.stopType ?? 'Porcentaje') && sub.sl && !sub.slOrderId) {
             const nivel = nivelProteccionExchange(ctx, sub.lado, sub.sl, 'sl');
             const r = await colocarOrdenStop(ctx, sub.lado, sub.qty, nivel, 'STOP_MARKET');
             if (r.ok && r.orderId) sub.slOrderId = r.orderId;
@@ -1804,7 +1807,7 @@ async function chequearSalida(precio, mercado) {
             for (let i = arr.length - 1; i >= 0; i--) {
                 const pos = arr[i];
                 const golpeTP   = pos.lado === 'long' ? precio >= pos.tp : precio <= pos.tp;
-                const slPorTick = (pos.stopType ?? 'Porcentaje') === 'Porcentaje' || pos.beAplicado;
+                const slPorTick = ['Porcentaje', 'TW'].includes(pos.stopType ?? 'Porcentaje') || pos.beAplicado;
                 const golpeSL   = slPorTick && pos.sl != null && (pos.lado === 'long' ? precio <= pos.sl : precio >= pos.sl);
                 if (golpeTP || golpeSL) {
                     arr.splice(i, 1); // remover síncronamente antes de awaits
@@ -1911,9 +1914,11 @@ async function gestionarPosicionAbierta(ctx, p, velas) {
     for (let i = arr.length - 1; i >= 0; i--) {
         const pos = arr[i];
         let razon = null;
-        if (p.useMaxTradeTime && pos.entryTs && (ahora - pos.entryTs) / 60000 >= (p.maxTradeMinutes ?? 15)) {
+        if (pos.entryTs && (pos.stopType === 'TW'
+            ? pos.twMaxHoldMinutes > 0 && (ahora - pos.entryTs) / 60000 >= pos.twMaxHoldMinutes
+            : p.useMaxTradeTime && (ahora - pos.entryTs) / 60000 >= (p.maxTradeMinutes ?? 15))) {
             razon = 'Tiempo';
-        } else if (stopEMA && stopEmaVals.length) {
+        } else if (pos.stopType !== 'TW' && stopEMA && stopEmaVals.length) {
             const rompe = pos.lado === 'long'
                 ? stopEmaVals.some(v => precioActual < v)
                 : stopEmaVals.some(v => precioActual > v);
@@ -2265,18 +2270,23 @@ async function procesarCuenta(row, velas, soloSalidas = false, ex = exch) {
         'SELECT params FROM estrategias_guardadas WHERE nombre = $1 AND usuario_id = $2 LIMIT 1',
         [row.estrategia_nombre, row.usuario_id]
     );
-    if (!stratRes.rows.length) return;
-    const p   = stratRes.rows[0].params;
+    const saved = stratRes.rows[0]?.params;
+    const p = saved?.strategyType === 'tw_mtf' ? normalizarParams(saved) : (saved || {});
+    const isTW = p.strategyType === 'tw_mtf';
     const arr = posDe(row.usuario_id);
 
     // Gestionar salidas de sub-posiciones abiertas (tiempo / EMA). El WS cubre TP/SL fijos.
     if (arr.length > 0) await gestionarPosicionAbierta(ctx, p, velas);
 
     // Cuenta de otro exchange: solo salidas — nunca abrir entradas acá.
-    if (soloSalidas) return;
+    if (soloSalidas || !saved) return;
 
     // Cuenta apagada: solo gestionar salidas, no abrir nuevas entradas.
     if (!row.habilitado) return;
+    if (isTW && p.palancaActivo && (!Number.isInteger(p.palancaValor) || p.palancaValor < 1 || p.palancaValor > 100)) {
+        console.error(`[AutoTrading u${row.usuario_id}] TW: apalancamiento inválido (entero entre 1 y 100)`);
+        return;
+    }
 
     // ¿Se permite abrir entrada? Sin posiciones, o con pyramiding habilitado.
     if (arr.length > 0 && !p.allowMultipleEntries) return;
@@ -2311,7 +2321,22 @@ async function procesarCuenta(row, velas, soloSalidas = false, ex = exch) {
         }
     }
 
+    if (isTW) {
+        // Include enough native history for the configured pivot and double windows.
+        velas = { ...velas };
+        const c = p.twConfig;
+        const needed = Math.max(800, c.pivotLeft + c.pivotRight + c.doubleMaxSeparation + 3);
+        for (const tf of new Set([c.pivotTimeframe, c.patternTimeframe])) {
+            if ((velas['bars' + tf]?.length || 0) < needed) velas['bars' + tf] = await fetchKlinesBatch(tf, needed + 1, ex);
+        }
+    }
     const resultado  = evaluarSenal(velas, whaleRes.rows, p, oiRows, lsRows);
+    if (isTW && resultado.signal) {
+        const decisionPrice = esEjecucionCruzada(ctx) ? precioDeCtx(ctx) : await precioLiveDeCtx(ctx);
+        const prices = twLevels(resultado.event, decisionPrice, p);
+        if (!prices) return;
+        Object.assign(resultado, prices);
+    }
     const nuevaSenal = resultado.signal;
 
     // Filtro opcional: no apilar entradas mientras alguna sub-posición esté en pérdida.
@@ -2323,7 +2348,8 @@ async function procesarCuenta(row, velas, soloSalidas = false, ex = exch) {
     }
 
     // Dedup en modo una-sola-posición.
-    if (!p.allowMultipleEntries && nuevaSenal === row.ultima_senal) return;
+    if (!isTW && !p.allowMultipleEntries && nuevaSenal === row.ultima_senal) return;
+    if (isTW && nuevaSenal && resultado.signalTs <= Number(row.ultima_tw_signal_ts || 0)) return;
 
     await pool.query('UPDATE cuentas_trading SET ultima_senal=$1, ultima_senal_ts=$2 WHERE usuario_id=$3',
         [nuevaSenal, Date.now(), row.usuario_id]);
@@ -2343,21 +2369,33 @@ async function procesarCuenta(row, velas, soloSalidas = false, ex = exch) {
     const sizing = await calcularNocionalEntrada(ctx, p, row);
     if (!sizing.ok) { console.log(`[AutoTrading u${row.usuario_id}] Entrada omitida — ${sizing.motivo}`); return; }
     const qtyDecimales = (String(trade.qtyStep).split('.')[1] || '').length;
-    const qty = Number((Math.floor((sizing.nocional / resultado.entry) / trade.qtyStep) * trade.qtyStep).toFixed(qtyDecimales));
+    const sizingPrice = isTW && esEjecucionCruzada(ctx) ? await precioEjecucionDeCtx(ctx) : resultado.entry;
+    if (!(sizingPrice > 0) || !Number.isFinite(sizingPrice)) return;
+    const qty = Number((Math.floor((sizing.nocional / sizingPrice) / trade.qtyStep) * trade.qtyStep).toFixed(qtyDecimales));
     if (qty < trade.qtyStep) { console.log(`[AutoTrading u${row.usuario_id}] qty ${qty} < ${trade.qtyStep} BTC — omitida`); return; }
-    const notionalUsdt = qty * resultado.entry;
+    const notionalUsdt = qty * sizingPrice;
     if (notionalUsdt < trade.minNotionalUsdt) { console.log(`[AutoTrading u${row.usuario_id}] nocional $${notionalUsdt.toFixed(2)} < $${trade.minNotionalUsdt} mínimo ${ctx.exchange} — omitida`); return; }
 
     console.log(`[AutoTrading u${row.usuario_id}] Nueva señal: ${nuevaSenal.toUpperCase()} @ $${resultado.entry} | TP $${resultado.tp?.toFixed(0)} | SL $${resultado.sl?.toFixed(0)} | qty ${qty} BTC`);
 
-    if (p.palancaActivo && p.palancaValor > 1) await setBinanceLeverage(ctx, p.palancaValor);
+    if (isTW) {
+        if (!await setBinanceLeverage(ctx, p.palancaActivo ? p.palancaValor : 1)) return;
+        // Persistent, atomic claim survives close/reset/restart and prevents retrying an
+        // ambiguous MARKET response. A new confirmed event is required for another entry.
+        if (Date.now() - resultado.signalTs >= 60000) return;
+        const claim = await pool.query(`UPDATE cuentas_trading SET ultima_tw_signal_ts=$1
+            WHERE usuario_id=$2 AND (ultima_tw_signal_ts IS NULL OR ultima_tw_signal_ts < $1) RETURNING usuario_id`,
+            [resultado.signalTs, row.usuario_id]);
+        if (!claim.rows.length) return;
+    } else if (p.palancaActivo && p.palancaValor > 1) await setBinanceLeverage(ctx, p.palancaValor);
     // BingX exige positionSide en cada orden — asegura modo One-way antes de la primera
     // entrada real de la cuenta (idempotente; ver hallazgo del 2026-07-26: error 109400).
     if (ctx.exchange === 'bingx' && arr.length === 0) { try { await asegurarConfiguracionCuenta(ctx); } catch (_) {} }
+    if (isTW && Date.now() - resultado.signalTs >= 60000) return;
 
     const ordenEntrada = await colocarOrdenEntrada(ctx, nuevaSenal, qty);
     if (ordenEntrada.ok) {
-        const stopType = p.stopType ?? 'Porcentaje';
+        const stopType = isTW ? 'TW' : (p.stopType ?? 'Porcentaje');
         // Breakeven: los umbrales de la estrategia se congelan en la entrada (si después se
         // edita la estrategia, las posiciones ya abiertas conservan su configuración).
         const beTrigger = p.useBreakeven === true ? (p.breakevenTrigger ?? 0.3)  : null;
@@ -2384,27 +2422,36 @@ async function procesarCuenta(row, velas, soloSalidas = false, ex = exch) {
         // slippage/basis entre la señal y el fill sin que el % configurado cambie. En ejecución
         // cruzada NO se rebasa: TP/SL ya están a propósito en el espacio del exchange de datos.
         let tpFinal = resultado.tp, slFinal = resultado.sl;
-        if (!esEjecucionCruzada(ctx) && fillEntry !== resultado.entry) {
+        if (!isTW && !esEjecucionCruzada(ctx) && fillEntry !== resultado.entry) {
             if (resultado.tp != null) tpFinal = fillEntry * (1 + (resultado.tp - resultado.entry) / resultado.entry);
             if (stopType === 'Porcentaje' && resultado.sl != null) {
                 slFinal = fillEntry * (1 + (resultado.sl - resultado.entry) / resultado.entry);
             }
         }
+        const fillLevels = isTW ? twLevels(resultado.event, entryRef, p) : null;
+        if (fillLevels) { tpFinal = fillLevels.tp; slFinal = fillLevels.sl; }
         const ins = await pool.query(
-            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_entrada_datos, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange, be_trigger, be_offset)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'abierta', $9, $9, $10, $11, $12) RETURNING id`,
+            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_entrada_datos, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange, be_trigger, be_offset, tw_max_hold_minutes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'abierta', $9, $9, $10, $11, $12, $13) RETURNING id`,
             [Date.now(), nuevaSenal, fillEntry, esEjecucionCruzada(ctx) ? entryRef : null,
-             tpFinal, slFinal, qty, stopType, row.usuario_id, ctx.exchange, beTrigger, beOffset]
+             tpFinal, slFinal, qty, stopType, row.usuario_id, ctx.exchange, beTrigger, beOffset, isTW ? p.twMaxHoldMinutes : null]
         );
         const sub = {
             id: ins.rows[0].id, lado: nuevaSenal, qty, entry: fillEntry, entryRef,
             tp: tpFinal, sl: slFinal, entryTs: Date.now(), stopType,
-            beTrigger, beOffset, beAplicado: false,
+            beTrigger, beOffset, beAplicado: false, twMaxHoldMinutes: isTW ? p.twMaxHoldMinutes : null,
         };
         arr.push(sub);
         await sincronizarPosicionBD(row.usuario_id);
         // Red de seguridad: TP/SL reales en el exchange aunque el server se caiga.
         await colocarProteccionExchange(ctx, sub);
+        if (isTW && (!fillLevels || !sub.tpOrderId || !sub.slOrderId)) {
+            const idx = arr.indexOf(sub);
+            if (idx >= 0) {
+                arr.splice(idx, 1);
+                await cerrarSubPosicion(ctx, sub, !fillLevels ? 'TW Riesgo' : 'TW Protec', fillEntry);
+            }
+        }
         console.log(`[AutoTrading u${row.usuario_id}] Sub-posición #${ins.rows[0].id} abierta — abiertas: ${arr.length}`);
     }
 
@@ -2431,7 +2478,7 @@ setTimeout(async () => {
     try {
         const openRows = await pool.query(
             `SELECT id, ts, lado, precio_entrada, precio_entrada_datos, precio_tp, precio_sl, qty, stop_type,
-                    tp_order_id, sl_order_id, usuario_id, be_trigger, be_offset, be_aplicado
+                    tp_order_id, sl_order_id, usuario_id, be_trigger, be_offset, be_aplicado, tw_max_hold_minutes
              FROM auto_trading_entradas WHERE estado = 'abierta' ORDER BY ts ASC`
         );
         for (const row of openRows.rows) {
@@ -2445,6 +2492,7 @@ setTimeout(async () => {
                 // Referencia del BE en el espacio del exchange de datos (NULL = no cruzada).
                 entryRef: row.precio_entrada_datos != null ? parseFloat(row.precio_entrada_datos) : parseFloat(row.precio_entrada),
                 entryTs: parseInt(row.ts), stopType: row.stop_type || 'Porcentaje',
+                twMaxHoldMinutes: row.tw_max_hold_minutes == null ? null : Number(row.tw_max_hold_minutes),
                 tpOrderId: row.tp_order_id || null, slOrderId: row.sl_order_id || null,
                 // Breakeven: si ya estaba aplicado, precio_sl YA es el nivel BE persistido —
                 // el reinicio no lo des-aplica ni vuelve a mover el stop.
@@ -2594,7 +2642,11 @@ async function actualizarConfigAutotrading(req, res) {
         if (estrategia_nombre) {
             const s = await pool.query('SELECT params FROM estrategias_guardadas WHERE nombre=$1 AND usuario_id=$2', [estrategia_nombre, req.usuario.id]);
             if (!s.rows.length) return res.status(400).json({ error: 'Estrategia no encontrada' });
-            if (s.rows[0].params.strategyType === 'tw_mtf') return res.status(400).json({ error: 'TW MTF está disponible para análisis en /estrategias; todavía no admite ejecución automática.' });
+            if (s.rows[0].params.strategyType === 'tw_mtf') {
+                const p = normalizarParams(s.rows[0].params);
+                if (p.twMinStopPerc > p.twMaxStopPerc) return res.status(400).json({ error: 'TW: el stop mínimo no puede superar al máximo.' });
+                if (p.palancaActivo && (!Number.isInteger(p.palancaValor) || p.palancaValor < 1 || p.palancaValor > 100)) return res.status(400).json({ error: 'TW: el apalancamiento debe ser un entero entre 1 y 100.' });
+            }
         }
         // Exchange de datos: debe ser uno soportado. Se guarda NULL cuando coincide con el de
         // ejecución, para que la cuenta siga el default si algún día cambia de exchange.
@@ -2917,7 +2969,7 @@ app.post('/api/mi-cuenta/leverage', autenticar, async (req, res) => {
 
 // ── Evaluación de señal en tiempo real ────────────────────────
 function evaluarSenal(velas, whalesArr, p, oiArr, lsArr) {
-    if (p.strategyType === 'tw_mtf') return { signal: null, reason: 'TW MTF disponible solo para backtest', indicadores: {} };
+    if (p.strategyType === 'tw_mtf') return evaluateTW(velas, p);
     const { bars1m, bars5m, bars15m, bars1h, bars4h, bars1d } = velas;
     if (bars1m.length < 510) return { signal: null, reason: 'datos_insuficientes' };
 

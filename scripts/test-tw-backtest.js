@@ -99,11 +99,11 @@ test('time exit, end close and temporal sample totals reconcile', () => {
     assert.equal(r.tw.samples.development.totalTrades+r.tw.samples.validation.totalTrades,r.stats.totalTrades);
     assert.equal(run([...start,b(2,100,101,99,100)]).trades[0].reason,'Fin');
 });
-test('saved strategy scripts parse and integration guards live execution', () => {
+test('saved strategy scripts parse and integration dispatches live execution', () => {
     const html=fs.readFileSync(require.resolve('../public/estrategias.html'),'utf8');
     for(const m of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) new vm.Script(m[1]);
     new vm.Script(fs.readFileSync(require.resolve('../public/tw-strategy-ui.js'),'utf8'));
     assert.match(html,/restoreTWStrategy\(p\)/);
     assert.match(html,/\.\.\.readTWStrategy\(\)/);
-    assert.match(fs.readFileSync(require.resolve('../server.js'),'utf8'),/TW MTF disponible solo para backtest/);
+    assert.match(fs.readFileSync(require.resolve('../server.js'),'utf8'),/return evaluateTW\(velas, p\)/);
 });
