@@ -353,6 +353,13 @@ async function inicializarBaseDeDatos() {
         // selector de vista — visualmente engañoso, niveles de precio de un exchange sobre otro.
         await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS exchange VARCHAR(10) NOT NULL DEFAULT 'binance'`);
         await pool.query(`ALTER TABLE auto_trading_entradas ADD COLUMN IF NOT EXISTS tw_max_hold_minutes INTEGER`);
+        // La protección escalonada se congela por entrada, igual que el breakeven y el límite
+        // temporal, para que editar/borrar la estrategia o reiniciar no cambie una posición viva.
+        await pool.query(`
+            ALTER TABLE auto_trading_entradas
+                ADD COLUMN IF NOT EXISTS staged_levels JSONB,
+                ADD COLUMN IF NOT EXISTS staged_level INTEGER DEFAULT 0
+        `);
         await pool.query(`ALTER TABLE cuentas_trading ADD COLUMN IF NOT EXISTS ultima_tw_signal_ts BIGINT`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS telefono VARCHAR(30)`);
         await pool.query(`ALTER TABLE wspp_notificaciones ADD COLUMN IF NOT EXISTS ultima_senal_enviada VARCHAR(10)`);
@@ -1811,7 +1818,7 @@ async function chequearSalida(precio, mercado) {
                 const golpeSL   = slPorTick && pos.sl != null && (pos.lado === 'long' ? precio <= pos.sl : precio >= pos.sl);
                 if (golpeTP || golpeSL) {
                     arr.splice(i, 1); // remover síncronamente antes de awaits
-                    aCerrar.push({ pos, razon: golpeTP ? 'TP' : (pos.beAplicado ? 'BE' : 'SL') });
+                    aCerrar.push({ pos, razon: golpeTP ? 'TP' : (pos.stagedLevel > 0 ? 'PROT' : pos.beAplicado ? 'BE' : 'SL') });
                     continue;
                 }
                 // Disparo del breakeven: si el precio avanzó el trigger a favor, mover el stop a
@@ -1868,6 +1875,30 @@ async function aplicarBreakevenExchange(ctx, pos) {
             console.warn(`[AutoTrading u${ctx.uid}] ⚠️ No se pudo colocar el stop de breakeven #${pos.id} en el exchange — se conserva el stop original como red y el BE lo aplica el server por tick.`);
         }
     } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error moviendo stop de breakeven #${pos.id}:`, e.message); }
+}
+
+// Persiste y coloca primero el nuevo stop escalonado; recién después cancela el anterior.
+// Si el exchange rechaza el reemplazo, el stop previo queda como red y el server conserva
+// el nivel nuevo para aplicarlo por tick.
+async function aplicarProteccionEscalonadaExchange(ctx, pos) {
+    console.log(`[AutoTrading u${ctx.uid}] Protección escalonada #${pos.id} nivel ${pos.stagedLevel} — stop $${pos.sl.toFixed(1)}`);
+    try {
+        await pool.query(`UPDATE auto_trading_entradas SET precio_sl=$1, staged_level=$2 WHERE id=$3`,
+            [pos.sl, pos.stagedLevel, pos.id]);
+        await sincronizarPosicionBD(ctx.uid);
+    } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error persistiendo protección escalonada #${pos.id}:`, e.message); }
+    try {
+        const nivel = nivelProteccionExchange(ctx, pos.lado, pos.sl, 'sl');
+        const r = await colocarOrdenStop(ctx, pos.lado, pos.qty, nivel, 'STOP_MARKET');
+        if (r.ok && r.orderId) {
+            const viejo = pos.slOrderId;
+            pos.slOrderId = r.orderId;
+            await pool.query(`UPDATE auto_trading_entradas SET sl_order_id=$1 WHERE id=$2`, [r.orderId, pos.id]);
+            if (viejo) await cancelarOrden(ctx, viejo);
+        } else {
+            console.warn(`[AutoTrading u${ctx.uid}] No se pudo reemplazar el stop escalonado #${pos.id}; se conserva la orden anterior.`);
+        }
+    } catch (e) { console.error(`[AutoTrading u${ctx.uid}] Error moviendo stop escalonado #${pos.id}:`, e.message); }
 }
 
 // Cada ciclo (1 min): salida por tiempo máximo y stop EMA dinámico, por sub-posición de la
@@ -1930,6 +1961,35 @@ async function gestionarPosicionAbierta(ctx, p, velas) {
         }
     }
     for (const { pos, razon } of aCerrar) await cerrarSubPosicion(ctx, pos, razon, precioActual);
+
+    // Ratchet al cierre de 1m, nunca dentro de la misma vela que dispara el nivel.
+    const ultimaCerrada = [...(bars1m || [])].reverse().find(b => Number(b[6]) <= ahora);
+    if (ultimaCerrada) {
+        const high = Number(ultimaCerrada[2]), low = Number(ultimaCerrada[3]);
+        const aMover = [];
+        for (const pos of arr) {
+            if (!Array.isArray(pos.stagedLevels) || !pos.stagedLevels.length) continue;
+            if (Number(ultimaCerrada[6]) < pos.entryTs) continue;
+            let nextLevel = pos.stagedLevel || 0;
+            const ref = pos.entryRef ?? pos.entry;
+            for (let k = 0; k < pos.stagedLevels.length; k++) {
+                const lv = pos.stagedLevels[k];
+                if (!lv?.on) continue;
+                const reached = pos.lado === 'long'
+                    ? high >= ref * (1 + lv.trig / 100)
+                    : low <= ref * (1 - lv.trig / 100);
+                if (reached) nextLevel = Math.max(nextLevel, k + 1);
+            }
+            if (nextLevel <= (pos.stagedLevel || 0)) continue;
+            const offset = pos.stagedLevels[nextLevel - 1].stop;
+            const candidate = ref * (1 + (pos.lado === 'long' ? 1 : -1) * offset / 100);
+            const tighter = pos.lado === 'long' ? Math.max(pos.sl, candidate) : Math.min(pos.sl, candidate);
+            pos.stagedLevel = nextLevel;
+            if (tighter !== pos.sl) { pos.sl = tighter; aMover.push(pos); }
+            else await pool.query(`UPDATE auto_trading_entradas SET staged_level=$1 WHERE id=$2`, [nextLevel, pos.id]);
+        }
+        for (const pos of aMover) await aplicarProteccionEscalonadaExchange(ctx, pos);
+    }
 }
 
 // Devuelve el NOCIONAL (USDT) de la orden de entrada según el sizing de la estrategia, sobre
@@ -2430,16 +2490,19 @@ async function procesarCuenta(row, velas, soloSalidas = false, ex = exch) {
         }
         const fillLevels = isTW ? twLevels(resultado.event, entryRef, p) : null;
         if (fillLevels) { tpFinal = fillLevels.tp; slFinal = fillLevels.sl; }
+        const frozenStaged = isTW && p.useStagedProtection ? p.stagedLevels : null;
         const ins = await pool.query(
-            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_entrada_datos, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange, be_trigger, be_offset, tw_max_hold_minutes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'abierta', $9, $9, $10, $11, $12, $13) RETURNING id`,
+            `INSERT INTO auto_trading_entradas (ts, lado, precio_entrada, precio_entrada_datos, precio_tp, precio_sl, qty, stop_type, estado, usuario_id, account_id, exchange, be_trigger, be_offset, staged_levels, tw_max_hold_minutes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'abierta', $9, $9, $10, $11, $12, $13, $14) RETURNING id`,
             [Date.now(), nuevaSenal, fillEntry, esEjecucionCruzada(ctx) ? entryRef : null,
-             tpFinal, slFinal, qty, stopType, row.usuario_id, ctx.exchange, beTrigger, beOffset, isTW ? p.twMaxHoldMinutes : null]
+             tpFinal, slFinal, qty, stopType, row.usuario_id, ctx.exchange, beTrigger, beOffset,
+             frozenStaged ? JSON.stringify(frozenStaged) : null, isTW ? p.twMaxHoldMinutes : null]
         );
         const sub = {
             id: ins.rows[0].id, lado: nuevaSenal, qty, entry: fillEntry, entryRef,
             tp: tpFinal, sl: slFinal, entryTs: Date.now(), stopType,
             beTrigger, beOffset, beAplicado: false, twMaxHoldMinutes: isTW ? p.twMaxHoldMinutes : null,
+            stagedLevels: frozenStaged, stagedLevel: 0,
         };
         arr.push(sub);
         await sincronizarPosicionBD(row.usuario_id);
@@ -2478,7 +2541,8 @@ setTimeout(async () => {
     try {
         const openRows = await pool.query(
             `SELECT id, ts, lado, precio_entrada, precio_entrada_datos, precio_tp, precio_sl, qty, stop_type,
-                    tp_order_id, sl_order_id, usuario_id, be_trigger, be_offset, be_aplicado, tw_max_hold_minutes
+                    tp_order_id, sl_order_id, usuario_id, be_trigger, be_offset, be_aplicado, tw_max_hold_minutes,
+                    staged_levels, staged_level
              FROM auto_trading_entradas WHERE estado = 'abierta' ORDER BY ts ASC`
         );
         for (const row of openRows.rows) {
@@ -2499,6 +2563,8 @@ setTimeout(async () => {
                 beTrigger: row.be_trigger != null ? parseFloat(row.be_trigger) : null,
                 beOffset:  row.be_offset  != null ? parseFloat(row.be_offset)  : null,
                 beAplicado: row.be_aplicado === true,
+                stagedLevels: Array.isArray(row.staged_levels) ? row.staged_levels : null,
+                stagedLevel: Number(row.staged_level) || 0,
             });
         }
 
@@ -2644,7 +2710,7 @@ async function actualizarConfigAutotrading(req, res) {
             if (!s.rows.length) return res.status(400).json({ error: 'Estrategia no encontrada' });
             if (s.rows[0].params.strategyType === 'tw_mtf') {
                 const p = normalizarParams(s.rows[0].params);
-                if (p.twMinStopPerc > p.twMaxStopPerc) return res.status(400).json({ error: 'TW: el stop mínimo no puede superar al máximo.' });
+                if (p.twRiskMode === 'structural' && p.twMinStopPerc > p.twMaxStopPerc) return res.status(400).json({ error: 'TW: el stop mínimo no puede superar al máximo.' });
                 if (p.palancaActivo && (!Number.isInteger(p.palancaValor) || p.palancaValor < 1 || p.palancaValor > 100)) return res.status(400).json({ error: 'TW: el apalancamiento debe ser un entero entre 1 y 100.' });
             }
         }

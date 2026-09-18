@@ -275,13 +275,30 @@
         <div class="form-section" id="tw-strategy-panel" style="display:none">
             <h3>TW MTF</h3>
             <div class="form-row"><label for="p-tw-mode">Entradas</label><select id="p-tw-mode" class="form-select"><option value="rejection">Rechazos de zona</option><option value="double">Dobles confirmados</option><option value="both">Ambas</option></select></div>
-            <div class="form-row"><label for="p-tw-rr">Objetivo (R)</label><input id="p-tw-rr" class="form-input" type="number" min="0.1" max="20" step="0.1" value="2"></div>
-            <div class="form-row"><label for="p-tw-buffer">Margen stop %</label><input id="p-tw-buffer" class="form-input" type="number" min="0" max="10" step="0.05" value="0.1"></div>
-            <div class="form-row"><label for="p-tw-min-stop">Stop mínimo %</label><input id="p-tw-min-stop" class="form-input" type="number" min="0.001" max="50" step="0.001" value="0.05"></div>
-            <div class="form-row"><label for="p-tw-max-stop">Stop máximo %</label><input id="p-tw-max-stop" class="form-input" type="number" min="0.001" max="50" step="0.001" value="5"></div>
+            <div class="form-row"><label for="p-tw-risk-mode">TP / SL</label><select id="p-tw-risk-mode" class="form-select" onchange="updateTWRiskMode()"><option value="structural">Stop estructural + objetivo R</option><option value="manual">Porcentajes manuales</option></select></div>
+            <div id="tw-structural-risk">
+                <div class="form-row"><label for="p-tw-rr">Objetivo (R)</label><input id="p-tw-rr" class="form-input" type="number" min="0.1" max="20" step="0.1" value="2"></div>
+                <div class="form-row"><label for="p-tw-buffer">Margen stop %</label><input id="p-tw-buffer" class="form-input" type="number" min="0" max="10" step="0.05" value="0.1"></div>
+                <div class="form-row"><label for="p-tw-min-stop">Stop mínimo %</label><input id="p-tw-min-stop" class="form-input" type="number" min="0.001" max="50" step="0.001" value="0.05"></div>
+                <div class="form-row"><label for="p-tw-max-stop">Stop máximo %</label><input id="p-tw-max-stop" class="form-input" type="number" min="0.001" max="50" step="0.001" value="5"></div>
+            </div>
+            <div id="tw-manual-risk" style="display:none">
+                <div class="form-row"><label for="p-tw-tp-perc">Take profit %</label><input id="p-tw-tp-perc" class="form-input" type="number" min="0.001" max="100" step="0.01" value="1"></div>
+                <div class="form-row"><label for="p-tw-sl-perc">Stop loss %</label><input id="p-tw-sl-perc" class="form-input" type="number" min="0.001" max="100" step="0.01" value="1"></div>
+            </div>
+            <div class="form-row"><label for="p-tw-staged">Protección escalonada</label><input id="p-tw-staged" type="checkbox" class="form-check" onchange="toggleTWStaged()"></div>
+            <div id="tw-staged-config" style="display:none">
+                <div style="font-size:9px;color:#64748b;line-height:1.3;margin:2px 0 6px;">Al llegar al disparo, mueve el SL al porcentaje indicado desde la entrada. Ratchea al cierre de la vela y rige desde la siguiente.</div>
+                <div class="form-row"><label><input type="checkbox" id="p-tw-staged-1-on" class="form-check" checked style="margin-right:5px;">Nivel 1 · disparo %</label><input type="number" id="p-tw-staged-1-trig" class="form-input" value="1.00" step="0.05" min="0.05" style="width:70px;"></div>
+                <div class="form-row"><label>Nivel 1 · mover SL a %</label><input type="number" id="p-tw-staged-1-stop" class="form-input" value="0.50" step="0.05" style="width:70px;"></div>
+                <div class="form-row"><label><input type="checkbox" id="p-tw-staged-2-on" class="form-check" checked style="margin-right:5px;">Nivel 2 · disparo %</label><input type="number" id="p-tw-staged-2-trig" class="form-input" value="1.50" step="0.05" min="0.05" style="width:70px;"></div>
+                <div class="form-row"><label>Nivel 2 · mover SL a %</label><input type="number" id="p-tw-staged-2-stop" class="form-input" value="1.00" step="0.05" style="width:70px;"></div>
+                <div class="form-row"><label><input type="checkbox" id="p-tw-staged-3-on" class="form-check" checked style="margin-right:5px;">Nivel 3 · disparo %</label><input type="number" id="p-tw-staged-3-trig" class="form-input" value="2.00" step="0.05" min="0.05" style="width:70px;"></div>
+                <div class="form-row"><label>Nivel 3 · mover SL a %</label><input type="number" id="p-tw-staged-3-stop" class="form-input" value="1.50" step="0.05" style="width:70px;"></div>
+            </div>
             <div class="form-row"><label for="p-tw-max-hold">Máximo minutos (0 = sin límite)</label><input id="p-tw-max-hold" class="form-input" type="number" min="0" max="525600" value="0"></div>
             <div class="form-row"><label for="p-tw-validation">Tramo final de validación %</label><input id="p-tw-validation" class="form-input" type="number" min="0" max="80" value="30"></div>
-            <p style="font-size:11px;color:#64748b;line-height:1.5">Disponible en backtest y AutoBot (Binance/BingX). Una posición por vez, todos los días y horarios. En backtest entra en la apertura siguiente; AutoBot entra a mercado al detectar la señal cerrada; stop estructural y objetivo en R. Los filtros y salidas de la estrategia clásica no se aplican. Los candidatos anticipados nunca abren operaciones.</p>
+            <p style="font-size:11px;color:#64748b;line-height:1.5">Disponible en backtest y AutoBot (Binance/BingX). Una posición por vez, todos los días y horarios. En backtest entra en la apertura siguiente; AutoBot entra a mercado al detectar la señal cerrada. TP/SL pueden ser estructurales por R o porcentajes manuales. Los candidatos anticipados nunca abren operaciones.</p>
             <details><summary style="cursor:pointer;margin:10px 0">Parámetros del indicador TW</summary><div id="tw-strategy-fields"></div></details>
         </div>
         <div class="form-section">
@@ -1123,6 +1140,17 @@
             document.getElementById('p-staged').checked ? 'block' : 'none';
     }
 
+    function updateTWRiskMode() {
+        const manual = document.getElementById('p-tw-risk-mode').value === 'manual';
+        document.getElementById('tw-structural-risk').style.display = manual ? 'none' : 'block';
+        document.getElementById('tw-manual-risk').style.display = manual ? 'block' : 'none';
+    }
+
+    function toggleTWStaged() {
+        document.getElementById('tw-staged-config').style.display =
+            document.getElementById('p-tw-staged').checked ? 'block' : 'none';
+    }
+
     function toggleDayFilter() {
         document.getElementById('day-filter-config').style.display =
             document.getElementById('p-day-filter').checked ? 'block' : 'none';
@@ -1237,8 +1265,9 @@
     setInterval(actualizarEstadoCache, 30000);
 
     function getParams() {
+        const twParams = { ...readTWStrategy() };
         const p = {
-            ...readTWStrategy(),
+            ...twParams,
             exchange:          exchangeSeleccionado,
             fuenteDatos:       fuenteSeleccionada,
             initialCapital:    parseFloat(document.getElementById('p-capital').value) || 1000,
@@ -1363,6 +1392,8 @@
         });
         if (p.strategyType === 'tw_mtf') {
             for (const key of Object.keys(p)) if (key.startsWith('use')) p[key] = false;
+            p.useStagedProtection = twParams.useStagedProtection;
+            p.stagedLevels = twParams.stagedLevels;
             p.allowMultipleEntries = false;
         }
         return p;
@@ -1550,7 +1581,10 @@
             </div>` : '';
 
         // ── Filtros activos ──
-        const filtros = params.strategyType === 'tw_mtf' ? [{ label: 'TW MTF', activo: true, desc: `${params.twMode} · ${params.twRewardRisk}R · ${params.twConfig.pivotTimeframe}/${params.twConfig.patternTimeframe}` }] : [
+        const filtros = params.strategyType === 'tw_mtf' ? [
+            { label: 'TW MTF', activo: true, desc: `${params.twMode} · ${params.twRiskMode === 'manual' ? `TP ${params.twTakeProfitPerc}% / SL ${params.twStopLossPerc}%` : `${params.twRewardRisk}R`} · ${params.twConfig.pivotTimeframe}/${params.twConfig.patternTimeframe}` },
+            { label: 'Prot. escalonada', activo: params.useStagedProtection === true, desc: (params.stagedLevels||[]).filter(l=>l.on).map(l=>`${l.trig}→${l.stop}`).join(' / ') }
+        ] : [
             { label: `RSI ${params.rsiTf||'15m'}`, activo: params.useRsiFilter !== false, desc: `≥${params.rsiLongMin??60} L / ≤${params.rsiShortMax??40} S · per.${params.rsiPeriod||14}` },
             { label: `MACD ${params.macdTf||'5m'}`, activo: params.useMacdFilter !== false, desc: `${params.macdFast||12}/${params.macdSlow||26}/${params.macdSignal||9}` },
             { label: `EMA∠ ${params.emaAngTf||'15m'}`, activo: params.useEmaAngFilter === true,

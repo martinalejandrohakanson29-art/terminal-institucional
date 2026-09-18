@@ -38,6 +38,13 @@ test('fill risk preserves stop and R; rejects crossed stops and liquidation', ()
     assert.equal(short.sl,110); assert.equal(short.tp,80);
 });
 
+test('manual percentage levels are symmetric and ignore structural stop bounds', () => {
+    const long = levels({side:'bull',stopReference:150},100,params({twRiskMode:'manual',twTakeProfitPerc:3,twStopLossPerc:2,twMinStopPerc:10,twMaxStopPerc:1}));
+    assert.deepEqual(long,{entry:100,sl:98,tp:103,riskPerc:2});
+    const short = levels({side:'bear',stopReference:50},100,params({twRiskMode:'manual',twTakeProfitPerc:3,twStopLossPerc:2}));
+    assert.deepEqual(short,{entry:100,sl:102,tp:97,riskPerc:2});
+});
+
 // Execute the actual server functions without booting its DB, timers, sockets or APIs.
 const source = fs.readFileSync(require.resolve('../server'),'utf8');
 function section(start,end) { return source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start))); }
@@ -69,16 +76,18 @@ function harness(exchange='binance', extra={}) {
         calcularNocionalEntrada:async(ctx,p)=>{calls.push({kind:'sizing',p});return {ok:true,nocional:1000};},
         setBinanceLeverage:async(ctx,lev)=>{calls.push({kind:'leverage',exchange:ctx.exchange,lev});return true;},
         asegurarConfiguracionCuenta:async()=>{},sincronizarPosicionBD:async()=>{},
+        cancelarOrden:async()=>{},
         nivelProteccionExchange:(ctx,lado,nivel)=>nivel,
         cerrarSubPosicion:async(ctx,pos,reason)=>calls.push({kind:'close',reason}),
         N8N_WEBHOOK_URL:null,
     });
     vm.runInContext(section('function tradeDe(ctx)', '// Cancela una orden'),context);
     vm.runInContext(section('async function colocarProteccionExchange(', '// Cierra UNA sub-posición'),context);
+    vm.runInContext(section('async function aplicarProteccionEscalonadaExchange(', '// Cada ciclo (1 min)'),context);
     vm.runInContext(section('async function gestionarPosicionAbierta(', '// Devuelve el NOCIONAL'),context);
     vm.runInContext(section('async function procesarCuenta(', '// Arrancar loop'),context);
     const row={usuario_id:1,habilitado:true,exchange,estrategia_nombre:'Mi TW',ultima_senal:'long'};
-    return {context,positions,calls,sql,row,run:()=>context.procesarCuenta(row,{bars1m:rows}),
+    return {context,positions,calls,sql,row,run:(customRows=rows)=>context.procesarCuenta(row,{bars1m:customRows}),
         setSaved:p=>{saved=p;},setClock:n=>{clock=n;}};
 }
 
@@ -134,6 +143,20 @@ test('fill outside configured risk triggers immediate close',async()=>{
     const h=harness('binance',{twMaxStopPerc:6});await h.run();
     assert.equal(h.positions.length,0);
     assert.equal(h.calls.at(-1).reason,'TW Riesgo');
+});
+
+test('live staged protection freezes settings and replaces the stop after a closed candle',async()=>{
+    const h=harness('binance',{useStagedProtection:true,stagedLevels:[
+        {on:true,trig:1,stop:.5},{on:false,trig:1.5,stop:1},{on:false,trig:2,stop:1.5}
+    ]});
+    await h.run();
+    assert.equal(h.positions[0].stagedLevel,0);
+    h.setClock(7*M+1000);
+    await h.run([...rows,b(6,104,106,103,105)]);
+    assert.equal(h.positions[0].stagedLevel,1);
+    assert.ok(Math.abs(h.positions[0].sl-104.52)<1e-9);
+    assert.ok(h.sql.some(s=>s.q.includes('staged_level=$2')));
+    assert.equal(h.calls.filter(c=>c.kind==='stop').length,3);
 });
 
 test('failed exchange protection triggers close instead of leaving an unprotected TW trade',async()=>{

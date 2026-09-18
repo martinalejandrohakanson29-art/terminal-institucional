@@ -34,9 +34,14 @@ function readTWStrategy() {
     }
     const number = (id, fallback) => { const v = document.getElementById(id).value; return v !== '' && Number.isFinite(+v) ? +v : fallback; };
     return { strategyType: document.getElementById('p-strategy-type').value, twMode: document.getElementById('p-tw-mode').value,
-        twConfig: TWPivots.normalize(config), twRewardRisk: number('p-tw-rr', 2), twStopBufferPerc: number('p-tw-buffer', .1),
+        twConfig: TWPivots.normalize(config), twRiskMode: document.getElementById('p-tw-risk-mode').value,
+        twRewardRisk: number('p-tw-rr', 2), twTakeProfitPerc: number('p-tw-tp-perc', 1), twStopLossPerc: number('p-tw-sl-perc', 1), twStopBufferPerc: number('p-tw-buffer', .1),
         twMinStopPerc: number('p-tw-min-stop', .05), twMaxStopPerc: number('p-tw-max-stop', 5),
-        twMaxHoldMinutes: number('p-tw-max-hold', 0), twValidationPct: number('p-tw-validation', 30) };
+        twMaxHoldMinutes: number('p-tw-max-hold', 0), twValidationPct: number('p-tw-validation', 30),
+        useStagedProtection: document.getElementById('p-tw-staged').checked,
+        stagedLevels: [1,2,3].map(k => ({ on: document.getElementById(`p-tw-staged-${k}-on`).checked,
+            trig: number(`p-tw-staged-${k}-trig`, k === 1 ? 1 : k === 2 ? 1.5 : 2),
+            stop: number(`p-tw-staged-${k}-stop`, k === 1 ? .5 : k === 2 ? 1 : 1.5) })) };
 }
 function restoreTWStrategy(p) {
     document.getElementById('p-strategy-type').value = p.strategyType === 'tw_mtf' ? 'tw_mtf' : 'classic';
@@ -47,6 +52,18 @@ function restoreTWStrategy(p) {
         if (typeof TWPivots.defaults[key] === 'boolean') el.checked = config[key]; else el.value = config[key];
     }
     for (const [id, key, def] of [['rr','twRewardRisk',2], ['buffer','twStopBufferPerc',.1], ['min-stop','twMinStopPerc',.05], ['max-stop','twMaxStopPerc',5], ['max-hold','twMaxHoldMinutes',0], ['validation','twValidationPct',30]]) document.getElementById(`p-tw-${id}`).value = p[key] ?? def;
+    document.getElementById('p-tw-risk-mode').value = p.twRiskMode === 'manual' ? 'manual' : 'structural';
+    document.getElementById('p-tw-tp-perc').value = p.twTakeProfitPerc ?? 1;
+    document.getElementById('p-tw-sl-perc').value = p.twStopLossPerc ?? 1;
+    document.getElementById('p-tw-staged').checked = p.useStagedProtection === true;
+    const levels = Array.isArray(p.stagedLevels) ? p.stagedLevels : [];
+    [1,2,3].forEach(k => {
+        const lv = levels[k - 1] || {}, defs = [[1,.5],[1.5,1],[2,1.5]][k - 1];
+        document.getElementById(`p-tw-staged-${k}-on`).checked = lv.on !== false;
+        document.getElementById(`p-tw-staged-${k}-trig`).value = lv.trig ?? defs[0];
+        document.getElementById(`p-tw-staged-${k}-stop`).value = lv.stop ?? defs[1];
+    });
+    updateTWRiskMode(); toggleTWStaged();
     updateTWStrategyMode();
 }
 function renderTWSummary(tw) {

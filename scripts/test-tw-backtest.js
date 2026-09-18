@@ -21,6 +21,19 @@ test('next open fill, structural stop, R target and conservative intrabar orderi
     assert.equal(t.pnlAbs,-30); assert.equal(r.stats.finalCapital,970);
     assert.equal(t.entryReason,'Envolvente alcista');
 });
+test('manual TP/SL percentages and staged protection are applied causally', () => {
+    const manual = run([...start,b(2,100,111,98,105)], { twRiskMode:'manual',twTakeProfitPerc:10,twStopLossPerc:2 });
+    assert.equal(manual.trades[0].sl,98); assert.ok(Math.abs(manual.trades[0].tp-110)<1e-9);
+    assert.equal(manual.trades[0].reason,'SL');
+
+    const staged = run([...start,b(2,100,101.2,98,101),b(3,101,101.2,100,100.8)], {
+        twRiskMode:'manual',twTakeProfitPerc:20,twStopLossPerc:5,useStagedProtection:true,
+        stagedLevels:[{on:true,trig:1,stop:.5},{on:false,trig:1.5,stop:1},{on:false,trig:2,stop:1.5}]
+    });
+    assert.equal(staged.trades[0].reason,'PROT');
+    assert.ok(Math.abs(staged.trades[0].exitPrice-100.5)<1e-9);
+    assert.doesNotThrow(() => run([...start,b(2,100,101,99,100)], { twRiskMode:'manual',twMinStopPerc:10,twMaxStopPerc:1 }));
+});
 test('TP, opening stop gap and opening target gap use chronological fills', () => {
     assert.equal(run([...start,b(2,100,107,98,102)]).trades[0].reason,'TP');
     const stopGap = run([...start,b(2,100,101,99,100),b(3,90,92,89,91)]).trades[0];
@@ -86,8 +99,9 @@ test('future suffix cannot modify a completed trade or its signal', () => {
     for (const key of ['entryTs','signalTs','entryPrice','sl','tp','exitPrice','pnlAbs','reason']) assert.equal(t1[key],t2[key]);
 });
 test('normalization preserves TW and does not silently apply classic filters', () => {
-    const p = normalizarParams({strategyType:'tw_mtf',useRsiFilter:true,allowMultipleEntries:true,twRewardRisk:3});
+    const p = normalizarParams({strategyType:'tw_mtf',useRsiFilter:true,allowMultipleEntries:true,twRewardRisk:3,useStagedProtection:true});
     assert.equal(p.twRewardRisk,3); assert.equal(p.useRsiFilter,false); assert.equal(p.allowMultipleEntries,false);
+    assert.equal(p.useStagedProtection,true);
     assert.equal(normalizarParams({}).strategyType,'classic');
     assert.equal(normalizarParams({}).useRsiFilter,true);
     assert.ok(warmupMs({...p,twMode:'double'})>warmupMs({...p,twMode:'rejection'}));
